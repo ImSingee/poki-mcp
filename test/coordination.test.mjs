@@ -4,6 +4,9 @@ import sharp from 'sharp';
 import { readFile, mkdir, writeFile, readdir, stat } from 'node:fs/promises';
 import { fixture, value } from './fixture.mjs';
 
+// These cover the pymobiledevice3 paths that replace devicectl on Linux.
+const linuxOnly = process.platform !== 'linux' && 'the pymobiledevice3 path runs on Linux';
+
 test('old element refs cannot be reinterpreted by a later element list',async t=>{
  const f=await fixture(t);const first=value(await f.call('list_elements'));
  await f.set({label:'Second'});const second=value(await f.call('list_elements'));
@@ -405,7 +408,7 @@ test('unknown container eligibility is decided by the copy service rather than r
 });
 
 
-test('container export pulls each container directory instead of the protected root',async t=>{
+test('container export pulls each container directory instead of the protected root', { skip: linuxOnly }, async t => {
  const f=await fixture(t,{approvalMode:'allow'});
  const downloaded=await f.call('download_app_container',{bundle_id:'local.fixture',destination:f.dir+'/exports'});
  assert.notEqual(downloaded.isError,true,downloaded.content[0].text);
@@ -987,7 +990,7 @@ test('application names reuse a per-device directory across sessions and refresh
 });
 
 
-test('terminate_app on a physical device kills only the app processes through DVT', async t => {
+test('terminate_app on a physical device kills only the app processes through DVT', { skip: linuxOnly }, async t => {
  const f=await fixture(t,{approvalMode:'allow'});
  const terminated=await f.call('terminate_app',{bundle_id:'local.fixture'});
  assert.ok(!terminated.isError,JSON.stringify(terminated));
@@ -1005,7 +1008,7 @@ test('terminate_app on a physical device kills only the app processes through DV
 });
 
 
-test('crash reports list and read back through the crash service on a physical device', async t => {
+test('crash reports list and read back through the crash service on a physical device', { skip: linuxOnly }, async t => {
  const f=await fixture(t,{approvalMode:'allow'});
  await f.set({crashReports:['/Fixture-2026-01-01-120000.ips','/Retired','/Retired/Old-2025-12-31-235959.ips','/Notes.log']});
  const listed=await f.call('list_crashes',{});

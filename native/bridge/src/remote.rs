@@ -935,7 +935,13 @@ mod tests {
     #[tokio::test]
     async fn unreachable_control_reports_each_address_and_its_os_error() {
         use tokio::net::TcpListener;
-        for (host, address) in [("127.0.0.1", "127.0.0.1"), ("fe80::1%lo0", "[fe80::1%lo0]")] {
+        // macOS gives its loopback interface the link-local fe80::1; Linux does not, and numbers
+        // the refused-connection error differently.
+        let mut cases = vec![("127.0.0.1", "127.0.0.1")];
+        if cfg!(target_os = "macos") {
+            cases.push(("fe80::1%lo0", "[fe80::1%lo0]"));
+        }
+        for (host, address) in cases {
             let listener = TcpListener::bind((host, 0)).await.unwrap();
             let port = listener.local_addr().unwrap().port();
             drop(listener);
@@ -960,7 +966,8 @@ mod tests {
             );
             assert!(
                 error.contains(&format!(
-                    "{address}:{port}: Connection refused (os error 61)"
+                    "{address}:{port}: Connection refused (os error {})",
+                    libc::ECONNREFUSED
                 )),
                 "{error}"
             );

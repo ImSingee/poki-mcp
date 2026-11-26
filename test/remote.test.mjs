@@ -14,6 +14,12 @@ import { readFileSync } from 'node:fs';
 const state = JSON.parse(readFileSync(process.env.FIXTURE_STATE, 'utf8'));
 console.log(state.approveClipboard ? 'done' : 'cancelled');
 `, { mode: 0o755 });
+    // On Linux the approval dialog is zenity, which answers by its exit status.
+    await writeFile(join(dir, 'bin/zenity'), `#!/usr/bin/env node
+import { readFileSync } from 'node:fs';
+const state = JSON.parse(readFileSync(process.env.FIXTURE_STATE, 'utf8'));
+process.exit(state.approveClipboard ? 0 : 1);
+`, { mode: 0o755 });
     await writeFile(join(dir, 'build/simulator'), `#!/usr/bin/env node
 import { readFileSync } from 'node:fs';
 const request = JSON.parse(readFileSync(0, 'utf8'));
