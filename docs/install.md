@@ -1,8 +1,6 @@
 # Install
 
-This guide installs Poki MCP from source, which needs full Xcode. Poki MCP is frozen for features and receives only targeted security maintenance. To put the Poki app on an iPhone,
-use the [install-poki skill](../skills/install-poki/SKILL.md) or Poki Setup instead, as the
-[README](../README.md#install-poki-on-your-iphone) describes; that path does not need Xcode.
+This guide installs Poki MCP from source on a Mac, which needs full Xcode.
 
 For remote access, see [Remote iPhone over LAN or Tailscale](remote-iphone.md). Both paths require initial trusted USB setup; cross-network access also requires Tailscale.
 
@@ -94,10 +92,10 @@ tool_timeout_sec = 900
 Paste this prompt into your agent:
 
 ```text
-Install https://github.com/JosssphZhou/poki following docs/install-with-an-agent.md, including the MCP skill, and stop whenever you need me to act.
+Install https://github.com/JosssphZhou/poki following its root AGENTS.md, including the MCP skill, and stop whenever you need me to act.
 ```
 
-[docs/install-with-an-agent.md](install-with-an-agent.md) covers prerequisites, source setup, the background daemon, registration in your own client, skill installation, iPhone pairing, Poki Agent, optional iMessage, and verification. It names each user-only stop, including Xcode setup, Trust This Computer, Developer Mode, UI Automation, and model login.
+[AGENTS.md](../AGENTS.md) covers prerequisites, source setup, the background daemon, registration in your own client, skill installation, iPhone pairing, Poki Agent, optional iMessage, and verification. It names each user-only stop, including Xcode setup, Trust This Computer, Developer Mode, UI Automation, and model login.
 
 The default MCP `tools/list` exposes the tools for phone tasks. `poki_mcp_status.total_tools` reports the size of the complete catalog. Set `POKI_MCP_TOOLS=all` in the client's environment and reconnect to discover the complete catalog. Read and report the actual values. Neither count proves that the phone is ready.
 
@@ -132,21 +130,3 @@ To use a physical iPhone, first pair it with your Mac over USB. After that, keep
 | `tap_text` cannot find English text | A new simulator uses the language of the Mac. Target the text as it appears on screen. |
 | Screenshots work, but touch fails with `no display service` | The developer disk image on the iPhone lacks the display service. See [Touch and text input fail](physical-iphone.md#touch-and-text-input-fail). |
 | `This device is not recording` from `bin/call.mjs` | A recording ends when its session closes. Record from one MCP client session. |
-
-## The iPhone app at a glance
-
-- Languages: English, Simplified Chinese and Traditional Chinese, following the iPhone's language.
-- On iOS 26 and later, with iOS's background task keeping Poki alive, the Live Activity shows only
-  while there is something to show (a task, an approval, a problem) and hides when Poki is idle.
-  When you leave Poki during a task, Poki swipes iOS's background banner up so it does not cover the app.
-- Where iOS asks for the passcode before automation (the XCTest session), it asks when you tap Start,
-  while you are there, not in the middle of a task. A session that fails to open is reopened by Poki itself.
-- Before an update installs, Poki ends its Live Activity and background task.
-- Settings is grouped into Setup, Models, Safety and Access (including Approvals and External
-  Connections), Memory Library, Signing & Updates (where the app updates itself), and Appearance.
-- How Poki picks its control method, and what happens without a loopback: see
-  [ios-loopback.md](ios-loopback.md#which-method-does-the-work).
-
-## Names and distribution
-
-The repository is `poki`. The command, the MCP server key, and the package name stay `poki-mcp`, because the npm name `poki` belongs to another project. `package.json` is marked `"private": true`; this repository is used from source and does not publish an npm package.

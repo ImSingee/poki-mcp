@@ -29,7 +29,7 @@
 // Each action is reported as sent, not_sent or unknown (it may have been delivered); an unknown one is
 // never sent again by us, and nothing after a failed action is sent. Element numbers not in the latest
 // read are refused before anything is sent. Actions and the wait after them get at most
-// POKI_CUA_ACTION_CAP_MS (4000). A locked or dark phone, or Poki's own app in front, stops dispatching.
+// POKI_CUA_ACTION_CAP_MS (4000). A locked or dark phone stops dispatching.
 import sharp from 'sharp';
 import { pause, stopped } from './work.mjs';
 import { wdaContext } from './cua-wda.mjs';
@@ -312,10 +312,9 @@ async function quiet(ctx, kind, budget) {
   return `${Math.round(performance.now() - started)} ms (${settled.settled ? 'quiet' : 'still moving'})`;
 }
 
-// What stops dispatching: a phone that is locked or dark, or Poki's own app in front.
+// What stops dispatching: a phone that is locked or dark.
 function holdReason(memory) {
   if (memory.lastNote && /dark|locked/i.test(memory.lastNote)) return 'the phone is locked or its display is off; unlock it';
-  if (/poki/i.test(memory.lastForeground?.bundle_id ?? '')) return "Poki's own app is in front";
   return undefined;
 }
 

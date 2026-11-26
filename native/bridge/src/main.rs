@@ -27,7 +27,7 @@ use stream::NoDisplayService;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 /// The bridge routes input, screenshots and accessibility reads to the active panel of a phone
-/// that has more than one. The launcher compiles the same files with this off.
+/// that has more than one.
 const ROUTES_BY_PANEL: bool = true;
 type Hid = UniversalHidServiceClient<Box<dyn ReadWrite>>;
 struct Touch {

@@ -1,74 +1,46 @@
 name: Bug report
-description: Something in Poki does not work as documented (iPhone app, Poki Setup, Poki MCP, or Poki Agent).
-labels: ["type:bug"]
+description: Something in Poki does not work as documented.
+labels: [bug]
 body:
   - type: markdown
     attributes:
-      value: |
-        Search [existing issues](https://github.com/JosssphZhou/poki/issues?q=is%3Aissue) first. To report a vulnerability, use [private reporting](https://github.com/JosssphZhou/poki/security/advisories/new).
-        If installing Poki failed, use the **Install failure** form. If the tools work but a task in an app fails, use **Task failure**.
-        Agents filing for a user: read [AGENTS.md](https://github.com/JosssphZhou/poki/blob/main/AGENTS.md#file-an-issue).
+      value: Remove passcodes, tokens, and private screen contents. To report a vulnerability, use [private reporting](https://github.com/JosssphZhou/poki/security/advisories/new).
   - type: textarea
-    id: problem
+    id: what
     attributes:
-      label: Problem description
-      description: Expected behavior versus actual behavior, including the exact error text.
+      label: What happened
+      description: What you expected, and what you saw instead.
     validations:
       required: true
   - type: textarea
     id: steps
     attributes:
       label: Steps to reproduce
-      description: The task or tool call and the response returned. Note whether you reproduced it more than once.
+      description: The task or tool call, and the response you got.
     validations:
       required: true
   - type: dropdown
-    id: area
+    id: component
     attributes:
-      label: Affected area in Poki
+      label: Component
       options:
-        - Poki iPhone app
         - Poki MCP
-        - Poki Agent, iMessage, or Telegram
-        - Installation or Poki Setup
-        - Other or not sure
+        - Poki Agent
     validations:
       required: true
-  - type: input
-    id: version
-    attributes:
-      label: Poki version
-      description: The app version from Settings (with build and channel), or the version and commit from `poki_mcp_status`.
-      placeholder: Poki 0.2.8 (501) Alpha, or 0.1.1 f4fd51e
-    validations:
-      required: true
-  - type: input
+  - type: dropdown
     id: device
     attributes:
-      label: iPhone model and iOS version
-      placeholder: iPhone 17 Pro, iOS 27.3
-    validations:
-      required: true
-  - type: dropdown
-    id: connection
-    attributes:
-      label: Connection method
+      label: Device
       options:
-        - Physical iPhone over USB
-        - Physical iPhone over LAN (RemotePairing)
-        - Physical iPhone over Tailscale or VPN
+        - Physical iPhone
         - iOS Simulator
-        - Not device-related
     validations:
       required: true
-  - type: textarea
-    id: logs
+  - type: input
+    id: versions
     attributes:
-      label: Logs
-      description: Log lines around the failure (in the app, go to Settings > Diagnostics > Copy Log). Redact personal information such as tokens, account names, and message text first.
-      render: text
-  - type: textarea
-    id: media
-    attributes:
-      label: Screenshots or screen recording
-      description: Drag files here. Redact personal information before uploading.
+      label: Versions
+      description: Poki commit, macOS, Xcode, and iOS.
+    validations:
+      required: true

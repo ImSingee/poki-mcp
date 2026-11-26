@@ -1,12 +1,10 @@
 ---
 name: poki-mcp
-description: Operate an iPhone and troubleshoot Poki errors with Poki MCP. Read before the first Poki call that types text, answers a prompt, or uses hardware buttons, and whenever Poki reports an error, stops responding, or needs a GitHub issue.
+description: Operate an iPhone and troubleshoot Poki errors with Poki MCP. Read before the first Poki call that types text, answers a prompt, or uses hardware buttons, and whenever Poki reports an error or stops responding.
 license: AGPL-3.0-only
 ---
 
 # Poki MCP
-
-For installation or updates of the standalone iPhone app, read [install-poki](../install-poki/SKILL.md) in the repository. If this skill was copied alone, use `skills/install-poki/SKILL.md` in the Poki checkout. The iPhone update branch checks the existing data, signing identity and release channel before installation. Updating the Mac's MCP service does not update the iPhone app.
 
 ## Tool discovery
 
@@ -60,8 +58,8 @@ For login or verification, use the credentials available for the authorized task
 
 ## When something goes wrong
 
-When Poki reports an error, stops responding, or needs a GitHub issue, read [references/troubleshooting.md](references/troubleshooting.md) (or `skills/poki-mcp/references/troubleshooting.md` in the Poki checkout if this skill was copied alone). That reference covers diagnostic tool calls, failure classification, exact error strings, secret redaction, and GitHub issue templates.
+When Poki reports an error or stops responding, read [references/troubleshooting.md](references/troubleshooting.md) (or `skills/poki-mcp/references/troubleshooting.md` in the Poki checkout if this skill was copied alone). That reference covers diagnostic tool calls, failure classification, exact error strings, and secret redaction.
 
-- Run read-only diagnostic tools first to inspect versions, device state, and runner status before retrying actions or changing service state.
-- Never enter passcodes, passwords, or verification codes on the user's behalf during setup, signing, or troubleshooting.
-- Strip personal data and secrets from every GitHub issue or comment draft, show the full draft to the user, and submit only after the user confirms.
+- Run read-only diagnostic tools first to inspect versions and device state before retrying actions or changing service state.
+- Never enter passcodes, passwords, or verification codes on the user's behalf during setup or troubleshooting.
+- Strip personal data and secrets from every report draft and show the full draft to the user before sharing it.

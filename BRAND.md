@@ -12,17 +12,15 @@ The Poki bear is the character at the center of Poki, and the main thing this fi
 
 | What | Where |
 | --- | --- |
-| Illustrations, poses and expressions | The `.png` files in [`native/ios-app/Poki/Bear/`](native/ios-app/Poki/Bear) and its `Model/` folder, the `.png` files in [`native/ios-app/Poki/ActivityBears/`](native/ios-app/Poki/ActivityBears), [`native/ios-app/Poki/LaunchArt/LaunchBear.png`](native/ios-app/Poki/LaunchArt/LaunchBear.png), and [`native/ios-app/Poki/Chat/PokiFace.png`](native/ios-app/Poki/Chat/PokiFace.png) |
-| 3D model | [`native/ios-app/Poki/Bear/Model/PokiBear.usdz`](native/ios-app/Poki/Bear/Model/PokiBear.usdz) |
+| Illustrations, poses, expressions and the 3D model | Upstream [JosssphZhou/poki](https://github.com/JosssphZhou/poki); this fork does not include them |
 | Artwork, animations and videos of the bear on the Poki website and in Poki's release posts | Outside this repository |
 
 ## Other brand assets
 
 | What | Where |
 | --- | --- |
-| The Poki app icon, light and dark | [`docs/images/poki-app-icon.png`](docs/images/poki-app-icon.png) |
 | The earlier Poki icon | [`docs/images/poki-icon.png`](docs/images/poki-icon.png) |
-| Promotional images and animations | [`docs/images/poki-home.gif`](docs/images/poki-home.gif), [`docs/images/poki-order-demo.gif`](docs/images/poki-order-demo.gif), [`docs/images/poki-hero.gif`](docs/images/poki-hero.gif), [`docs/images/poki-hero.zh-CN.gif`](docs/images/poki-hero.zh-CN.gif), [`docs/images/why-1-errands.png`](docs/images/why-1-errands.png), [`docs/images/why-2-routines.png`](docs/images/why-2-routines.png), [`docs/images/why-3-standalone.png`](docs/images/why-3-standalone.png), [`docs/images/roadmap.png`](docs/images/roadmap.png), [`docs/images/roadmap.zh-CN.png`](docs/images/roadmap.zh-CN.png) |
+| Promotional images and animations | [`docs/images/poki-home.gif`](docs/images/poki-home.gif), [`docs/images/roadmap.png`](docs/images/roadmap.png), [`docs/images/roadmap.zh-CN.png`](docs/images/roadmap.zh-CN.png) |
 
 In this file, "brand assets" means the Poki bear and everything in the two tables above.
 
@@ -31,7 +29,7 @@ In this file, "brand assets" means the Poki bear and everything in the two table
 This file does not claim anything that belongs to someone else, and it does not restrict the code.
 
 - **Source code.** All code in this repository, including the user interface code and the code and animation data next to the bear's pictures (`.swift`, `.json`), stays under the AGPL-3.0-only license, or under the license of the project it came from.
-- **Third-party material.** Other apps' icons (`native/ios-app/Poki/AppIcons/`, `native/ios-app/Poki/ProxyIcons/`), AI provider logos (`native/ios-app/Poki/ProviderIcons/`), the Geist and Allo fonts, contributors' profile pictures in `docs/images/acknowledgments.png`, and the code and designs listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) belong to their owners and keep their own terms.
+- **Third-party material.** Contributors' profile pictures in `docs/images/acknowledgments.png`, and the code and designs listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) belong to their owners and keep their own terms.
 - **Earlier copies.** This notice applies from the commit that adds it. It does not change the terms of copies published before that commit.
 
 ## What you can do without asking
