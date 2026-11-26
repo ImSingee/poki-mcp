@@ -8,6 +8,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const run = promisify(execFile);
+const macOnly = process.platform !== 'darwin' && 'the Xcode image path runs on macOS';
+const linuxOnly = process.platform !== 'linux' && 'the pymobiledevice3 path runs on Linux';
 const script = fileURLToPath(new URL('../bin/prepare-device.mjs', import.meta.url));
 const panic = (line, detail) => `thread 'main' panicked at tools/src/cryptexd.rs:${line}:18:\n${detail}\nnote: run with \`RUST_BACKTRACE=1\` environment variable to display a backtrace`;
 const failures = [
@@ -17,7 +19,7 @@ const failures = [
 ];
 
 for (const [name, output, explanation] of failures) {
-  test(`prepare-device explains ${name} instead of printing the installer panic`, async t => {
+  test(`prepare-device explains ${name} instead of printing the installer panic`, { skip: macOnly }, async t => {
     const dir = await mkdtemp(join(tmpdir(), 'poki-prepare-'));
     t.after(() => rm(dir, { recursive: true, force: true }));
     const image = join(dir, 'Restore');
@@ -39,7 +41,7 @@ for (const [name, output, explanation] of failures) {
   });
 }
 
-test('prepare-device sends the user to Finder when usbmuxd answers with no device', async t => {
+test('prepare-device sends the user to Finder when usbmuxd answers with no device', { skip: macOnly }, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'poki-prepare-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   await mkdir(join(dir, 'bin'));
@@ -49,4 +51,43 @@ test('prepare-device sends the user to Finder when usbmuxd answers with no devic
   assert.equal(failed.code, 1);
   assert.match(failed.stderr, /Finder sidebar/);
   assert.match(failed.stderr, /devicectl reaches only over the network/);
+});
+
+test('prepare-device names usbmuxd, not Finder, on Linux when no device is attached', { skip: linuxOnly }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'poki-prepare-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(join(dir, 'bin'));
+  await writeFile(join(dir, 'bin/python3'), `#!/bin/sh\necho '[]'\n`, { mode: 0o755 });
+  const env = { ...process.env, PATH: `${join(dir, 'bin')}:${process.env.PATH}`, IDEVICE_TOOLS: join(dir, 'bin/idevice') };
+  const failed = await run(process.execPath, [script], { env }).then(() => assert.fail('preparation succeeded'), error => error);
+  assert.equal(failed.code, 1);
+  assert.match(failed.stderr, /usbmuxd/);
+  assert.doesNotMatch(failed.stderr, /Finder|devicectl/);
+});
+
+// The fake pymobiledevice3 "mounts" the image by creating a marker; the fake idevice then lists
+// displayservice. A pymobiledevice3 that changes nothing leaves the service missing.
+async function linuxPhone(t, { mounts }) {
+  const dir = await mkdtemp(join(tmpdir(), 'poki-prepare-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(join(dir, 'bin'));
+  const marker = join(dir, 'mounted');
+  await writeFile(join(dir, 'bin/python3'), `#!/bin/sh\necho '[{"id":"fixture-phone","connection":"USB"}]'\n`, { mode: 0o755 });
+  await writeFile(join(dir, 'bin/idevice'), `#!/bin/sh\nif [ -e "${marker}" ]; then echo com.apple.coredevice.displayservice; else echo com.apple.dt.testmanagerd.remote; fi\n`, { mode: 0o755 });
+  await writeFile(join(dir, 'bin/pymobiledevice3'), `#!/bin/sh\n[ "$1 $2" = "cryptex auto-install" ] || exit 2\n${mounts ? `touch "${marker}"` : 'true'}\n`, { mode: 0o755 });
+  return { ...process.env, PATH: `${join(dir, 'bin')}:${process.env.PATH}`, IDEVICE_TOOLS: join(dir, 'bin/idevice'), POKI_PYMOBILEDEVICE3: join(dir, 'bin/pymobiledevice3') };
+}
+
+test('prepare-device mounts the image through pymobiledevice3 on Linux', { skip: linuxOnly }, async t => {
+  const env = await linuxPhone(t, { mounts: true });
+  const { stdout } = await run(process.execPath, [script, 'fixture-phone'], { env });
+  assert.match(stdout, /now exposes displayservice/);
+});
+
+test('prepare-device explains a Linux mount that leaves displayservice missing', { skip: linuxOnly }, async t => {
+  const env = await linuxPhone(t, { mounts: false });
+  const failed = await run(process.execPath, [script, 'fixture-phone'], { env }).then(() => assert.fail('preparation succeeded'), error => error);
+  assert.equal(failed.code, 1);
+  assert.match(failed.stderr, /displayservice is still unavailable/);
+  assert.doesNotMatch(failed.stderr, /ReferenceError|at file:/);
 });

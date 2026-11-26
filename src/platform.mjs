@@ -1,5 +1,6 @@
 import { nativeRequest } from './remote.mjs';
 import { flagOn } from './element-flags.mjs';
+import { containsImage } from './uti.mjs';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { execute, pause, checkWork, signal, deadline, stopped, stoppingReason, phase } from './work.mjs';
@@ -883,7 +884,9 @@ export async function platformTool(ctx, name, args = {}) {
         text = result.stdout;
         types = [...listing.stdout.matchAll(/^\[\d+\] ([^:]+):/gm)].map(match => match[1]);
       }
-      const imageInfo = JSON.parse((await platformRun(join(root, 'build/simulator'), [], { input: JSON.stringify({ op: 'image_types', types }) })).stdout);
+      // build/simulator asks macOS's UTType registry; off macOS the known image types answer instead.
+      const imageInfo = isLinux ? { contains_image: containsImage(types) }
+        : JSON.parse((await platformRun(join(root, 'build/simulator'), [], { input: JSON.stringify({ op: 'image_types', types }) })).stdout);
       return { text, ...imageInfo, types };
     }
     case 'set_clipboard': {

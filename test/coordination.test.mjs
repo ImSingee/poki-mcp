@@ -115,11 +115,12 @@ test('cancel interrupts the human dialog process and never executes the approved
 });
 
 
-test('list_devices sends the user to Finder when usbmuxd answers with no device',async t=>{
+test('list_devices names the host check when usbmuxd answers with no device',async t=>{
  const f=await fixture(t);await f.set({simulatorOnly:true,simulatorBooted:true});
  const listed=value(await f.call('list_devices'));
  assert.deepEqual(listed.devices.map(d=>d.id),['fixture-sim']);
- assert.match(listed.notice,/Finder sidebar/);assert.match(listed.notice,/devicectl reaches only over the network/);
+ if(process.platform==='linux'){assert.match(listed.notice,/usbmuxd service is running/);assert.doesNotMatch(listed.notice,/Finder|devicectl/);}
+ else{assert.match(listed.notice,/Finder sidebar/);assert.match(listed.notice,/devicectl reaches only over the network/);}
  await f.set({simulatorOnly:false});
  assert.equal(value(await f.call('list_devices')).notice,undefined);
 });
