@@ -1,9 +1,16 @@
-import { Worker } from 'node:worker_threads';
+import { fork } from 'node:child_process';
+import { once } from 'node:events';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { deadline, checkWork, signal, stoppingReason } from './work.mjs';
 import { invalidStep, stepTool, stopsRun } from './batch.mjs';
 import { normalizeCode } from './normalize.mjs';
 
-const workerUrl = new URL('./run-code-worker.mjs', import.meta.url);
+const workerPath = realpathSync(fileURLToPath(new URL('./run-code-worker.mjs', import.meta.url)));
+// The script runs in a child process under Node's permission model: it may read only its own file,
+// and it gets no child processes, workers, network, addons or environment. The vm context inside
+// it is the first boundary; this is the second, for whatever finds a way out of the first.
+const sandboxArgs = ['--permission', `--allow-fs-read=${workerPath}`, '--max-old-space-size=256'];
 // A receipt with sent=false or an unknown outcome stops the script, and so does any stop_reason that
 // stops a batch (stopsRun): cancellation, timeout, expiry. Everything else is an ordinary tool error
 // the script can catch and work around.
@@ -18,7 +25,7 @@ const stopAdvice = {
 const json = value => ({ type: 'text', text: JSON.stringify(value, null, 2) });
 const cap = text => typeof text === 'string' && text.length > 2000 ? `${text.slice(0, 2000)}…` : text;
 
-// Buffers every worker event so none is lost in the gap between handling one tool call and waiting
+// Buffers every sandbox event so none is lost in the gap between handling one tool call and waiting
 // for the next, and rejects a pending wait when the run's signal aborts (cancel, timeout, deadline).
 function mailbox(worker, abort) {
   const queue = [];
@@ -50,14 +57,16 @@ export async function runCode(ctx, args) {
 
 async function drive(ctx, code, input, maxCalls) {
   const abort = signal();
-  // The worker gets an empty environment, so the daemon's variables (a model key, a configured
-  // passcode) are not there to read even if a script found a way out of its context.
-  const worker = new Worker(workerUrl, { workerData: { code, inputJson: JSON.stringify(input ?? null) }, env: {}, resourceLimits: { maxOldGenerationSizeMb: 256 } });
+  // An empty environment: the daemon's variables (a model key, a configured passcode) are not there
+  // to read even if a script found a way out of its context.
+  const worker = fork(workerPath, [], { execArgv: sandboxArgs, env: {}, stdio: ['ignore', 'ignore', 'ignore', 'ipc'], serialization: 'json' });
   const box = mailbox(worker, abort);
+  const post = message => { if (worker.connected) worker.send(message, () => {}); };
+  post({ type: 'start', code, inputJson: JSON.stringify(input ?? null) });
   const calls = [];
   const logs = [];
   const base = () => ({ completed_calls: calls.length, calls, ...(logs.length ? { logs } : {}) });
-  const reply = (id, payload) => worker.postMessage({ type: 'result', id, resultJson: JSON.stringify(payload) });
+  const reply = (id, payload) => post({ type: 'result', id, resultJson: JSON.stringify(payload) });
   // A failed call is listed and its error thrown inside the script, which may catch it.
   const failed = (id, call, error) => { calls.push({ call: calls.length + 1, ...call }); reply(id, { error }); };
   // An interrupted call is listed with the calls before it, so the report names what was cut off.
@@ -111,7 +120,11 @@ async function drive(ctx, code, input, maxCalls) {
     }
   } finally {
     box.close();
-    await worker.terminate();
+    if (worker.exitCode === null && worker.signalCode === null) {
+      const exited = once(worker, 'exit');
+      worker.kill('SIGKILL');
+      await exited;
+    }
     await ctx.endInputGroup?.();
   }
   const reason = summary.stop_reason ?? (summary.script_error !== undefined ? 'error' : undefined);

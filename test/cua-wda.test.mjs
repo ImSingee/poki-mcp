@@ -5,6 +5,7 @@ import { once } from 'node:events';
 import sharp from 'sharp';
 import { Devices } from '../src/device.mjs';
 import { wdaContext } from '../src/cua-wda.mjs';
+import { Coordination } from '../src/coordination.mjs';
 
 // A stand-in for WebDriverAgent on a phone: W3C sessions plus the WDA routes the backend uses, over
 // a two-screen app (a home screen with its icon, a note with a title field).
@@ -168,4 +169,25 @@ test('a WebDriverAgent capture after the phone rotates uses the new screen size'
   assert.deepEqual(await sharp(turned.data).metadata().then(m => [m.width, m.height]), [400, 200]);
   assert.deepEqual([view.size.width, view.size.height], [400, 200], 'inputs use the new size as well');
   assert.equal(wda.state.screenReads, 2, 'the size is read again only when the orientation changed');
+});
+
+// A lease on the phone has to hold on the WebDriverAgent backend too: another session's look or do
+// is refused before any request reaches WDA, as it is on the bridge.
+test('a device lease excludes other sessions on the WebDriverAgent backend', { timeout: 20000 }, async t => {
+  const wda = await fakeWda(t);
+  const saved = { backend: process.env.POKI_CUA_BACKEND, url: process.env.POKI_WDA_URL };
+  process.env.POKI_CUA_BACKEND = 'wda'; process.env.POKI_WDA_URL = wda.url;
+  t.after(() => { for (const [k, v] of [['POKI_CUA_BACKEND', saved.backend], ['POKI_WDA_URL', saved.url]]) if (v === undefined) delete process.env[k]; else process.env[k] = v; });
+  const coordinator = new Coordination();
+  const owner = new AnyPhone(coordinator), other = new AnyPhone(coordinator);
+  const lease = await owner.call('acquire_device', { device: 'phone-1' });
+  assert.notEqual(lease.isError, true, text(lease));
+  const before = wda.state.calls.length;
+  for (const [tool, args] of [['look', {}], ['do', { actions: [{ tap: [45, 105] }] }]]) {
+    const refused = await other.call(tool, args);
+    assert.equal(refused.isError, true, `${tool}: ${text(refused)}`);
+    assert.match(text(refused), /occupied/i, tool);
+  }
+  assert.equal(wda.state.calls.length, before, 'nothing reached WebDriverAgent for the other session');
+  assert.match(text(await owner.call('look', {})), /^app: SpringBoard/m, 'the owner keeps using the phone');
 });

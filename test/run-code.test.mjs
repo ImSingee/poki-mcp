@@ -77,6 +77,43 @@ test('run_code keeps the worker realm out of reach of the script', async t => {
   }
 });
 
+// The bridge to the daemon must not hand script code anything of the sandbox process's own realm:
+// an exception thrown by a bridge function, or a resolver passed to a thenable the script returns,
+// leads through its constructor to that realm's Function. Each script reports what it reached.
+test('run_code passes no host function or exception to the script', async t => {
+  const f = await fixture(t);
+  const scripts = [
+    // A replaced String makes console hand the bridge a function, so postMessage would throw.
+    `async () => { const S = String; String = () => (() => {}); try { console.log('x'); } catch (error) { try { return { escaped: S(error.constructor.constructor('return process')().pid) }; } catch {} } return { blocked: true }; }`,
+    // JSON.stringify replaced to return a function for the tool arguments.
+    `async () => { const S = String, J = JSON.stringify; JSON.stringify = () => (() => {}); try { await tools.list_elements(); } catch (error) { try { const pid = error.constructor.constructor('return process')().pid; JSON.stringify = J; return { escaped: S(pid) }; } catch {} } JSON.stringify = J; return { blocked: true }; }`,
+    // A thenable result: whoever awaits it hands it their resolve and reject functions.
+    `() => ({ then(resolve) { try { resolve({ escaped: String(resolve.constructor('return process')().pid) }); } catch (error) { resolve({ blocked: String(error) }); } } })`,
+    // A thrown object whose message getter probes its caller.
+    `async () => { throw { get message() { return (function () { return typeof process; })(); } }; }`,
+  ];
+  for (const script of scripts) {
+    const summary = summaryOf(await runCode(f, script));
+    assert.equal(summary.result?.escaped, undefined, `${script} reached the host: ${JSON.stringify(summary)}`);
+  }
+  assert.equal(value(await f.call('wait', { seconds: 0 })).waited, 0);
+});
+
+// Even a script that found a way out of its context would land in a process that may not read files,
+// start programs or see the daemon's environment.
+test('run_code runs in a process that may not read files or start programs', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('../src/run-code.mjs', import.meta.url), 'utf8');
+  assert.match(source, /--permission/);
+  assert.doesNotMatch(source, /--allow-(child-process|worker|addons|net|wasi)/);
+  const probe = spawnSync(process.execPath, ['--permission', '--allow-fs-read=' + process.execPath, '-e', `
+    const tries = { fs: () => require('node:fs').readFileSync('/etc/hosts'), exec: () => require('node:child_process').execSync('true') };
+    const out = {}; for (const [k, f] of Object.entries(tries)) { try { f(); out[k] = 'allowed'; } catch (e) { out[k] = e.code; } }
+    console.log(JSON.stringify(out));`], { encoding: 'utf8', env: {} });
+  assert.deepEqual(JSON.parse(probe.stdout), { fs: 'ERR_ACCESS_DENIED', exec: 'ERR_ACCESS_DENIED' }, probe.stderr);
+});
+
 // A return value JSON cannot carry ends as a script error that keeps the call list, not a parse failure.
 test('run_code reports a return value that is not JSON as a script error and keeps its calls', async t => {
   const f = await fixture(t);

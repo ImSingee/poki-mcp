@@ -100,14 +100,31 @@ export function wdaContext(ctx, url = process.env.POKI_WDA_URL) {
   const view = Object.create(ctx);
   Object.assign(view, {
     wda, size: undefined, cua: undefined, typesEverything: true,
-    async target() { return { id: 'wda', kind: 'physical', name: 'WebDriverAgent' }; },
+    // The phone WDA drives is the session's device, resolved and checked the way the bridge's is: a
+    // lease another session holds refuses the call, and the operation records the device it used.
+    // Only a host that sees no iPhone at all (WDA reached over the network alone) falls back to an
+    // identity of the WDA address, which is coordinated the same way.
+    async target() {
+      try {
+        const device = await ctx.target();
+        if (device.kind !== 'physical') throw new Error('POKI_CUA_BACKEND=wda drives a physical iPhone; select it with select_device.');
+        return device;
+      } catch (error) {
+        if (!/^No device is connected/.test(error.message)) throw error;
+        const standalone = { id: `wda:${wda.url}`, kind: 'physical', name: 'WebDriverAgent' };
+        ctx.access(standalone);
+        return standalone;
+      }
+    },
     liveScreen() { return undefined; },
     async screenSize() {
+      await view.target();
       // /wda/screen needs no session; a session's window size fails once the app it was opened on is gone.
       if (!view.size) { const s = (await wda.raw('GET', '/wda/screen')).screenSize; view.size = { device: 'wda', width: s.width, height: s.height }; }
       return view.size;
     },
     async capture() {
+      await view.target();
       const [png, cached] = await Promise.all([wda.call('GET', '/screenshot'), view.screenSize()]);
       // WDA's screenshot is in device pixels. OCR reads boxes in pixels of frame.data and cua uses them
       // as points, so the image is scaled to the screen's points, as a bridge capture is.
@@ -120,6 +137,7 @@ export function wdaContext(ctx, url = process.env.POKI_WDA_URL) {
       return { id: String(Date.now()), device: 'wda', width: size.width, height: size.height, scale: meta.width / size.width, data, original, at: Date.now() };
     },
     async bridge(request) {
+      await view.target();
       if (request.op === 'ax') {
         // cua's read asks for this and the screenshot together, so each read gets a tree of its own.
         return readSource(wda);
@@ -135,6 +153,7 @@ export function wdaContext(ctx, url = process.env.POKI_WDA_URL) {
     },
     // Inputs answer like the bridge's: sent, or isError with outcome not_sent or unknown.
     async input(request) {
+      await view.target();
       try {
         await send(wda, request, () => view.screenSize());
         return { sent: true };
