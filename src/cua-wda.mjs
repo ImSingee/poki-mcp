@@ -8,6 +8,7 @@
 // WDA says it is gone.
 
 import sharp from 'sharp';
+import { checkWork, signal, stopped } from './work.mjs';
 
 const json = value => JSON.stringify(value);
 const truthy = value => value === true || value === 1 || value === '1' || value === 'true';
@@ -21,10 +22,15 @@ class Wda {
     this.url = String(url).replace(/\/+$/, ''); this.fetch = fetcher; this.timeoutMs = timeoutMs;
   }
   async raw(method, path, body, timeoutMs = this.timeoutMs) {
+    // The operation's own signal (a cancel, a lease that expired) ends the request as well as the
+    // timeout does, and a cancelled operation sends nothing more.
+    checkWork();
+    const operation = signal(), timeout = AbortSignal.timeout(timeoutMs);
     let response;
     try {
-      response = await this.fetch(`${this.url}${path}`, { method, headers: body === undefined ? {} : { 'content-type': 'application/json' }, body: body === undefined ? undefined : json(body), signal: AbortSignal.timeout(timeoutMs) });
+      response = await this.fetch(`${this.url}${path}`, { method, headers: body === undefined ? {} : { 'content-type': 'application/json' }, body: body === undefined ? undefined : json(body), signal: operation ? AbortSignal.any([operation, timeout]) : timeout });
     } catch (error) {
+      if (operation?.aborted) throw operation.reason;
       // Refused: the runner is down, and nothing reached the phone. It is reported, not retried.
       if (error.cause?.code === 'ECONNREFUSED') throw new WdaError(`WebDriverAgent is not running at ${this.url} (connection refused); its serve-mode launcher has to be up`, { delivered: 'not_sent' });
       // No answer: the request may or may not have reached the phone.
@@ -129,6 +135,7 @@ export function wdaContext(ctx, url = process.env.POKI_WDA_URL) {
         await send(wda, request, () => view.screenSize());
         return { sent: true };
       } catch (error) {
+        if (stopped(error)) throw error;
         return { isError: true, error: error.message, outcome: error.delivered ?? 'unknown' };
       }
     },

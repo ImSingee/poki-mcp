@@ -29,6 +29,7 @@ async function fakeWda(t) {
     if (path === '/screenshot') return send(png);
     if (path.startsWith('/source')) { assert.match(req.url, /excluded_attributes=visible/); return send(tree()); }
     if (path === '/wda/activeAppInfo') return send(state.page === 'home' ? { bundleId: 'com.apple.springboard', name: 'SpringBoard', pid: 30 } : { bundleId: 'local.jot', name: '', pid: 700 });
+    if (path === '/wda/tap' && state.tapDelayMs) { state.taps = (state.taps ?? 0) + 1; await new Promise(done => setTimeout(done, state.tapDelayMs)); }
     if (path === '/wda/tap') { if (state.page === 'home' && args.x >= 20 && args.x <= 70 && args.y >= 80 && args.y <= 130) state.page = 'note'; else if (state.page === 'note' && args.y >= 50 && args.y <= 80) state.focused = true; return send(null); }
     if (path === '/wda/keys') { if (state.focused) for (const key of args.value) state.title = key === '\b' ? state.title.slice(0, -1) : state.title + key; return send(null); }
     if (path === '/element/active') return send({ ELEMENT: 'field-1' });
@@ -132,4 +133,24 @@ test('a WebDriverAgent screenshot is scaled to the screen size in points', { tim
   assert.deepEqual([meta.width, meta.height], [200, 400], 'the image matches the frame size');
   assert.equal(frame.scale, 2);
   assert.deepEqual(await sharp(frame.original).metadata().then(m => [m.width, m.height]), [400, 800], 'the full-resolution capture is kept');
+});
+
+// Cancelling do (or a lease expiring) has to reach the HTTP requests: a tap WDA is still answering is
+// abandoned, and no action after it is sent.
+test('cancelling do on WebDriverAgent abandons the request in flight and sends nothing after it', { timeout: 20000 }, async t => {
+  const wda = await fakeWda(t);
+  const saved = { backend: process.env.POKI_CUA_BACKEND, url: process.env.POKI_WDA_URL };
+  process.env.POKI_CUA_BACKEND = 'wda'; process.env.POKI_WDA_URL = wda.url;
+  t.after(() => { for (const [k, v] of [['POKI_CUA_BACKEND', saved.backend], ['POKI_WDA_URL', saved.url]]) if (v === undefined) delete process.env[k]; else process.env[k] = v; });
+  const phone = new AnyPhone();
+  await phone.call('look', {});
+  wda.state.tapDelayMs = 3000;
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(new DOMException('Request cancelled', 'AbortError')), 300);
+  const started = performance.now();
+  const done = await phone.call('do', { actions: [{ tap: [45, 105] }, { tap: [170, 105] }, { tap: [100, 300] }] }, controller.signal).catch(error => ({ thrown: error }));
+  assert.ok(performance.now() - started < 2500, 'the call ends without waiting for the slow tap');
+  assert.ok(done.thrown || done.isError, JSON.stringify(done));
+  await new Promise(r => setTimeout(r, 3500));
+  assert.equal(wda.state.taps, 1, 'only the tap in flight reached WebDriverAgent');
 });

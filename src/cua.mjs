@@ -196,11 +196,20 @@ async function savedClipboard(ctx) {
     return typeof text === 'string' ? { text } : undefined;
   } catch (error) { if (stopped(error)) throw error; return undefined; }
 }
-async function restoreClipboard(ctx, saved) {
+// Put the saved clipboard back after a paste, unless someone copied something newer meanwhile. The
+// bridge's paste restores the clipboard itself and says how it went; without that answer, only a
+// clipboard that still holds the pasted text is put back.
+async function restoreClipboard(ctx, saved, pasted, receipt) {
+  const status = receipt?.clipboard_restore_status;
+  if (status === 'restored') return 'restored';
+  if (status === 'clipboard_changed') return 'left alone: it changed during the paste';
+  if (status === 'retained_pending_paste') return 'kept the pasted text for a paste still in progress';
   if (saved.empty) return 'was empty';
   try {
     const { text } = await ctx.bridge({ op: 'pasteboard', action: 'get' });
-    if (text !== saved.text) await ctx.bridge({ op: 'pasteboard', action: 'set', text: saved.text });
+    if (text === saved.text) return 'restored';
+    if (text !== pasted) return 'left alone: it changed during the paste';
+    await ctx.bridge({ op: 'pasteboard', action: 'set', text: saved.text });
     return 'restored';
   } catch (error) { if (stopped(error)) throw error; return 'restore failed'; }
 }
@@ -222,9 +231,9 @@ async function typeText(ctx, text, clear = false) {
   if (!/cannot type|unknown variant|at most 2000/i.test(String(typed?.error ?? ''))) { const e = new Error(`typing failed part way (${typed?.error ?? 'no answer'}); not pasted, so the text is not entered twice`); e.delivery = 'unknown'; throw e; }
   const saved = await savedClipboard(ctx);
   if (!saved) { const e = new Error('the keyboard cannot type this text, and the clipboard cannot be saved and put back, so it was not pasted over'); e.delivery = 'not_sent'; throw e; }
-  let restored;
-  try { await send(ctx, { op: 'type_text', text, clear, submit: false }); }
-  finally { restored = await restoreClipboard(ctx, saved); }
+  let restored, receipt;
+  try { receipt = await send(ctx, { op: 'type_text', text, clear, submit: false }); }
+  finally { restored = await restoreClipboard(ctx, saved, text, receipt); }
   return `pasted, clipboard ${restored}`;
 }
 

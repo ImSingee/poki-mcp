@@ -16,7 +16,8 @@ export function normalizeCode(code) {
   try { ast = acorn.parse(source, { ecmaVersion: 'latest', sourceType: 'module', allowAwaitOutsideFunction: true, allowReturnOutsideFunction: true }); }
   catch { return `async () => {\n${source}\n}`; }
   const [first] = ast.body, last = ast.body.at(-1);
-  if (ast.body.length === 1 && first.type === 'ExpressionStatement' && first.expression.type === 'ArrowFunctionExpression') return source;
+  // The expression alone: the worker wraps it in parentheses, where a trailing semicolon is a syntax error.
+  if (ast.body.length === 1 && first.type === 'ExpressionStatement' && first.expression.type === 'ArrowFunctionExpression') return source.slice(first.expression.start, first.expression.end);
   if (ast.body.length === 1 && first.type === 'ExportDefaultDeclaration') {
     const declaration = first.declaration, inner = source.slice(declaration.start, declaration.end);
     if (declaration.type === 'FunctionDeclaration' && !declaration.id) return `async () => {\nreturn (${inner})();\n}`;

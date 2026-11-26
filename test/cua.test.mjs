@@ -44,7 +44,7 @@ class JotPhone extends Devices {
     if (request.op === 'pasteboard') {
       if (request.action === 'items') return { items: this.clipboard.items };
       if (request.action === 'get') return { text: this.clipboard.text };
-      if (request.action === 'set') { this.clipboard = { items: [{ uti: 'public.utf8-plain-text', state: 'inline' }], text: request.text }; return { copied: true }; }
+      if (request.action === 'set') { this.clipboardSets = (this.clipboardSets ?? 0) + 1; this.clipboard = { items: [{ uti: 'public.utf8-plain-text', state: 'inline' }], text: request.text }; return { copied: true }; }
     }
     this.sent.push(request.op);
     // Simulate an older/partial bridge response that cannot confirm input delivery.
@@ -60,7 +60,14 @@ class JotPhone extends Devices {
       if (!this.app.focused) return { sent: true };
       this.app.title = (request.clear ? '' : this.app.title) + request.text; return { sent: true };
     }
-    if (request.op === 'type_text') { this.clipboard = { items: [{ uti: 'public.utf8-plain-text', state: 'inline' }], text: request.text }; this.app.title = request.clear ? request.text : this.app.title + request.text; return { sent: true, clipboard_restore_status: 'unavailable' }; }
+    if (request.op === 'type_text') {
+      const before = this.clipboard;
+      this.clipboard = { items: [{ uti: 'public.utf8-plain-text', state: 'inline' }], text: request.text }; this.app.title = request.clear ? request.text : this.app.title + request.text;
+      // Someone copies something else while the paste is in progress.
+      if (this.copiedDuringPaste !== undefined) this.clipboard = { items: [{ uti: 'public.utf8-plain-text', state: 'inline' }], text: this.copiedDuringPaste };
+      else if (this.restoreStatus === 'restored') this.clipboard = before;
+      return { sent: true, clipboard_restore_status: this.restoreStatus ?? 'unavailable' };
+    }
     if (request.op === 'drag') { const dy = (request.y2 - request.y1) / 65535 * (H - 1); this.app.offset = Math.max(-30 * 40 + 260, Math.min(0, this.app.offset + Math.round(dy))); return { sent: true }; }
     return { sent: true };
   }
@@ -110,6 +117,28 @@ test('type sends the whole text as key presses in one request, and pastes only w
   assert.match(text(kept), /the actions after it were not sent/);
   assert.equal(phone.sent.filter(op => op === 'type_text').length, 1);
   assert.match(text(kept), /^app: local.jot/m, 'a failed action still ends with the read');
+});
+
+// A copy made while the paste runs is newer than the saved clipboard and must not be overwritten,
+// whether the bridge says so (clipboard_changed) or cannot say (no restore status).
+test('a paste does not put the old clipboard back over a copy made while it ran', { timeout: 30000 }, async () => {
+  for (const restoreStatus of ['clipboard_changed', 'unavailable']) {
+    const phone = new JotPhone();
+    await phone.call('look', {});
+    const note = await phone.call('do', { actions: [{ tap: [45, 105] }] });
+    phone.keysFail = true; phone.copiedDuringPaste = 'newer copy'; phone.restoreStatus = restoreStatus;
+    const pasted = await phone.call('do', { actions: [{ type: 'Bread', ref: numberOf(note, 'Title') }] });
+    assert.match(text(pasted), /\(pasted, clipboard left alone: it changed during the paste\) \(sent/, restoreStatus);
+    assert.equal(phone.clipboard.text, 'newer copy', restoreStatus);
+  }
+  const phone = new JotPhone();
+  await phone.call('look', {});
+  const note = await phone.call('do', { actions: [{ tap: [45, 105] }] });
+  phone.keysFail = true; phone.restoreStatus = 'restored'; phone.clipboard = { items: [{ uti: 'public.utf8-plain-text', state: 'inline' }], text: 'mine!' };
+  const pasted = await phone.call('do', { actions: [{ type: 'Bread', ref: numberOf(note, 'Title') }] });
+  assert.match(text(pasted), /\(pasted, clipboard restored\) \(sent/);
+  assert.equal(phone.clipboard.text, 'mine!');
+  assert.equal(phone.clipboardSets ?? 0, 0, 'the bridge restored it, so nothing is written over it');
 });
 
 test('typing that fails part way is unknown, is not pasted on top, and stops the call, with or without clear', { timeout: 30000 }, async () => {
