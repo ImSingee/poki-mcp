@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdir, readFile, lstat, unlink } from 'node:fs/promises';
 import { createConnection } from 'node:net';
-import { createInterface } from 'node:readline';
+import { lines as lineReader } from './lines.mjs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { root, stateDir } from './config.mjs';
@@ -78,7 +78,7 @@ async function socketFor(target) {
         localHelpers.set(path, { child, exited });
         child.stdin.on('error', () => {});
       }
-      const lines = createInterface({ input: child.stdout });
+      const lines = lineReader(child.stdout);
       try {
         await new Promise((resolve, reject) => {
           const timer = setTimeout(() => { child.kill(); reject(new Error('Remote helper did not start.')); }, 5000);
@@ -117,7 +117,7 @@ export async function nativeRequest(target, request) {
   const { socket, path } = await phase('native_helper', () => socketFor(target));
   try { checkWork(); } catch (error) { socket.destroy(); throw error; }
   return phase('native_request', () => new Promise((resolve, reject) => {
-    const lines = createInterface({ input: socket });
+    const lines = lineReader(socket);
     let pid, outcome, abortReason;
     const abort = reason => {
       abortReason = reason;

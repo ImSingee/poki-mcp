@@ -14,14 +14,14 @@ const child = spawn(binary, ['--local-server', 'protocol-only-no-device', path],
 const exited = once(child, 'close');
 let stderr = '';
 child.stderr.on('data', chunk => { stderr += chunk; });
-const lines = createInterface({ input: child.stdout });
+const lines = createInterface({ input: child.stdout }); lines.on('error', () => {});
 const timeout = setTimeout(() => child.kill('SIGKILL'), 30000);
 let socket;
 try {
   const [ready] = await Promise.race([once(lines, 'line'), exited.then(([code, signal]) => { throw new Error(`Native helper exited before ready (${signal ? `signal ${signal}` : `exit code ${code}`}).${stderr.trim() ? `\nHelper stderr:\n${stderr.trim()}` : ''}`); })]);
   assert.equal(ready, '{"ready":true}');
   socket = createConnection(path);
-  const replies = createInterface({ input: socket });
+  const replies = createInterface({ input: socket }); replies.on('error', () => {});
   const [hello] = await once(replies, 'line');
   assert.equal(JSON.parse(hello).pid, child.pid);
   const response = once(replies, 'line');
@@ -29,7 +29,7 @@ try {
   assert.deepEqual(JSON.parse((await response)[0]), { released: true });
   socket.destroy(); replies.close();
   socket = createConnection(path);
-  const launch = createInterface({ input: socket });
+  const launch = createInterface({ input: socket }); launch.on('error', () => {});
   await once(launch, 'line');
   const launched = once(launch, 'line');
   socket.write(JSON.stringify({ op: 'launch_app', bundle_id: 'com.apple.Preferences' }) + '\n');
@@ -37,7 +37,7 @@ try {
   assert.equal(outcome.outcome, 'not_sent', `A launch that cannot reach the device was not sent: ${JSON.stringify(outcome)}`);
   socket.destroy(); launch.close();
   socket = createConnection(path);
-  const touch = createInterface({ input: socket });
+  const touch = createInterface({ input: socket }); touch.on('error', () => {});
   await once(touch, 'line');
   const touched = once(touch, 'line');
   socket.write(JSON.stringify({ op: 'tap', x: 100, y: 200 }) + '\n');

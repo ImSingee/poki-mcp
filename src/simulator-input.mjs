@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { join } from 'node:path';
-import { createInterface } from 'node:readline';
+import { lines } from './lines.mjs';
 import { checkWork, phase, signal } from './work.mjs';
 import { root } from './config.mjs';
 
@@ -29,7 +29,7 @@ class InputSession {
     this.child = spawn(join(root, 'build/simulator'), ['--hid-session', this.id], { detached: true, stdio: 'pipe' });
     this.child.stdin.on('error', () => {});
     this.child.stderr.on('data', chunk => { this.stderr = (this.stderr + chunk).slice(-4000); });
-    createInterface({ input: this.child.stdout }).on('line', line => {
+    lines(this.child.stdout).on('line', line => {
       const reply = JSON.parse(line);
       if (reply.ready) this.ready = true;
       else this.request?.done(reply);
