@@ -105,8 +105,11 @@ impl Session {
                 .map_err(|attempts| format!("Remote pairing is unreachable ({attempts}). Keep the iPhone unlocked and check its configured address or Bonjour name; for Tailscale, keep both devices connected."))?;
             socket.set_nodelay(true)?;
             let peer = socket.peer_addr()?;
-            let mut control = RemotePairingClient::new(RpPairingSocket::new(socket), "poki-mcp");
-            let mut record = RpPairingFile::read_from_file(&config.pairing_file).await?;
+            let pairing_bytes = tokio::fs::read(&config.pairing_file).await?;
+            let sending_host =
+                pairing_sending_host(&pairing_bytes).unwrap_or_else(|| "poki-mcp".into());
+            let mut control = RemotePairingClient::new(RpPairingSocket::new(socket), &sending_host);
+            let mut record = RpPairingFile::from_bytes(&pairing_bytes)?;
             control.attempt_pair_verify().await?;
             // Never fall back to pairing or request consent during an ordinary operation.
             control.validate_pairing(&mut record).await?;
@@ -402,6 +405,14 @@ fn refused_reply(
             json!({"isError":true,"outcome":"not_sent","stop_reason":"error","sent":false,"screen_change_verified":false,"error":error.to_string(),"instruction":"Nothing was sent to the iPhone: the helper refused this request before any input. Correct the request before retrying."}),
         ),
     }
+}
+
+fn pairing_sending_host(bytes: &[u8]) -> Option<String> {
+    plist::from_bytes::<plist::Dictionary>(bytes)
+        .ok()?
+        .get("sending_host")
+        .and_then(plist::Value::as_string)
+        .map(str::to_owned)
 }
 
 fn load(path: &str) -> Result<Session> {
@@ -1665,5 +1676,16 @@ mod tests {
         );
         PHONE.with(|slot| slot.borrow_mut().take());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sending_host_is_read_from_pairing_metadata_when_present() {
+        let pairing = RpPairingFile::generate("linux-host");
+        let mut dictionary: plist::Dictionary = plist::from_bytes(&pairing.to_bytes()).unwrap();
+        dictionary.insert("sending_host".into(), "linux-host".into());
+        let mut bytes = Vec::new();
+        plist::to_writer_xml(&mut bytes, &dictionary).unwrap();
+        assert_eq!(pairing_sending_host(&bytes).as_deref(), Some("linux-host"));
+        assert_eq!(pairing_sending_host(&pairing.to_bytes()), None);
     }
 }

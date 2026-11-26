@@ -12,7 +12,7 @@ test('remote setup persists a Bonjour host for future resolution and preserves I
   await mkdir(join(dir, 'bin'));
   await mkdir(join(dir, 'src'));
   await cp(join(root, 'bin/prepare-remote.mjs'), join(dir, 'bin/prepare-remote.mjs'));
-  await cp(join(root, 'src/config.mjs'), join(dir, 'src/config.mjs'));
+  for (const file of ['config.mjs', 'lines.mjs']) await cp(join(root, 'src', file), join(dir, 'src', file));
   const log = join(dir, 'calls');
   const fake = `#!${process.execPath}
 import { appendFileSync, writeFileSync } from 'node:fs';
