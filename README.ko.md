@@ -74,7 +74,7 @@ node bin/call.mjs list_elements '{"device":"<device UUID>"}'
 
 **Poki Agent.** 독립 터미널 에이전트도 Linux에서 동일하게 동작합니다(`npm ci --prefix agent` 후 `poki login`). [Poki Agent 실행](agent/README.md)을 참조하세요. 유일한 예외는 iMessage 채널인데, BlueBubbles 서버가 필요하고 그 서버 자체에 Mac이 필요합니다. Telegram 채널은 문제없습니다.
 
-**무선.** Tailscale을 통한 원격 사용(RemotePairing)은 브리지에 내장되어 있으며 플랫폼에 의존하지 않습니다. [remote-iphone.md](docs/remote-iphone.md)의 절차가 이 저장소의 상태 디렉터리에도 그대로 적용됩니다. Tailscale 경유 경로 자체는 Linux 호스트에서 아직 검증되지 않았지만, 동일한 RemotePairing 메커니즘은 로컬 네트워크를 통해 검증되었습니다(Tailscale 주소 대신 iPhone의 LAN 주소 사용). 이후로는 집에서 케이블이 필요 없습니다.
+**무선.** Tailscale 또는 LAN을 통한 원격 사용(RemotePairing)은 브리지에 내장되어 있으며 플랫폼에 의존하지 않습니다. iOS 27+에서는 첫 페어링을 `node bin/prepare-remote.mjs --wireless`로 무선 생성할 수 있고, 더 오래된 시스템은 계속 USB bootstrap을 사용합니다. [remote-iphone.md](docs/remote-iphone.md)의 절차가 이 저장소의 상태 디렉터리에도 그대로 적용됩니다. Tailscale 경유 경로 자체는 Linux 호스트에서 아직 검증되지 않았지만, 동일한 RemotePairing 메커니즘은 로컬 네트워크를 통해 검증되었습니다(Tailscale 주소 대신 iPhone의 LAN 주소 사용). 이후로는 집에서 케이블이 필요 없습니다.
 
 ## 실물 기기에서 검증됨
 

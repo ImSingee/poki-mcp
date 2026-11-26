@@ -74,7 +74,7 @@ node bin/call.mjs list_elements '{"device":"<device UUID>"}'
 
 **Poki Agent。** 獨立終端智能體在 Linux 上同樣可用（`npm ci --prefix agent`，然後 `poki login`），見[執行 Poki Agent](agent/README.md)。唯一的例外是 iMessage 通道：它需要 BlueBubbles 伺服器，而後者本身需要一台 Mac。Telegram 通道則沒有問題。
 
-**無線。** 透過 Tailscale 的遠端使用（RemotePairing）已內建於橋接程式、與平台無關；[remote-iphone.md](docs/remote-iphone.md) 中的步驟同樣適用，只需換成本倉庫的狀態目錄。Tailscale 這條路線本身尚未在 Linux 主機上實測——不過同一套 RemotePairing 機制已在這裡透過區域網路驗證（用 iPhone 的區網位址代替 Tailscale 位址），此後在家使用就不再需要傳輸線。
+**無線。** 透過 Tailscale 或區域網路的遠端使用（RemotePairing）已內建於橋接程式、與平台無關。iOS 27+ 的首次配對可以用 `node bin/prepare-remote.mjs --wireless` 無線建立；更早的系統仍走 USB bootstrap。[remote-iphone.md](docs/remote-iphone.md) 中的步驟同樣適用，只需換成本倉庫的狀態目錄。Tailscale 這條路線本身尚未在 Linux 主機上實測——不過同一套 RemotePairing 機制已在這裡透過區域網路驗證（用 iPhone 的區網位址代替 Tailscale 位址），此後在家使用就不再需要傳輸線。
 
 ## 真機驗證情況
 

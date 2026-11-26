@@ -10,3 +10,4 @@ export const stateDir = process.env.POKI_MCP_STATE_DIR ?? defaultStateDir;
 export const endpointFile = join(stateDir, 'mcp.json');
 export const idevice = process.env.IDEVICE_TOOLS
   ?? join(root, '.deps/idevice/target/release/idevice-tools');
+export const pokiNative = process.env.POKI_NATIVE ?? join(root, 'build/poki-native');

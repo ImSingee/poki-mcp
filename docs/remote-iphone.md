@@ -1,22 +1,36 @@
-# iPhone over Tailscale
+# iPhone over LAN or Tailscale
 
-RemotePairing lets Poki use an already paired iPhone through its Tailscale address. It uses an encrypted userspace tunnel and does not change the Mac's default route, DNS, proxy, or other VPN settings. This is an opt-in transport; the existing USB path remains available for devices without a remote configuration.
+RemotePairing lets Poki use a paired iPhone through its LAN or Tailscale address. It uses an encrypted userspace tunnel and does not change the host's default route, DNS, proxy, or other VPN settings. This is an opt-in transport; the existing USB path remains available for devices without a remote configuration. On iOS 27 and newer, the first RemotePairing pairing can also be created wirelessly; older iOS versions still need the USB bootstrap.
 
-**Experimental cross-network support:** the Mac and iPhone no longer need to remain on the same LAN. The verified route initializes a session on Wi-Fi, then keeps it while the iPhone uses cellular data.
+**Experimental cross-network support:** the host and iPhone no longer need to remain on the same LAN. The verified route initializes a session on Wi-Fi, then keeps it while the iPhone uses cellular data.
 
 ## Prepare
 
-1. Run `./bin/setup` in this checkout. Install the Tailscale app on the iPhone and Mac, and connect both devices to the same tailnet.
-2. Connect the trusted, unlocked iPhone over USB and Wi-Fi. Developer Mode and UI Automation must already be enabled.
-3. Set `POKI_MCP_STATE_DIR` to this installation's private state directory, then run:
+1. Run `./bin/setup` in this checkout. If the remote route uses Tailscale, install the Tailscale app on the iPhone and host, and connect both devices to the same tailnet.
+2. Enable Developer Mode and UI Automation on the iPhone.
+3. Pair the device in one of two ways:
+
+   **Wireless first pairing (iOS 27+).** Keep the host and iPhone on the same local network with mDNS/Bonjour reachable. Set `POKI_MCP_STATE_DIR` to this installation's private state directory, then run:
+
+   ```sh
+   node bin/prepare-remote.mjs --wireless [HOST] [--port PORT] [--name HOST_NAME]
+   ```
+
+   The computer advertises itself as a pairable host. On the iPhone, open Settings › Privacy & Security › Developer Mode, tap **Pair with HOST_NAME**, and enter the six-digit code printed by the command. `HOST_NAME` defaults to the computer hostname. When `HOST` is omitted, Poki uses the LAN address that paired; pass the iPhone's Tailscale address as `HOST` when the long-term route should use Tailscale. `PORT` is the iPhone's RemotePairing service port and defaults to `49152`.
+
+   The wireless pairing itself is LAN/mDNS-only. It does not cross Tailscale directly; pair on the LAN first, then use the Tailscale address in the saved configuration.
+
+   **USB bootstrap (all supported iOS versions).** Connect the trusted, unlocked iPhone over USB and Wi-Fi, then run:
 
    ```sh
    node bin/prepare-remote.mjs DEVICE_ID TAILSCALE_IP
    ```
 
-   This verifies a RemotePairing record over the existing trusted USB connection. The pairing key remains in the private state directory. Ordinary operations never trigger a new pairing flow.
-4. Start Poki with the same state directory. Call `take_screenshot` with the selected device ID while Wi-Fi is connected. Confirm the actual screen before disconnecting USB.
-5. Disconnect Wi-Fi from Control Center, leaving the Wi-Fi setting enabled, Tailscale connected, and the phone unlocked. Verify the phone is using cellular data.
+   This verifies a RemotePairing record over the existing trusted USB connection.
+
+   In both modes the pairing key remains in the private state directory. Ordinary operations never trigger a new pairing flow.
+4. Start Poki with the same state directory. Call `take_screenshot` with the selected device ID while Wi-Fi is connected. Confirm the actual screen before disconnecting USB or leaving the LAN.
+5. For a cellular/Tailscale route, disconnect Wi-Fi from Control Center, leaving the Wi-Fi setting enabled, Tailscale connected, and the phone unlocked. Verify the phone is using cellular data.
 
 The configured device uses RemotePairing even when a USB connection is present, so testing does not silently fall back to USB.
 
@@ -38,7 +52,7 @@ Device-management paths such as app installation, process termination, Settings 
 
 Call `disconnect_device` for the selected iPhone. In this installation's `remote-devices.json`, remove only that device's entry. Use the same `POKI_MCP_STATE_DIR` as the daemon, or the default `~/Library/Application Support/PokiMCP` when it is unset. Restart the daemon and connect the phone over USB or local Wi-Fi. Merely plugging in USB does not override a remote entry. Keep the private pairing files if you intend to re-enable RemotePairing.
 
-If setup reports that the saved pairing record did not verify, reconnect the trusted and unlocked iPhone over USB. Rename `remote/DEVICE_ID/pairing.plist` within the same private state directory, then run `bin/prepare-remote.mjs` again to create a new record. Do not share the old or new pairing file.
+If the first connection reports that the saved pairing record did not verify, rename `remote/DEVICE_ID/pairing.plist` within the same private state directory, then run `bin/prepare-remote.mjs` again to create a new record. Use the wireless mode on iOS 27+ or the USB mode on older systems. Do not share the old or new pairing file.
 
 ## Verification status
 
