@@ -52,6 +52,7 @@ class JotPhone extends Devices {
     if (request.op === this.contradictoryOp) return { sent: true, outcome: 'unknown' };
     if (request.op === this.noReceiptOp) return {};
     if (request.op === this.errorWithoutOutcomeOp) return { isError: true, error: 'Bridge returned an error without delivery evidence' };
+    if (request.op === 'launch_app') return this.launchReceipt ?? { pid: jot.pid, launched: true };
     if (request.op === 'tap') { this.app.touch(request.x / 65535 * (W - 1), request.y / 65535 * (H - 1)); return { sent: true }; }
     if (request.op === 'type_keys') {
       if (this.keysFail) throw new Error('unknown variant `type_keys`');
@@ -210,6 +211,25 @@ test('CUA refuses an ambiguous touch acknowledgement and does not run the next a
     assert.match(text(done), /the actions after it were not sent/i, result);
     assert.deepEqual(phone.sent, ['tap'], result);
     assert.equal(phone.app.page, 'home');
+  }
+});
+
+// The bridge answers a refused launch with an error receipt instead of throwing. Taps after it would
+// land in whichever app was already in front.
+test('a refused or unconfirmed launch stops do before the next action', { timeout: 20000 }, async () => {
+  for (const [receipt, delivery] of [
+    [{ isError: true, outcome: 'not_sent', launched: false, error: 'The app service could not be opened.' }, /action 1 was not sent: The app service could not be opened/],
+    [{ isError: true, outcome: 'unknown', error: 'The launch service did not answer.' }, /action 1 may have been delivered/],
+    [{ launched: true }, /action 1 may have been delivered: .*no process/],
+  ]) {
+    const phone = new JotPhone();
+    await phone.call('look', {});
+    phone.launchReceipt = receipt;
+    const done = await phone.call('do', { actions: [{ launch: 'local.jot' }, { tap: [45, 105] }] });
+    assert.equal(done.isError, true, JSON.stringify(receipt));
+    assert.match(text(done), delivery, JSON.stringify(receipt));
+    assert.match(text(done), /the actions after it were not sent/i);
+    assert.deepEqual(phone.sent, ['launch_app'], 'no tap after the launch');
   }
 });
 

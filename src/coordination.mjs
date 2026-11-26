@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { work, checkWork, stoppingReason } from './work.mjs';
-import { inputLockFromEnv, deviceKey } from './input-lock.mjs';
+import { inputLockFromEnv, deviceKey, ANY_DEVICE } from './input-lock.mjs';
 import { definitions } from './tools.mjs';
 
 const readOnlyTools = new Set(definitions.filter(d => d[3]).map(d => d[0]));
@@ -97,6 +97,8 @@ export class Coordination {
   async lockedTurn(ctx, name, args, signal) {
     await (ctx.queue ?? Promise.resolve());
     if (readOnlyTools.has(name)) return this.inputLock.readSlot(signal);
-    return this.inputLock.acquire(await deviceKey(ctx, args), { session: ctx.label, tool: name }, signal);
+    // A script picks its devices as it runs, and its calls do not come back through here, so it holds every device.
+    const key = name === 'run_code' ? ANY_DEVICE : await deviceKey(ctx, args);
+    return this.inputLock.acquire(key, { session: ctx.label, tool: name }, signal);
   }
 }

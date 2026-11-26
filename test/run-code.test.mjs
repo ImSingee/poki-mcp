@@ -56,6 +56,27 @@ test('run_code denies require, fetch, process and dynamic import, and the daemon
   assert.equal(value(await f.call('wait', { seconds: 0 })).waited, 0);
 });
 
+// The context's global must not lead back to the worker realm, whose Function compiles strings and
+// whose globals include process: each of these reaches a constructor and tries to read process.
+test('run_code keeps the worker realm out of reach of the script', async t => {
+  const f = await fixture(t);
+  const escapes = [
+    `globalThis.constructor.constructor('return process')().pid`,
+    `this.constructor.constructor('return process')().pid`,
+    `Object.getPrototypeOf(globalThis).constructor.constructor('return process')().pid`,
+    `globalThis.__proto__.constructor.constructor('return process')().pid`,
+    `tools.tap.constructor('return process')().pid`,
+    `(async () => {}).constructor('return process')()`,
+    `Function('return process')()`,
+    `eval('process')`,
+  ];
+  for (const escape of escapes) {
+    const result = await runCode(f, `async () => { try { return { escaped: String(${escape}) }; } catch (error) { return { blocked: String(error.message ?? error) }; } }`);
+    const summary = summaryOf(result);
+    assert.equal(summary.result?.escaped, undefined, `${escape} reached the host: ${JSON.stringify(summary)}`);
+  }
+});
+
 // A return value JSON cannot carry ends as a script error that keeps the call list, not a parse failure.
 test('run_code reports a return value that is not JSON as a script error and keeps its calls', async t => {
   const f = await fixture(t);

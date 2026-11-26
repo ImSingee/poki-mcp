@@ -9,6 +9,7 @@ STATE_DIR=${STATE_DIR:-$BASE_DIR/state}
 SRC_DIR=${SRC_DIR:-$BASE_DIR/src}
 TOKEN_FILE=${TOKEN_FILE:-$BASE_DIR/token}
 ENV_FILE=${ENV_FILE:-$BASE_DIR/poki.env}
+TLS_DIR=${TLS_DIR:-$BASE_DIR/tls}
 
 # Bind to the router's own LAN address without hard-coding one. With --network host,
 # 0.0.0.0 would answer on the WAN side too, so loopback is the fallback instead.
@@ -35,6 +36,21 @@ for host in $(echo "$BIND_HOST" | tr ',' ' '); do
   esac
 done
 
+# Beyond loopback the bearer token would cross the LAN in plain HTTP, so the daemon serves HTTPS there
+# from $TLS_DIR/cert.pem and key.pem. Without them it refuses a LAN address unless
+# POKI_ALLOW_PLAINTEXT_BIND=1 says the network is already encrypted end to end (a tailnet).
+SCHEME=http
+TLS_ARGS=""
+if [ -s "$TLS_DIR/cert.pem" ] && [ -s "$TLS_DIR/key.pem" ]; then
+  SCHEME=https
+  TLS_ARGS="-v $TLS_DIR:/tls:ro"
+elif [ "$BIND_HOST" != 127.0.0.1 ] && [ "${POKI_ALLOW_PLAINTEXT_BIND:-}" != 1 ]; then
+  echo "POKI_BIND_HOST=$BIND_HOST would send the bearer token over the LAN in plain HTTP." >&2
+  echo "Put a certificate and key at $TLS_DIR/cert.pem and $TLS_DIR/key.pem (see README.md, section 3)," >&2
+  echo "or set POKI_ALLOW_PLAINTEXT_BIND=1 only when every client reaches the router over an encrypted tunnel." >&2
+  exit 1
+fi
+
 mkdir -p "$STATE_DIR" "$SRC_DIR/build" "$BASE_DIR/lockdown"
 chmod 700 "$STATE_DIR"
 
@@ -51,6 +67,12 @@ fi
   echo "POKI_MCP_TOKEN=$(cat "$TOKEN_FILE")"
   echo "POKI_BIND_HOST=$BIND_HOST"
   echo "POKI_HOST_ALLOW=$HOST_ALLOW"
+  if [ "$SCHEME" = https ]; then
+    echo "POKI_TLS_CERT=/tls/cert.pem"
+    echo "POKI_TLS_KEY=/tls/key.pem"
+  elif [ "${POKI_ALLOW_PLAINTEXT_BIND:-}" = 1 ]; then
+    echo "POKI_ALLOW_PLAINTEXT_BIND=1"
+  fi
 } > "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
@@ -69,6 +91,7 @@ docker run -d --name poki \
   -v "$STATE_DIR":/state \
   -v "$BASE_DIR/lockdown:/var/lib/lockdown" \
   $USB_ARGS \
+  $TLS_ARGS \
   --env-file "$ENV_FILE" \
   poki:linux node src/daemon.mjs >/dev/null
 
@@ -77,4 +100,4 @@ docker logs poki 2>&1 | tail -20
 echo "--- endpoint ---"
 # The endpoint file repeats the bearer token, so only its path is printed here.
 echo "$STATE_DIR/mcp.json (bearer token: $TOKEN_FILE, mode 0600)"
-echo "Listening on $BIND_HOST and 127.0.0.1:47825; Host allowlist: $HOST_ALLOW"
+echo "Listening on $SCHEME://$BIND_HOST:47825 and http://127.0.0.1:47825; Host allowlist: $HOST_ALLOW"

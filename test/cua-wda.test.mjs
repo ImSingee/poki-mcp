@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import sharp from 'sharp';
 import { Devices } from '../src/device.mjs';
+import { wdaContext } from '../src/cua-wda.mjs';
 
 // A stand-in for WebDriverAgent on a phone: W3C sessions plus the WDA routes the backend uses, over
 // a two-screen app (a home screen with its icon, a note with a title field).
@@ -119,4 +120,16 @@ test('a runner that stops taking connections is reported as down, its action not
   assert.match(text(down), /WebDriverAgent is not running at .* \(connection refused\)/);
   assert.match(text(down), /the actions after it were not sent/);
   assert.doesNotMatch(text(down), /button home/);
+});
+
+// WDA screenshots are in device pixels (400x800 here for a 200x400-point screen). OCR boxes are read
+// in pixels of frame.data and used as points, so the frame has to be in points, as a bridge capture is.
+test('a WebDriverAgent screenshot is scaled to the screen size in points', { timeout: 20000 }, async t => {
+  const wda = await fakeWda(t);
+  const frame = await wdaContext(new AnyPhone(), wda.url).capture();
+  const meta = await sharp(frame.data).metadata();
+  assert.deepEqual([frame.width, frame.height], [200, 400]);
+  assert.deepEqual([meta.width, meta.height], [200, 400], 'the image matches the frame size');
+  assert.equal(frame.scale, 2);
+  assert.deepEqual(await sharp(frame.original).metadata().then(m => [m.width, m.height]), [400, 800], 'the full-resolution capture is kept');
 });

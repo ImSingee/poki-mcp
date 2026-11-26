@@ -168,6 +168,23 @@ async function send(ctx, request) {
   throw failure;
 }
 
+// The bridge answers a refused launch with an error receipt rather than throwing, and the actions
+// after it would then land in whichever app was in front. A phone's launch is confirmed by the
+// process it started, or by a backend that says it was delivered (WebDriverAgent answers only once the
+// app runs); a simulator's launch_app has already waited for that process.
+function launchDelivered(receipt, simulator) {
+  if (receipt?.isError) {
+    const failure = new Error(receipt.error ?? receipt.instruction ?? 'the launch service refused the app');
+    failure.delivery = receipt.outcome === 'not_sent' ? 'not_sent' : 'unknown';
+    throw failure;
+  }
+  if (!simulator && receipt?.sent !== true && !(Number.isSafeInteger(receipt?.pid) && receipt.pid > 0)) {
+    const failure = new Error('the launch service reported no process for the app');
+    failure.delivery = 'unknown';
+    throw failure;
+  }
+}
+
 // The pasteboard as it is, when it can be put back exactly: empty, or one plain text item.
 async function savedClipboard(ctx) {
   try {
@@ -287,8 +304,10 @@ async function perform(ctx, action, size, until) {
     const spec = typeof action.launch === 'string' ? { bundle: action.launch } : action.launch ?? {};
     if (!spec.bundle) throw new NotSent('launch takes a bundle id');
     // A simulator has no bridge op for it; launch_app starts it with simctl and waits for its interface.
-    if ((await ctx.target()).kind === 'simulator') await platformTool(ctx, 'launch_app', { bundle_id: String(spec.bundle), fresh: Boolean(spec.fresh) });
-    else await ctx.bridge({ op: 'launch_app', bundle_id: String(spec.bundle), ...(spec.fresh ? { terminate_existing: true } : {}) });
+    const simulator = (await ctx.target()).kind === 'simulator';
+    const receipt = simulator ? await platformTool(ctx, 'launch_app', { bundle_id: String(spec.bundle), fresh: Boolean(spec.fresh) })
+      : await ctx.bridge({ op: 'launch_app', bundle_id: String(spec.bundle), ...(spec.fresh ? { terminate_existing: true } : {}) });
+    launchDelivered(receipt, simulator);
     return ['launch', `launch ${spec.bundle}${spec.fresh ? ' (fresh)' : ''}`];
   }
   if ('wait' in action) { await pause(Math.min(Number(action.wait) || 0, 3000)); return ['wait', `wait ${action.wait} ms`]; }

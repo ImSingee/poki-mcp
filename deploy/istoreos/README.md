@@ -90,19 +90,30 @@ The token is fixed across restarts through `POKI_MCP_TOKEN`; otherwise the daemo
 
 The daemon listens on the router's `br-lan` address and on `127.0.0.1`. The loopback listener is not optional: `src/stdio.mjs` accepts a `127.0.0.1` endpoint only, and the agent, `bin/call.mjs` and the pairing helper all reach the daemon through it. `mcp.json` therefore always records the loopback URL, and the LAN address is for other machines.
 
-Configuration goes through three environment variables that this branch adds to `src/daemon.mjs`. The two columns are different: the daemon's defaults apply when a variable is unset, and `run-poki.sh` sets all three explicitly for a router.
+Configuration goes through these environment variables of `src/daemon.mjs`. The two columns are different: the daemon's defaults apply when a variable is unset, and `run-poki.sh` sets them explicitly for a router.
 
 | Variable | Daemon default | What `run-poki.sh` sets |
 | --- | --- | --- |
 | `POKI_BIND_HOST` | `127.0.0.1` | the `br-lan` address, else `127.0.0.1`; accepts a comma-separated list, and `127.0.0.1` is always added |
 | `POKI_HOST_ALLOW` | unset, so `localhostHostValidation()` applies | `127.0.0.1` plus the `br-lan` address |
 | `POKI_MCP_TOKEN` | random per start | the contents of `$BASE_DIR/token` |
+| `POKI_TLS_CERT`, `POKI_TLS_KEY` | unset, so every listener is plain HTTP | `/tls/cert.pem` and `/tls/key.pem` when `$BASE_DIR/tls` holds them |
 
 When `POKI_HOST_ALLOW` is set it replaces `localhostHostValidation()`, which otherwise rejects any non-loopback `Host` with `403`. It must contain `127.0.0.1` itself: local clients are pinned to that name, so an entry for `localhost` or `[::1]` does not cover the `Host: 127.0.0.1:47825` they send, and they are locked out.
 
 Clients must send `X-Poki-MCP-Session`; the daemon answers `400` without it.
 
-**The bridge is plain HTTP.** The bearer token is the only control, so it is exactly as safe as the network it crosses: keep the daemon on a LAN or tailnet you trust, keep guest Wi-Fi off that segment, and reach it over a tailnet rather than a forwarded port when the client is somewhere else.
+**The LAN listener serves HTTPS.** The bearer token is the only control, and over plain HTTP anyone on the LAN path could copy and replay it. Put a certificate and its key at `$BASE_DIR/tls/cert.pem` and `$BASE_DIR/tls/key.pem` before running `run-poki.sh`; it mounts them and the daemon serves HTTPS on the `br-lan` address, while `127.0.0.1` stays plain HTTP for the local clients. A self-signed certificate for the router's address works if each client trusts it:
+
+```sh
+mkdir -p /mnt/data/poki/tls && cd /mnt/data/poki/tls
+LAN_IP=$(ip -4 -o addr show br-lan | awk '{print $4}' | cut -d/ -f1 | head -1)
+openssl req -x509 -newkey rsa:2048 -nodes -days 825 -keyout key.pem -out cert.pem \
+  -subj "/CN=poki" -addext "subjectAltName=IP:$LAN_IP"
+chmod 600 key.pem
+```
+
+Without them `run-poki.sh` stops rather than serve the token in plain HTTP. Set `POKI_ALLOW_PLAINTEXT_BIND=1` only when every client reaches the router through an encrypted tunnel such as a tailnet. Either way, keep guest Wi-Fi off that segment, and reach the router over a tailnet rather than a forwarded port when the client is somewhere else.
 
 
 ```json
@@ -110,7 +121,7 @@ Clients must send `X-Poki-MCP-Session`; the daemon answers `400` without it.
   "mcpServers": {
     "poki": {
       "type": "http",
-      "url": "http://ROUTER-LAN-IP:47825/mcp",
+      "url": "https://ROUTER-LAN-IP:47825/mcp",
       "headers": {
         "Authorization": "Bearer TOKEN",
         "X-Poki-MCP-Session": "client-1"

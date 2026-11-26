@@ -410,8 +410,11 @@ export async function interaction(ctx, name, args) {
       const direction = ['down', 'right'].includes(args.direction) ? -1 : 1;
       const clamp = n => Math.max(0, Math.min(1, n));
       // A page is most of the container's extent, dragged slowly and held before lifting, so the list
-      // moves by the drag alone and does not coast past items.
-      const half = args.pages ? (horizontal ? (box?.width ?? f.width) / f.width : (box?.height ?? f.height) / f.height) * .4 : .15;
+      // moves by the drag alone and does not coast past items. The default flick is 15% of the screen
+      // either side of the centre, cut to the same 40% of a container smaller than that, so both ends
+      // stay on the list it names.
+      const extent = (horizontal ? (box?.width ?? f.width) / f.width : (box?.height ?? f.height) / f.height) * .4;
+      const half = args.pages ? extent : Math.min(.15, extent);
       const drag = () => ctx.input({ op: 'drag',
         x1: clamp(x - (horizontal ? direction * half : 0)) * (f.width - 1),
         y1: clamp(y - (horizontal ? 0 : direction * half)) * (f.height - 1),

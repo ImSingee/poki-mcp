@@ -51,6 +51,20 @@ test('a one-page scroll inside a named row moves only that row, without coasting
   assert.ok(phone.drags.at(-1).end_hold_ms > 0, 'scroll_to pages sideways lists');
 });
 
+// Without pages the default gesture is 15% of the screen either side of the centre: on a 60-point row
+// that starts and ends outside it, and the page around the row scrolls instead.
+test('a scroll without pages stays inside a container smaller than the gesture', { timeout: 30000 }, async () => {
+  const phone = new RowPhone();
+  for (const direction of ['down', 'up']) {
+    await phone.call('scroll', { direction, container: 'Recent' });
+    const drag = phone.drags.at(-1);
+    for (const y of [drag.y1, drag.y2].map(v => v / 65535 * (H - 1))) assert.ok(y >= 200 && y <= 260, `${direction}: touch at y ${y} is outside the row`);
+  }
+  await phone.call('scroll', { direction: 'down' });
+  const page = phone.drags.at(-1);
+  assert.ok(Math.abs(page.y1 - page.y2) / 65535 * (H - 1) > 100, 'a scroll without a container keeps the full default gesture');
+});
+
 test('whatMoved names the container whose items shifted together', () => {
   const row = el('CollectionView', 'Media Types', 0, 300, 390, 120);
   const before = [row, el('StaticText', 'Header', 10, 40, 100, 20), el('Cell', 'Videos', 10, 310, 100, 100), el('Cell', 'Selfies', 120, 310, 100, 100), el('Cell', 'Live', 230, 310, 100, 100)];

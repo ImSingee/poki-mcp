@@ -1,4 +1,5 @@
 import http from 'node:http';
+import https from 'node:https';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { mkdir, writeFile, readFile, unlink, rename, chmod } from 'node:fs/promises';
 import { once } from 'node:events';
@@ -46,6 +47,17 @@ const uncovered = hostAllow.length ? bindHosts.filter(host => !wildcard.has(host
 // names the rule instead of reporting the automatically added 127.0.0.1 as an odd bind address.
 if (hostAllow.length && !hostAllow.includes(localHost)) throw new Error(`POKI_HOST_ALLOW (${hostAllow.join(',')}) must include ${localHost}, because local clients connect through http://${localHost} and send that Host header.`);
 if (uncovered.length) throw new Error(`POKI_HOST_ALLOW (${hostAllow.join(',')}) does not cover POKI_BIND_HOST=${uncovered.join(',')}; every request to ${uncovered.length === 1 ? 'that address' : 'those addresses'} would be rejected.`);
+// A listener that other machines can reach would carry the bearer token in plain HTTP, where anyone on
+// the path can copy and replay it. Those listeners serve HTTPS with POKI_TLS_CERT and POKI_TLS_KEY;
+// plain HTTP beyond this machine needs POKI_ALLOW_PLAINTEXT_BIND=1, for a network that is already
+// encrypted end to end. Loopback stays plain HTTP: local clients only ever dial http://127.0.0.1.
+const loopback = host => host === '::1' || /^127\./.test(host);
+const exposed = bindHosts.filter(host => !loopback(host));
+const tlsCert = process.env.POKI_TLS_CERT?.trim(), tlsKey = process.env.POKI_TLS_KEY?.trim();
+if (Boolean(tlsCert) !== Boolean(tlsKey)) throw new Error('POKI_TLS_CERT and POKI_TLS_KEY must be set together.');
+if (tlsCert && exposed.some(host => wildcard.has(host))) throw new Error(`POKI_BIND_HOST=${bindHosts.join(',')}: with POKI_TLS_CERT, list the addresses to serve HTTPS on instead of a wildcard. A wildcard listener would also take 127.0.0.1, where local clients speak plain HTTP.`);
+if (exposed.length && !tlsCert && process.env.POKI_ALLOW_PLAINTEXT_BIND !== '1') throw new Error(`POKI_BIND_HOST=${exposed.join(',')} serves beyond this machine, where the bearer token would cross the network in plain HTTP and anyone on the path could reuse it. Set POKI_TLS_CERT and POKI_TLS_KEY to serve HTTPS there, or set POKI_ALLOW_PLAINTEXT_BIND=1 only when that network is already encrypted end to end (Tailscale, WireGuard).`);
+const tls = tlsCert ? { cert: await readFile(tlsCert), key: await readFile(tlsKey) } : undefined;
 const validHost = hostAllow.length ? hostHeaderValidation(hostAllow) : localhostHostValidation();
 const validOrigin = localhostOriginValidation();
 const active = new Set();
@@ -96,7 +108,7 @@ async function handle(req, res) {
 }
 
 await mkdir(stateDir, { recursive: true, mode: 0o700 });
-const servers = bindHosts.map(() => http.createServer(handle));
+const servers = bindHosts.map(host => tls && !loopback(host) ? https.createServer(tls, handle) : http.createServer(handle));
 servers[0].listen(port, bindHosts[0]);
 await once(servers[0], 'listening');
 const actualPort = servers[0].address().port;

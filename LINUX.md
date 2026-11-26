@@ -90,8 +90,8 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/path/to/poki-for-linux
-ExecStart=/usr/bin/node /path/to/poki-for-linux/src/daemon.mjs
+WorkingDirectory=/path/to/poki-mcp
+ExecStart=/usr/bin/node /path/to/poki-mcp/src/daemon.mjs
 Restart=on-failure
 
 [Install]
@@ -138,7 +138,7 @@ is unreachable, so a daemon restart needs no client-side change.
 Claude Code:
 
 ```sh
-claude mcp add --scope user poki-mcp -- node /path/to/poki-for-linux/src/stdio.mjs
+claude mcp add --scope user poki-mcp -- node /path/to/poki-mcp/src/stdio.mjs
 ```
 
 Pi (an entry in `~/.pi/agent/mcp.json`):
@@ -148,8 +148,8 @@ Pi (an entry in `~/.pi/agent/mcp.json`):
   "mcpServers": {
     "poki": {
       "command": "node",
-      "args": ["/path/to/poki-for-linux/src/stdio.mjs"],
-      "cwd": "/path/to/poki-for-linux"
+      "args": ["/path/to/poki-mcp/src/stdio.mjs"],
+      "cwd": "/path/to/poki-mcp"
     }
   }
 }
@@ -163,8 +163,12 @@ To serve clients on other machines (a home server or a router, as in
 [deploy/istoreos](deploy/istoreos/README.md)), set `POKI_BIND_HOST` to
 the addresses to listen on and `POKI_HOST_ALLOW` to the `Host` headers
 those clients send; the allowlist must include `127.0.0.1` so local
-clients keep working. `POKI_MCP_TOKEN` (at least 32 characters) fixes
-the bearer token across restarts for such clients. See
+clients keep working. Those listeners serve HTTPS from
+`POKI_TLS_CERT` and `POKI_TLS_KEY`; without them the daemon refuses to
+put the bearer token on the network in plain HTTP, unless
+`POKI_ALLOW_PLAINTEXT_BIND=1` says the network is already encrypted end
+to end (a tailnet). `POKI_MCP_TOKEN` (at least 32 characters) fixes the
+bearer token across restarts for such clients. See
 [docs/configuration.md](docs/configuration.md).
 
 ## Verified on real hardware

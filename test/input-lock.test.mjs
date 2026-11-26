@@ -99,6 +99,16 @@ test('a session that waits too long gets an error naming the holder and its tool
   assert.ok(log.includes('agent-b:tap:end'));
 });
 
+// A script chooses its devices while it runs (tools.tap({device: 'phone-b'})), and its calls do
+// not pass through the lock again, so the lock taken for run_code has to cover every device.
+test('with the lock, run_code holds input to every device', async () => {
+  const coordinator = new Coordination(); coordinator.inputLock = lockOn();
+  const log = [], a = session('a', log), b = session('b', log);
+  b.selected = 'phone-b';
+  await Promise.all([coordinator.call(a, 'run_code', { code: 'async () => 1' }), coordinator.call(b, 'tap', {})]);
+  assert.deepEqual(log, ['a:run_code:start', 'a:run_code:end', 'b:tap:start', 'b:tap:end']);
+});
+
 test('an unknown device excludes input to every device', async () => {
   const lock = lockOn();
   const releaseAny = await lock.acquire('*', { session: 's', tool: 'launch_app' });

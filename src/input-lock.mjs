@@ -9,6 +9,7 @@
 // The lock lives in this process. Two daemons driving one phone are not supported.
 
 const ANY = '*';
+export const ANY_DEVICE = ANY;
 
 function positiveInteger(value, fallback, name) {
   if (value === undefined || value === '') return fallback;

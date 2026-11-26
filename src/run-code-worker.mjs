@@ -31,7 +31,11 @@ parentPort.on('message', message => {
   resolve(message.resultJson);
 });
 
-const sandbox = { __dispatch: dispatch, __emitLog: emitLog, __inputJson: inputJson ?? 'null' };
+// A plain object literal would give the context's global the worker realm's Object.prototype, and
+// globalThis.constructor.constructor would then be the worker's own Function, which compiles strings
+// and sees process. With no prototype, lookups the sandbox does not answer fall through to the
+// context's own intrinsics, whose code generation is switched off below.
+const sandbox = Object.assign(Object.create(null), { __dispatch: dispatch, __emitLog: emitLog, __inputJson: inputJson ?? 'null' });
 const context = vm.createContext(sandbox, { codeGeneration: { strings: false, wasm: false } });
 
 // Built inside the context so `tools`, `input` and `console` are context-realm objects. A tool call

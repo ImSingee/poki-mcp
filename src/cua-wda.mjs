@@ -7,6 +7,8 @@
 // so look and do answer the same way on either backend. One WDA session is kept and made again when
 // WDA says it is gone.
 
+import sharp from 'sharp';
+
 const json = value => JSON.stringify(value);
 const truthy = value => value === true || value === 1 || value === '1' || value === 'true';
 
@@ -101,7 +103,11 @@ export function wdaContext(ctx, url = process.env.POKI_WDA_URL) {
     },
     async capture() {
       const [png, size] = await Promise.all([wda.call('GET', '/screenshot'), view.screenSize()]);
-      return { id: String(Date.now()), device: 'wda', width: size.width, height: size.height, data: Buffer.from(png, 'base64'), at: Date.now() };
+      // WDA's screenshot is in device pixels. OCR reads boxes in pixels of frame.data and cua uses them
+      // as points, so the image is scaled to the screen's points, as a bridge capture is.
+      const original = Buffer.from(png, 'base64'), meta = await sharp(original).metadata();
+      const data = meta.width === size.width && meta.height === size.height ? original : await sharp(original).resize(size.width, size.height).png().toBuffer();
+      return { id: String(Date.now()), device: 'wda', width: size.width, height: size.height, scale: meta.width / size.width, data, original, at: Date.now() };
     },
     async bridge(request) {
       if (request.op === 'ax') {
@@ -112,7 +118,8 @@ export function wdaContext(ctx, url = process.env.POKI_WDA_URL) {
         // A fresh launch ends the app first, so a page it was left on cannot answer for it.
         if (request.terminate_existing) await wda.call('POST', '/wda/apps/terminate', { bundleId: request.bundle_id }).catch(error => { if (error.delivered !== 'not_sent') throw error; });
         await wda.call('POST', '/wda/apps/launch', { bundleId: request.bundle_id });
-        return { bundle_id: request.bundle_id };
+        // WebDriverAgent answers the launch only once the app is running; it reports no process id.
+        return { bundle_id: request.bundle_id, launched: true, sent: true };
       }
       throw new Error(`${request.op} is not available on the WebDriverAgent backend`);
     },

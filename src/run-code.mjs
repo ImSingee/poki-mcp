@@ -50,7 +50,9 @@ export async function runCode(ctx, args) {
 
 async function drive(ctx, code, input, maxCalls) {
   const abort = signal();
-  const worker = new Worker(workerUrl, { workerData: { code, inputJson: JSON.stringify(input ?? null) }, resourceLimits: { maxOldGenerationSizeMb: 256 } });
+  // The worker gets an empty environment, so the daemon's variables (a model key, a configured
+  // passcode) are not there to read even if a script found a way out of its context.
+  const worker = new Worker(workerUrl, { workerData: { code, inputJson: JSON.stringify(input ?? null) }, env: {}, resourceLimits: { maxOldGenerationSizeMb: 256 } });
   const box = mailbox(worker, abort);
   const calls = [];
   const logs = [];
