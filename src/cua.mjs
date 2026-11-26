@@ -268,7 +268,10 @@ async function scrollTo(ctx, spec, size, until) {
     swipes++;
     await pause(250);
     let seen;
-    try { seen = await Promise.race([ctx.bridge({ op: 'ax', include_offscreen: false }), new Promise(done => setTimeout(done, Math.max(200, Math.min(1200, until - performance.now()))))]); }
+    // The helper ends the read at the same time this stops waiting for it, so it does not hold the
+    // next swipe and the final screenshot behind a read nobody waits for.
+    const wait = Math.round(Math.max(200, Math.min(1200, until - performance.now())));
+    try { seen = await Promise.race([ctx.bridge({ op: 'ax', include_offscreen: false, wait_ms: wait }), new Promise(done => setTimeout(done, wait))]); }
     catch (error) { if (stopped(error)) throw error; }
     if (!seen?.elements?.length) continue;
     const key = seen.elements.map(e => `${keyOf(e)}@${Math.round(box(e).y)}`).join(';');
@@ -377,7 +380,7 @@ export async function act(ctx, args = {}) {
   // A number that is not in the latest read is refused before anything is sent, with the list now.
   const stale = actions.flatMap(refsIn).filter(ref => !memory.refs.has(ref));
   if (stale.length) return { isError: true, ...await readAndReply(ctx, { full: true, error: `element ${[...new Set(stale)].join(', ')} is not in the latest read; nothing was sent. The current elements are below.` }) };
-  let error, last;
+  let error, last, failedDelivery;
   const started = performance.now(), until = started + actionCapMs;
   const size = ctx.size ?? await ctx.screenSize();
   ctx.beginInputGroup?.();
@@ -394,6 +397,7 @@ export async function act(ctx, args = {}) {
       } catch (e) {
         if (stopped(e)) throw e;
         const delivery = e instanceof NotSent ? 'not_sent' : e.delivery ?? 'unknown';
+        failedDelivery = delivery;
         done.push(`${JSON.stringify(action)} (${delivery}, ${Math.round(performance.now() - began)} ms)`);
         // An action that may have been delivered is never sent again by us, and nothing after it is sent.
         error = `action ${index + 1} ${delivery === 'unknown' ? 'may have been delivered' : 'was not sent'}: ${e.message}${index + 1 < actions.length ? '; the actions after it were not sent' : ''}`;
@@ -402,7 +406,10 @@ export async function act(ctx, args = {}) {
     }
   } finally { await ctx.endInputGroup?.(); }
   if (last) done.push(`waited ${await quiet(ctx, last, Math.max(0, until - performance.now()))}`);
-  return { ...(error ? { isError: true } : {}), ...await readAndReply(ctx, { full: args.full, actions: done, error }) };
+  // A failed action's delivery is also machine-readable, so batch_commands and run_code stop on it
+  // rather than treating an input that may have reached the phone as an error a script can catch.
+  const replied = await readAndReply(ctx, { full: args.full, actions: done, error });
+  return { ...(error ? { isError: true } : {}), ...replied, ...(failedDelivery ? { _meta: { ...replied._meta, stop_reason: failedDelivery } } : {}) };
 }
 
 export const definitions = [

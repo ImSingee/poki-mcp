@@ -37,6 +37,7 @@ class JotPhone extends Devices {
   liveScreen() { return undefined; }
   async bridge(request) {
     if (request.op === 'ax') {
+      (this.axRequests ??= []).push(request);
       if (this.axFails) { await new Promise(r => setTimeout(r, 100)); throw new Error('accessibility is down'); }
       if (this.axDelayMs) await new Promise(r => setTimeout(r, this.axDelayMs));
       const tree = this.app.screen(); return { foreground: tree.foreground, elements: tree.elements.map(e => ({ ...e, type: e.role })) };
@@ -175,6 +176,19 @@ test('scroll_to swipes until the target is on screen, in one action', { timeout:
   assert.match(text(end), /not found/);
 });
 
+// The native helper serves one request at a time: a read scroll_to stops waiting for would still
+// hold the helper for its full default time, with the next swipe and the final screenshot queued
+// behind it. Every read scroll_to makes carries the time it may take.
+test('scroll_to gives each accessibility read the time it waits for it', { timeout: 30000 }, async () => {
+  const phone = new JotPhone();
+  await phone.call('look', {});
+  const note = await phone.call('do', { actions: [{ tap: [45, 105] }] });
+  phone.axRequests = [];
+  await phone.call('do', { actions: [{ scroll_to: 'Item 9' }] });
+  assert.ok(phone.axRequests.length > 1, 'scroll_to read the screen between swipes');
+  for (const request of phone.axRequests) assert.ok(Number.isFinite(request.wait_ms) && request.wait_ms >= 100 && request.wait_ms <= 2500, JSON.stringify(request));
+});
+
 test('long_press, drag and pinch take element numbers or points, with defaults', { timeout: 20000 }, async () => {
   const phone = new JotPhone();
   await phone.call('look', {});
@@ -260,6 +274,30 @@ test('a refused or unconfirmed launch stops do before the next action', { timeou
     assert.match(text(done), /the actions after it were not sent/i);
     assert.deepEqual(phone.sent, ['launch_app'], 'no tap after the launch');
   }
+});
+
+// A do that stops on an unconfirmed action says so in _meta.stop_reason, the field batch_commands
+// and run_code read: a script that catches the error must not go on to touch the phone again.
+test('a do that may have delivered an action stops a run_code script that catches it', { timeout: 30000 }, async () => {
+  const phone = new JotPhone();
+  await phone.call('look', {});
+  phone.ambiguousOp = 'tap';
+  const direct = await phone.call('do', { actions: [{ tap: [45, 105] }] });
+  assert.equal(direct._meta?.stop_reason, 'unknown', JSON.stringify(direct._meta));
+  const refused = new JotPhone();
+  await refused.call('look', {});
+  refused.launchReceipt = { isError: true, outcome: 'not_sent', error: 'refused' };
+  assert.equal((await refused.call('do', { actions: [{ launch: 'local.jot' }] }))._meta?.stop_reason, 'not_sent');
+  phone.sent = [];
+  const script = await phone.call('run_code', { code: `async () => {
+    try { await tools.do({ actions: [{ tap: [45, 105] }] }); } catch {}
+    await tools.tap({ x: 170, y: 105 });
+    return 'went on';
+  }` });
+  const summary = JSON.parse(text(script));
+  assert.equal(summary.stop_reason, 'unknown', JSON.stringify(summary));
+  assert.notEqual(summary.result, 'went on');
+  assert.deepEqual(phone.sent, ['tap'], 'only the uncertain tap was sent');
 });
 
 test('CUA treats an error without a delivery outcome as unknown, not a confirmed not_sent', { timeout: 20000 }, async () => {
