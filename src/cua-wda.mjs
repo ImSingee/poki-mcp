@@ -108,10 +108,14 @@ export function wdaContext(ctx, url = process.env.POKI_WDA_URL) {
       return view.size;
     },
     async capture() {
-      const [png, size] = await Promise.all([wda.call('GET', '/screenshot'), view.screenSize()]);
+      const [png, cached] = await Promise.all([wda.call('GET', '/screenshot'), view.screenSize()]);
       // WDA's screenshot is in device pixels. OCR reads boxes in pixels of frame.data and cua uses them
       // as points, so the image is scaled to the screen's points, as a bridge capture is.
       const original = Buffer.from(png, 'base64'), meta = await sharp(original).metadata();
+      // The size is cached from the first read; a screenshot in the other orientation means the phone
+      // turned, so the size is read again before anything is scaled to it.
+      let size = cached;
+      if ((meta.width > meta.height) !== (cached.width > cached.height)) { view.size = undefined; size = await view.screenSize(); }
       const data = meta.width === size.width && meta.height === size.height ? original : await sharp(original).resize(size.width, size.height).png().toBuffer();
       return { id: String(Date.now()), device: 'wda', width: size.width, height: size.height, scale: meta.width / size.width, data, original, at: Date.now() };
     },

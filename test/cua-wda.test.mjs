@@ -15,6 +15,7 @@ async function fakeWda(t) {
     ? [node('Icon', 'Jot', 20, 80, 50, 50), node('Icon', 'Hidden', 90, 80, 50, 50, { isVisible: '0' })]
     : [node('TextField', 'Title', 10, 50, 180, 30, { value: state.title }), node('Button', 'Save', 150, 90, 40, 30)] });
   const png = (await sharp({ create: { width: 400, height: 800, channels: 3, background: 'white' } }).png().toBuffer()).toString('base64');
+  const landscapePng = (await sharp({ create: { width: 800, height: 400, channels: 3, background: 'white' } }).png().toBuffer()).toString('base64');
   const server = createServer(async (req, res) => {
     let body = '';
     for await (const chunk of req) body += chunk;
@@ -25,8 +26,8 @@ async function fakeWda(t) {
     if (req.method === 'POST' && req.url === '/session') { const id = `s${state.sessions.size + 1}`; state.sessions.add(id); return send({ sessionId: id, capabilities: {} }); }
     if (req.session && (!state.sessions.has(req.session) || state.forget)) { state.forget = false; state.sessions.delete(req.session); return send({ error: 'invalid session id', message: 'Session does not exist' }, 404); }
     if (path === '/window/size') return send({ width: 200, height: 400 });
-    if (path === '/wda/screen') return send({ screenSize: { width: 200, height: 400 }, scale: 2 });
-    if (path === '/screenshot') return send(png);
+    if (path === '/wda/screen') { state.screenReads = (state.screenReads ?? 0) + 1; return send({ screenSize: state.landscape ? { width: 400, height: 200 } : { width: 200, height: 400 }, scale: 2 }); }
+    if (path === '/screenshot') return send(state.landscape ? landscapePng : png);
     if (path.startsWith('/source')) { assert.match(req.url, /excluded_attributes=visible/); return send(tree()); }
     if (path === '/wda/activeAppInfo') return send(state.page === 'home' ? { bundleId: 'com.apple.springboard', name: 'SpringBoard', pid: 30 } : { bundleId: 'local.jot', name: '', pid: 700 });
     if (path === '/wda/tap' && state.tapDelayMs) { state.taps = (state.taps ?? 0) + 1; await new Promise(done => setTimeout(done, state.tapDelayMs)); }
@@ -153,4 +154,18 @@ test('cancelling do on WebDriverAgent abandons the request in flight and sends n
   assert.ok(done.thrown || done.isError, JSON.stringify(done));
   await new Promise(r => setTimeout(r, 3500));
   assert.equal(wda.state.taps, 1, 'only the tap in flight reached WebDriverAgent');
+});
+
+// The screen size is cached from the first read. After the phone turns, the screenshot comes in the
+// other orientation, and squeezing it into the old size would put every box in the wrong place.
+test('a WebDriverAgent capture after the phone rotates uses the new screen size', { timeout: 20000 }, async t => {
+  const wda = await fakeWda(t);
+  const view = wdaContext(new AnyPhone(), wda.url);
+  assert.deepEqual(await view.capture().then(f => [f.width, f.height]), [200, 400]);
+  wda.state.landscape = true;
+  const turned = await view.capture();
+  assert.deepEqual([turned.width, turned.height], [400, 200]);
+  assert.deepEqual(await sharp(turned.data).metadata().then(m => [m.width, m.height]), [400, 200]);
+  assert.deepEqual([view.size.width, view.size.height], [400, 200], 'inputs use the new size as well');
+  assert.equal(wda.state.screenReads, 2, 'the size is read again only when the orientation changed');
 });

@@ -67,7 +67,9 @@ async function read(ctx) {
   const started = performance.now();
   // Both at once: the bridge runs the screenshot beside an accessibility read, so the read ends at
   // the slower of the two, and the tree is not waited for past treeWaitMs.
-  const tree = ctx.bridge({ op: 'ax', include_offscreen: false });
+  // The native helper serves one request at a time, so the screenshot would queue behind a slow read;
+  // wait_ms has the helper end the read itself at the same budget.
+  const tree = ctx.bridge({ op: 'ax', include_offscreen: false, wait_ms: treeWaitMs });
   tree.catch(() => {});
   const late = new Promise((_, reject) => setTimeout(() => reject(new Error(`accessibility did not answer within ${treeWaitMs} ms`)), treeWaitMs).unref?.());
   const [frameResult, treeResult] = await Promise.allSettled([ctx.capture(), Promise.race([tree, late])]);

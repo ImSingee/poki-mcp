@@ -208,7 +208,7 @@ export class Devices {
   async bridge(request) {
     const target = await this.target();
     if (target.kind === 'simulator') return simulatorRequest(target.id, request);
-    const command = request.op === 'ax' ? { op: 'ax_tree', include_offscreen: request.include_offscreen ?? false } : request;
+    const command = request.op === 'ax' ? { op: 'ax_tree', include_offscreen: request.include_offscreen ?? false, ...(request.wait_ms ? { wait_ms: Math.round(request.wait_ms) } : {}) } : request;
     const result = await nativeRequest(target, command);
     if (request.op === 'ax') return { ...result, foreground: result.foreground_app, elements: result.elements?.map(e => ({ ...e, type: e.type ?? e.role })) };
     return result;

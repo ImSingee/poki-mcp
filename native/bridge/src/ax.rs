@@ -20,12 +20,14 @@ pub(crate) fn is_editing(traits: u64) -> bool {
     traits & (1 << 21) != 0
 }
 
-pub async fn read_tree(
-    adapter: &mut AdapterHandle,
-    rsd: &RsdHandshake,
-    include_offscreen: bool,
-) -> Result<Json> {
-    read_tree_with_timeout(adapter, rsd, include_offscreen, Duration::from_secs(20)).await
+const DEFAULT_WAIT: Duration = Duration::from_secs(20);
+
+/// The wait for one tree read: the caller's budget when it gives one, kept between 100 ms and the
+/// default 20 s, else the default.
+pub fn tree_wait(wait_ms: Option<u64>) -> Duration {
+    wait_ms.map_or(DEFAULT_WAIT, |ms| {
+        Duration::from_millis(ms.clamp(100, DEFAULT_WAIT.as_millis() as u64))
+    })
 }
 
 // A subscription made while the screen is changing is often never answered, while one made a moment

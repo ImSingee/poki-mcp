@@ -22,3 +22,14 @@ test('CUA cannot use a screen element number from iPhone A after switching to iP
   assert.match(text(onB), /did: tap 1 \(sent,/);
   assert.equal((await f.events()).filter(e => e.op === 'tap').length, 1, 'a fresh observation on iPhone B permits its own elements');
 });
+
+// The native helper serves one request at a time, so a screenshot waits behind a slow accessibility
+// read. look gives that read its own budget, which the helper enforces, instead of only racing it.
+test('look gives the accessibility read its time budget, which the native helper enforces', { timeout: 35000 }, async t => {
+  const f = await fixture(t, { toolsProfile: 'cua', extraEnv: () => ({ POKI_CUA_TREE_MS: '1200' }) });
+  await f.set({ label: 'Ready' });
+  await f.call('look');
+  const reads = (await f.events()).filter(e => e.op === 'ax_tree').map(e => e.request);
+  assert.ok(reads.length > 0);
+  assert.ok(reads.every(request => request.wait_ms === 1200), JSON.stringify(reads));
+});

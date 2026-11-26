@@ -244,6 +244,10 @@ enum Request {
     AxTree {
         #[serde(default)]
         include_offscreen: bool,
+        /// How long the read may take, so a silent subscription does not hold the helper, which
+        /// serves one request at a time, for the full default wait. See `ax::tree_wait`.
+        #[serde(default)]
+        wait_ms: Option<u64>,
     },
     /// Names the app running as `pid`, for an accessibility root that carries no bundle ID.
     AppForPid {
@@ -539,6 +543,20 @@ mod request_tests {
             assert!(!request.uses_input_media(), "{op}");
         }
     }
+
+    // A caller's budget for the tree read reaches the reader, kept within 100 ms and the default 20 s.
+    #[test]
+    fn a_tree_read_takes_the_callers_wait() {
+        use std::time::Duration;
+        let wait = |line: &str| match serde_json::from_str::<Request>(line).unwrap() {
+            Request::AxTree { wait_ms, .. } => super::ax::tree_wait(wait_ms),
+            _ => panic!("not a tree read: {line}"),
+        };
+        assert_eq!(wait(r#"{"op":"ax_tree"}"#), Duration::from_secs(20));
+        assert_eq!(wait(r#"{"op":"ax_tree","wait_ms":2500}"#), Duration::from_millis(2500));
+        assert_eq!(wait(r#"{"op":"ax_tree","wait_ms":5}"#), Duration::from_millis(100));
+        assert_eq!(wait(r#"{"op":"ax_tree","wait_ms":600000}"#), Duration::from_secs(20));
+    }
 }
 
 #[cfg(test)]
@@ -754,8 +772,18 @@ async fn execute_connected(
             if let Request::Configuration { method, value } = request {
                 return configuration::execute(adapter, rsd, &method, value).await;
             }
-            if let Request::AxTree { include_offscreen } = request {
-                return ax::read_tree(adapter, rsd, include_offscreen).await;
+            if let Request::AxTree {
+                include_offscreen,
+                wait_ms,
+            } = request
+            {
+                return ax::read_tree_with_timeout(
+                    adapter,
+                    rsd,
+                    include_offscreen,
+                    ax::tree_wait(wait_ms),
+                )
+                .await;
             }
             if let Request::AppForPid { pid } = request {
                 return apps::app_for_pid(adapter, rsd, pid).await;
