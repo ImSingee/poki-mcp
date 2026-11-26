@@ -1102,6 +1102,7 @@ dependencies = [
  "futures-util",
  "idevice",
  "image",
+ "libc",
  "plist",
  "serde",
  "serde_json",

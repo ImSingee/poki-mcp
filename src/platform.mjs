@@ -1,9 +1,10 @@
-import { remoteRequest } from './remote.mjs';
+import { nativeRequest } from './remote.mjs';
+import { flagOn } from './element-flags.mjs';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { execute, pause, checkWork, signal, deadline, stopped, stoppingReason, phase } from './work.mjs';
 import { access, chmod, copyFile, cp, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { constants } from 'node:fs';
+import { constants, readFileSync } from 'node:fs';
 import { basename, extname, isAbsolute, join, resolve } from 'node:path';
 import { homedir, platform } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -12,7 +13,7 @@ import { idevice, stateDir, root } from './config.mjs';
 import { startRecording, stopRecording, closeRecordings } from './recording.mjs';
 import { openInput, selectKeyboard } from './simulator-input.mjs';
 
-const launchReadyMs = 10000;
+const launchReadyMs = 10000, foregroundGraceMs = 2000, foregroundPollMs = 150;
 
 const states = new WeakMap();
 function state(ctx) {
@@ -67,7 +68,7 @@ const physical = async (id, args, expect) => {
   return result;
 };
 async function configuration(target, method, value) {
-  if (target.remote) return remoteRequest(target, { op: 'configuration', method, ...(value === undefined ? {} : { value }) });
+  if (target.remote) return nativeRequest(target, { op: 'configuration', method, ...(value === undefined ? {} : { value }) });
   const { stdout } = await platformRun(join(root, 'build/poki-native'), ['--udid', target.id], { input: JSON.stringify({ op: 'configuration', method, ...(value === undefined ? {} : { value }) }) });
   return JSON.parse(stdout);
 }
@@ -220,11 +221,24 @@ async function refreshApps(ctx, target) {
   appDirectory(ctx).set(target.id, directory);
   return directory;
 }
+// Localized names come from the SpringBoard icon state, which a paired Wi-Fi connection cannot
+// read: the list then carries `localized_names.status: "unavailable"` and only English display
+// names, so a Chinese name never reaches "WeChat". src/data/app-names.json holds the settled bundle
+// ids for the names a phone task most often uses. It is consulted only when the localized names are
+// missing - if they arrived, ordinary matching already knows the name the user typed - and an entry
+// only wins when that bundle really is installed. ASCII names are deliberately absent: matching
+// lowercases both sides already.
+const knownNames = new Map(Object.entries(JSON.parse(readFileSync(new URL('./data/app-names.json', import.meta.url), 'utf8'))).map(([name, bundle]) => [name.toLowerCase(), bundle]));
+
 async function launchAppMatch(ctx, target, query) {
   const directory = appDirectory(ctx), cached = directory.get(target.id);
   let cacheHit = Boolean(cached && performance.now() - cached.at < 300000);
-  let all = (cacheHit ? cached : await refreshApps(ctx, target)).apps;
+  const current = cacheHit ? cached : await refreshApps(ctx, target);
+  let all = current.apps;
   const normalized = query.toLowerCase();
+  const settled = current.localized_names?.status === 'available' ? undefined : knownNames.get(normalized);
+  const installed = settled && all.find(app => app.bundle_id === settled);
+  if (installed) return { app: installed, cache_hit: cacheHit };
   const matches = list => {
     const names = app => [app.name, ...(app.aliases ?? [])].filter(name => typeof name === 'string').map(name => name.toLowerCase());
     const exact = list.filter(app => app.bundle_id === query || names(app).includes(normalized));
@@ -253,6 +267,7 @@ async function launch(ctx, target, args) {
   if (args.language) argv.push('-AppleLanguages', `(${args.language})`);
   if (args.locale) argv.push('-AppleLocale', args.locale);
   const testLaunch = argv.length || Object.keys(args.environment ?? {}).length;
+  const terminate = Boolean(testLaunch || args.fresh);
   let result;
   if (target.kind === 'physical') {
     const query = args.bundle_id ?? args.name ?? args.app;
@@ -270,28 +285,44 @@ async function launch(ctx, target, args) {
     }
     const metadata = lookup ? { _meta: { app_lookup: { cache_hit: lookup.cache_hit } } } : {};
     let launched = {};
+    // The launch service answers with the running process when there is one, so a pid seen before means
+    // the app resumed where it was, open drafts and all.
+    const known = [ctx.launchedPids?.get(`${target.id} ${bundle}`), ctx.lastForeground?.device === target.id ? ctx.lastForeground.pid : undefined];
     try {
       launched = await phase('app_launch', () => ctx.bridge({ op: 'launch_app', bundle_id: bundle,
-        arguments: argv, environment: args.environment ?? {}, terminate_existing: Boolean(testLaunch) }));
+        arguments: argv, environment: args.environment ?? {}, terminate_existing: terminate }));
       if (launched.isError) return { ...launched, ...metadata, foreground_verified: false, ...(launched.outcome === 'unknown' ? { stop_reason: 'unknown' } : {}) };
       if (!Number.isSafeInteger(launched.pid) || launched.pid <= 0) throw new Error('Launch service returned no valid PID.');
       ctx.frame = undefined; ctx.elements = [];
-      await phase('foreground_verification', () => deadline(8000, async () => {
+      // A cable answers one accessibility read in about 200 ms; RemotePairing answers in about 2 s,
+      // and a tap takes 6 s. 8 s and 2.5 s are right for the cable and too tight for the tunnel, so
+      // the allowance follows the transport instead of being raised for everybody.
+      const tunneled = target.kind === 'physical' && target.connection === 'RemotePairing';
+      // The app can take a moment to come to the front, and a warm bridge reads in milliseconds, so the
+      // foreground is polled for a grace period rather than a fixed number of reads.
+      const launchedAt = performance.now();
+      await phase('foreground_verification', () => deadline(tunneled ? 20000 : 8000, async () => {
         let lastError = new Error('The launched app did not become the observed foreground.');
-        for (let attempt = 0; attempt < 3; attempt++) {
+        for (let attempt = 0; attempt < 3 || performance.now() - launchedAt < foregroundGraceMs; attempt++) {
           try {
-            const tree = await deadline(2500, () => phase('foreground_query', () => ctx.bridge({ op: 'ax', include_offscreen: false })));
+            const tree = await deadline(tunneled ? 6000 : 2500, () => phase('foreground_query', () => ctx.bridge({ op: 'ax', include_offscreen: false })));
             if (tree.foreground?.pid === launched.pid) return;
           } catch (error) {
             checkWork();
             if (error.name !== 'TimeoutError') throw error;
             lastError = error;
           }
-          if (attempt < 2) await pause(100);
+          await pause(foregroundPollMs);
         }
         throw lastError;
       }));
-      return { ...launched, ...(lookup ? { name: lookup.app.name } : {}), ...metadata, foreground_verified: true };
+      const foregroundAfterMs = Math.round(performance.now() - launchedAt);
+      (ctx.launchedPids ??= new Map()).set(`${target.id} ${bundle}`, launched.pid);
+      const resumed = !terminate && known.includes(launched.pid);
+      // A physical launch has no readiness wait, so the screen it shows (a first-run sheet, say) is read back here.
+      const screen = ctx.inBatch ? {} : { screen: (await ctx.readback()).screen };
+      return { ...launched, ...(lookup ? { name: lookup.app.name } : {}), ...metadata, foreground_verified: true, foreground_after_ms: foregroundAfterMs, resumed,
+        ...(resumed ? { notice: 'The app was already running and resumed where it was left. Use fresh=true to start it anew, for example to check that something was saved.' } : {}), ...screen };
     } catch (error) {
       return { ...launched, ...metadata, isError: true, outcome: 'unknown', foreground_verified: false,
         stop_reason: stopped(error) ? stoppingReason(error) : 'unknown', error: error.message,
@@ -302,7 +333,7 @@ async function launch(ctx, target, args) {
   if (target.kind === 'simulator') {
     const env = { ...process.env };
     for (const [key, value] of Object.entries(args.environment ?? {})) env[`SIMCTL_CHILD_${key}`] = value;
-    const command = ['simctl', 'launch', ...(testLaunch ? ['--terminate-running-process'] : []), target.id, app.bundle_id, ...argv];
+    const command = ['simctl', 'launch', ...(terminate ? ['--terminate-running-process'] : []), target.id, app.bundle_id, ...argv];
     await selectKeyboard(target.id);
     openInput(target.id);
     const response = await platformRun('xcrun', command, { env });
@@ -316,18 +347,21 @@ async function launch(ctx, target, args) {
 
 // simctl returns before the app draws: SpringBoard stays in front, then the app reports no elements
 // for a few seconds. A tap in that gap fails as if its target did not exist.
+// The launched process seen in front confirms the launch as a phone's receipt does, readable or not.
 async function interfaceReady(ctx, pid) {
   const started = performance.now();
+  let inFront = false;
   while (performance.now() - started < launchReadyMs) {
     checkWork();
     const seen = await ctx.structure().catch(error => { if (stopped(error)) throw error; });
-    if (seen?.foreground?.pid === pid && seen.elements.length) return { interface_ready: true, ...ctx.inBatch ? {} : { screen: (await ctx.readback()).screen } };
+    inFront ||= seen?.foreground?.pid === pid;
+    if (seen?.foreground?.pid === pid && seen.elements.length) return { foreground_verified: true, interface_ready: true, ...ctx.inBatch ? {} : { screen: (await ctx.readback()).screen } };
     await pause(100);
   }
-  return { interface_ready: false, ...ctx.inBatch ? {} : { screen: (await ctx.readback()).screen }, instruction: `The app reported no readable elements within ${launchReadyMs / 1000} seconds. Use take_screenshot to look, or wait_for if it is still loading.` };
+  return { foreground_verified: inFront, interface_ready: false, ...ctx.inBatch ? {} : { screen: (await ctx.readback()).screen }, instruction: `The app reported no readable elements within ${launchReadyMs / 1000} seconds. Use take_screenshot to look, or wait_for if it is still loading.` };
 }
 
-async function applicationMutation(target, request, verify) {
+async function applicationMutation(target, request, verify, timeout) {
   let recovery;
   if (request.op === 'install_app') {
     request = { ...request, staging_id: randomUUID() };
@@ -343,7 +377,7 @@ async function applicationMutation(target, request, verify) {
   let receipt = {}, result;
   try {
     const { stdout } = await platformRun(join(root, 'build/poki-native'), ['--udid', target.id], {
-      input: JSON.stringify(request), timeout: request.op === 'install_app' ? 185000 : 95000,
+      input: JSON.stringify(request), timeout: timeout ?? (request.op === 'install_app' ? 185000 : 95000),
     });
     receipt = JSON.parse(stdout);
     if (receipt.isError) result = { ...receipt, ...(receipt.outcome === 'unknown' ? { stop_reason: 'unknown' } : {}) };
@@ -373,6 +407,48 @@ async function applicationMutation(target, request, verify) {
   return result;
 }
 
+// iOS will not replace an app while its process is alive: the install then waits on the phone
+// ("Updating Poki") until the helper gives up many minutes later. For Poki's own builds the process
+// is ended first, and an install that makes no progress is cut short and tried once more. This is a
+// deliberate exception to "no install command is retried" (installation.rs): the stuck attempt never
+// returned a receipt, its helper is killed first, and each attempt stages under its own directory.
+const pokiBundlePrefix = 'nz.zheha.poki';
+const pokiInstallStuckMs = 90000;
+export const pokiStuckInstallError = 'Poki on the iPhone is stuck updating. Swipe Poki away on the phone and try again. (手机上的 Poki 卡住了更新，请在手机上划掉 Poki 后重试)';
+export const isPokiBundle = bundle => bundle.startsWith(pokiBundlePrefix);
+// Only this install's own 90-second limit counts; a caller that cancelled or ran out of time stops the work instead.
+// A receipt that says completed is never repeated, even when reading the app list back ran out of time.
+const installTimedOut = result => result.isError === true && result.stop_reason === 'timeout' && result.outcome !== 'completed' && !signal()?.aborted;
+
+// stop() ends the running app and attempt() runs one install; both are given so the order can be tested.
+export async function installPokiBuild({ stop, attempt }) {
+  const firstStop = await stop();
+  const first = await attempt();
+  if (!installTimedOut(first)) return { ...first, poki_stop: firstStop };
+  const secondStop = await stop();
+  const second = await attempt();
+  if (!installTimedOut(second)) return { ...second, poki_stop: secondStop, install_retried: true };
+  return { ...second, isError: true, outcome: 'unknown', stop_reason: 'unknown', install_retried: true, error: pokiStuckInstallError,
+    instruction: `${pokiStuckInstallError} The update may still finish on the phone: inspect list_apps before another install.`,
+    ...(first.recovery_record ? { earlier_recovery_record: first.recovery_record } : {}) };
+}
+
+// Ends every process of the installed app with this bundle id. A phone that cannot report processes
+// must not block the install, so a failure is reported in the result instead.
+async function stopInstalledApp(target, bundle) {
+  try {
+    const app = (await apps(target, true)).find(candidate => candidate.bundle_id === bundle);
+    if (!app) return { running: false, installed: false };
+    const matched = terminateAppMatch(app, (await devicectl(target.id, ['device', 'info', 'processes'])).runningProcesses);
+    if (matched.already_stopped) return { running: false };
+    for (const process of matched.processes) await devicectl(target.id, ['device', 'process', 'terminate', '--pid', String(process.processIdentifier)]);
+    return { running: true, terminated: matched.processes.length };
+  } catch (error) {
+    if (stopped(error)) throw error;
+    return { error: error.message };
+  }
+}
+
 async function install(target, value) {
   const path = absolutePath(value);
   await access(path, constants.R_OK);
@@ -400,10 +476,16 @@ async function install(target, value) {
         archive = join(temporary, 'package.ipa');
         await createZip(temporary, 'Payload', archive);
       }
-      return await applicationMutation(target, { op: 'install_app', ipa_path: archive, bundle_id: bundle }, async () => {
+      const verify = async () => {
         const app = (await apps(target, true)).find(app => app.bundle_id === bundle);
         if (!app) throw new Error('Install completed, but the installed app was not found.');
         return { installed: true, ...app };
+      };
+      const request = { op: 'install_app', ipa_path: archive, bundle_id: bundle };
+      if (!isPokiBundle(bundle)) return await applicationMutation(target, request, verify);
+      return await installPokiBuild({
+        stop: () => stopInstalledApp(target, bundle),
+        attempt: () => applicationMutation(target, request, verify, pokiInstallStuckMs),
       });
     }
     const app = (await apps(target, true)).find(app => app.bundle_id === bundle);
@@ -473,7 +555,7 @@ async function observeAction(ctx, action) {
     if (changed) break;
     await pause(200);
   } while (Date.now() < deadline);
-  return { ...result, screen_changed: changed, screen_change_verified: true, foreground_before: before.foreground, foreground_after: after.foreground,
+  return { ...result, screen_change: changed ? 'changed' : 'unchanged', screen_changed: changed, screen_change_verified: true, foreground_before: before.foreground, foreground_after: after.foreground,
     ...(!changed ? { notice: 'The URL was accepted, but the screen did not visibly change afterwards.' } : {}) };
 }
 
@@ -505,7 +587,7 @@ async function simulatorSettingsFallback(ctx, target, page) {
   // Its private prefs: scheme is rejected; App-prefs alone only opens the root.
   if (!['general', 'about'].includes(page)) throw new Error(`This simulator rejects the private prefs: scheme. The requested Settings page '${page}' has no verified navigation fallback on this runtime.`);
   await openURLTransport(target, 'App-prefs:');
-  const visible = (tree, identifier) => tree.elements.find(element => element.visible !== false && element.identifier === identifier);
+  const visible = (tree, identifier) => tree.elements.find(element => flagOn(element.visible) && element.identifier === identifier);
   const about = tree => visible(tree, 'NAME_CELL_ID') && visible(tree, 'SW_VERSION_SPECIFIER');
   const general = tree => visible(tree, 'com.apple.settings.general.featureDescription') && visible(tree, 'com.apple.settings.general.about');
   let tree = await settingsTree(ctx, tree => about(tree) || general(tree) || visible(tree, 'com.apple.settings.general'));
@@ -518,7 +600,7 @@ async function simulatorSettingsFallback(ctx, target, page) {
     await tap(visible(tree, 'com.apple.settings.general')); tree = await settingsTree(ctx, general);
   }
   if (page === 'about' && !about(tree)) { await tap(visible(tree, 'com.apple.settings.general.about')); tree = await settingsTree(ctx, about); }
-  const title = tree.elements.find(element => element.visible !== false && element.type === 'Heading')?.label;
+  const title = tree.elements.find(element => flagOn(element.visible) && element.type === 'Heading')?.label;
   return { requested_page: page, page_verified: true, page_title: title, navigation_method: 'accessibility_after_private_scheme_rejection' };
 }
 
@@ -739,10 +821,22 @@ async function buildAndRun(ctx, target, args) {
   return { ...launched, app_path: appPath, build_log: buildLog, derived_data: derived };
 }
 
+function filesystemPath(value) {
+  return value.startsWith('file:') ? fileURLToPath(value) : value;
+}
+
+// devicectl reports each executable as a file URL. list_apps reports a filesystem path.
+export function terminateAppMatch(app, runningProcesses) {
+  const appPath = filesystemPath(app.path);
+  const processes = runningProcesses.filter(process => filesystemPath(process.executable).startsWith(appPath));
+  if (!processes.length) return { bundle_id: app.bundle_id, already_stopped: true };
+  return { processes };
+}
+
 export async function platformTool(ctx, name, args = {}) {
   if (name === 'start_simulator') return startSimulator(ctx, args);
   const target = await ctx.target();
-  if (target.remote && !['list_apps', 'launch_app'].includes(name)) throw new Error(`${name} is unavailable over RemotePairing. Remove this device from remote-devices.json and reconnect over USB or local Wi-Fi.`);
+  if (target.remote && !['list_apps', 'launch_app', 'get_clipboard'].includes(name)) throw new Error(`${name} is unavailable over RemotePairing. Remove this device from remote-devices.json and reconnect over USB or local Wi-Fi.`);
   if (!['list_apps', 'get_clipboard', 'list_crashes', 'get_crash', 'download_app_container', 'start_recording', 'stop_recording'].includes(name)) ctx.changed(target);
   const changesApps = ['install_app', 'uninstall_app', 'build_and_run'].includes(name);
   try {
@@ -788,10 +882,9 @@ export async function platformTool(ctx, name, args = {}) {
       }
       else {
         const result = await devicectl(target.id, ['device', 'info', 'processes']);
-        const appPath = app.path.startsWith('file:') ? fileURLToPath(app.path) : app.path;
-        const processes = result.runningProcesses.filter(process => process.executable.startsWith(appPath));
-        if (!processes.length) return { bundle_id: app.bundle_id, already_stopped: true };
-        for (const process of processes) await devicectl(target.id, ['device', 'process', 'terminate', '--pid', String(process.processIdentifier)]);
+        const matched = terminateAppMatch(app, result.runningProcesses);
+        if (matched.already_stopped) return matched;
+        for (const process of matched.processes) await devicectl(target.id, ['device', 'process', 'terminate', '--pid', String(process.processIdentifier)]);
       }
       ctx.frame = undefined; ctx.elements = [];
       return { terminated: app.bundle_id };
@@ -825,11 +918,20 @@ export async function platformTool(ctx, name, args = {}) {
     case 'clear_location': await stopLocation(ctx, target); return { simulated: false };
     case 'get_clipboard': {
       if (target.kind === 'simulator') return JSON.parse((await platformRun(join(root, 'build/simulator'), [], { input: JSON.stringify({ id: target.id, op: 'clipboard' }) })).stdout);
-      const result = await physical(target.id, ['pasteboard', 'paste']);
-      const listing = await physical(target.id, ['pasteboard', 'items']);
-      const types = [...listing.stdout.matchAll(/^\[\d+\] ([^:]+):/gm)].map(match => match[1]);
+      let text, types;
+      if (target.remote) {
+        const clipboard = await ctx.bridge({ op: 'pasteboard', action: 'get' });
+        const listing = await ctx.bridge({ op: 'pasteboard', action: 'items' });
+        text = clipboard.text ?? '';
+        types = listing.items.map(item => item.uti);
+      } else {
+        const result = await physical(target.id, ['pasteboard', 'paste']);
+        const listing = await physical(target.id, ['pasteboard', 'items']);
+        text = result.stdout;
+        types = [...listing.stdout.matchAll(/^\[\d+\] ([^:]+):/gm)].map(match => match[1]);
+      }
       const imageInfo = JSON.parse((await platformRun(join(root, 'build/simulator'), [], { input: JSON.stringify({ op: 'image_types', types }) })).stdout);
-      return { text: result.stdout, ...imageInfo, types };
+      return { text, ...imageInfo, types };
     }
     case 'set_clipboard': {
       if (target.kind === 'simulator') await platformRun('xcrun', ['simctl', 'pbcopy', target.id], { input: args.text });
