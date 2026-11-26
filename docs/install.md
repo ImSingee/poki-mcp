@@ -26,8 +26,8 @@ If you received the optional `poki-v0.1.1-macos-arm64.tar.gz` build, follow its 
 ## 1. Build from Source and Start the Daemon
 
 ```sh
-git clone https://github.com/JosssphZhou/poki.git
-cd poki
+git clone https://github.com/ImSingee/poki-mcp.git
+cd poki-mcp
 ./bin/setup
 npm start
 ```
@@ -92,7 +92,7 @@ tool_timeout_sec = 900
 Paste this prompt into your agent:
 
 ```text
-Install https://github.com/JosssphZhou/poki following its root AGENTS.md, including the MCP skill, and stop whenever you need me to act.
+Install https://github.com/ImSingee/poki-mcp following its root AGENTS.md, including the MCP skill, and stop whenever you need me to act.
 ```
 
 [AGENTS.md](../AGENTS.md) covers prerequisites, source setup, the background daemon, registration in your own client, skill installation, iPhone pairing, Poki Agent, optional iMessage, and verification. It names each user-only stop, including Xcode setup, Trust This Computer, Developer Mode, UI Automation, and model login.

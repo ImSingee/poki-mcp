@@ -21,15 +21,12 @@
     "zod": "4.6.7"
   },
   "license": "AGPL-3.0-only",
-  "description": "Local MCP tools for iPhone and iOS Simulator automation on macOS.",
+  "description": "Local MCP tools for iPhone automation on Linux and macOS, and the iOS Simulator on macOS.",
   "repository": {
     "type": "git",
-    "url": "https://github.com/JosssphZhou/poki.git"
+    "url": "https://github.com/ImSingee/poki-mcp.git"
   },
-  "homepage": "https://github.com/JosssphZhou/poki",
-  "bugs": {
-    "url": "https://github.com/JosssphZhou/poki/issues"
-  },
+  "homepage": "https://github.com/ImSingee/poki-mcp",
   "bin": {
     "poki-mcp": "bin/poki-mcp"
   }

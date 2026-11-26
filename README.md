@@ -50,8 +50,8 @@ each one.
 ## Quick start
 
 ```sh
-git clone https://github.com/carrotciallo/poki-for-linux.git
-cd poki-for-linux
+git clone https://github.com/ImSingee/poki-mcp.git
+cd poki-mcp
 ./bin/setup
 ```
 

@@ -33,8 +33,8 @@ Un puente escrito en Rust y basado en [idevice](https://github.com/jkcoxson/idev
 ## Inicio rápido
 
 ```sh
-git clone https://github.com/carrotciallo/poki-for-linux.git
-cd poki-for-linux
+git clone https://github.com/ImSingee/poki-mcp.git
+cd poki-mcp
 ./bin/setup
 ```
 

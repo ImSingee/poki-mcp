@@ -9,8 +9,9 @@ import { version } from './build-info.mjs';
 
 const day = 24 * 60 * 60 * 1000;
 const stateFile = join(stateDir, 'update-check.json');
-// GitHub's Latest can be an app release, so the newest vX.Y.Z tag names Poki MCP's newest release.
-const api = 'https://api.github.com/repos/JosssphZhou/poki';
+// This fork's own releases. Its newest vX.Y.Z tag names the newest release, whatever GitHub calls Latest.
+const repository = 'ImSingee/poki-mcp';
+const api = `https://api.github.com/repos/${repository}`;
 let pending;
 let state;
 
@@ -26,7 +27,7 @@ function notice(release) {
   if (difference < 0 || (difference === 0 && !current.prerelease)) return;
   const firstLine = String(release.body ?? '').split(/\r?\n/).map(line => line.trim()).find(line => line && !/^#{1,6}\s/.test(line)) ?? '';
   const summary = firstLine.replace(/^[-*+]\s+/, '').replace(/[\x00-\x1f\x7f-\x9f]/g, '').match(/^.*?[.!?](?:\s|$)|^.+$/)?.[0].trim() ?? '';
-  return { version: latest.numbers.join('.'), summary: summary.slice(0, 300), url: `https://github.com/JosssphZhou/poki/releases/tag/${encodeURIComponent(release.tag_name)}`, command: 'poki update' };
+  return { version: latest.numbers.join('.'), summary: summary.slice(0, 300), url: `https://github.com/${repository}/releases/tag/${encodeURIComponent(release.tag_name)}`, command: 'poki update' };
 }
 
 async function github(path) {

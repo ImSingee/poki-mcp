@@ -33,8 +33,8 @@ Rust で書かれ [idevice](https://github.com/jkcoxson/idevice) を基盤とす
 ## クイックスタート
 
 ```sh
-git clone https://github.com/carrotciallo/poki-for-linux.git
-cd poki-for-linux
+git clone https://github.com/ImSingee/poki-mcp.git
+cd poki-mcp
 ./bin/setup
 ```
 

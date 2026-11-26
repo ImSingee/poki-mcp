@@ -33,8 +33,8 @@ Rust로 작성되고 [idevice](https://github.com/jkcoxson/idevice)를 기반으
 ## 빠른 시작
 
 ```sh
-git clone https://github.com/carrotciallo/poki-for-linux.git
-cd poki-for-linux
+git clone https://github.com/ImSingee/poki-mcp.git
+cd poki-mcp
 ./bin/setup
 ```
 

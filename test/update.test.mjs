@@ -9,9 +9,9 @@ import { root } from '../src/config.mjs';
 import { fixture, value } from './fixture.mjs';
 
 const exec = promisify(execFile);
-const release = { tag_name: 'v0.2.0', body: 'Updates are now available. More details follow.', html_url: 'https://github.com/JosssphZhou/poki/releases/tag/v0.2.0', draft: false, prerelease: false };
+const release = { tag_name: 'v0.2.0', body: 'Updates are now available. More details follow.', html_url: 'https://github.com/ImSingee/poki-mcp/releases/tag/v0.2.0', draft: false, prerelease: false };
 // GitHub's Latest can be an app release; Poki MCP's own releases are the vX.Y.Z tags.
-const api = 'https://api.github.com/repos/JosssphZhou/poki';
+const api = 'https://api.github.com/repos/ImSingee/poki-mcp';
 const github = {
   [`${api}/releases/latest`]: { tag_name: 'app-0.4.0-beta.1', body: 'Poki app Beta.', draft: false, prerelease: false },
   [`${api}/git/matching-refs/tags/v`]: ['v0.1.0', 'v0.2.0', 'v0.2.1-rc.1'].map(tag => ({ ref: `refs/tags/${tag}` })),
@@ -58,7 +58,8 @@ test('MCP and CLI expose releases, honor opt-out and stay quiet offline', async 
   });
 });
 
-test('poki update fast-forwards a clean main checkout and preserves dirty or non-main checkouts', async t => {
+// The default branch is whatever origin names: upstream Poki uses main, this fork master.
+for (const defaultBranch of ['main', 'master']) test(`poki update fast-forwards a clean ${defaultBranch} checkout and preserves dirty or other-branch checkouts`, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'poki-update-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const upstream = join(dir, 'upstream'), installed = join(dir, 'installed');
@@ -69,7 +70,7 @@ test('poki update fast-forwards a clean main checkout and preserves dirty or non
   await writeFile(join(upstream, '.gitignore'), 'node_modules\nagent/node_modules\nbuild/\n.env\n');
   await writeFile(join(upstream, 'bin/setup'), '#!/bin/sh\nset -eu\nmkdir -p build\nnode -p "JSON.parse(require(\'fs\').readFileSync(\'package.json\')).version" > build/version\n', { mode: 0o755 });
   const git = (cwd, ...args) => exec('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', ...args], { cwd });
-  await git(upstream, 'init', '-b', 'main');
+  await git(upstream, 'init', '-b', defaultBranch);
   await git(upstream, 'add', '.'); await git(upstream, 'commit', '-m', 'fixture baseline');
   await git(dir, 'clone', upstream, installed);
   await symlink(join(root, 'agent/node_modules'), join(installed, 'agent/node_modules'));
@@ -92,8 +93,8 @@ test('poki update fast-forwards a clean main checkout and preserves dirty or non
   await writeFile(join(installed, 'package.json'), original);
   await git(installed, 'switch', '-c', 'feature');
   const branch = await cli(installed, ['update']);
-  assert.notEqual(branch.code, 0); assert.match(branch.stderr, /main/);
-  await git(installed, 'switch', 'main');
+  assert.notEqual(branch.code, 0); assert.match(branch.stderr, new RegExp(`not on ${defaultBranch}`));
+  await git(installed, 'switch', defaultBranch);
   const updated = await cli(installed, ['update']);
   assert.equal(updated.code, 0, updated.stderr); assert.match(updated.stdout, /npm start/);
   assert.equal((await git(installed, 'rev-parse', 'HEAD')).stdout, (await git(upstream, 'rev-parse', 'HEAD')).stdout);
@@ -127,6 +128,6 @@ test('poki update fast-forwards a clean main checkout and preserves dirty or non
   await mkdir(packaged); await cp(join(installed, 'src'), join(packaged, 'src'), { recursive: true });
   await cp(join(installed, 'package.json'), join(packaged, 'package.json')); await copyCLI(packaged);
   const download = await cli(packaged, ['update']);
-  assert.equal(download.code, 0, download.stderr); assert.match(download.stdout, /poki-vX\.Y\.Z-macos-arm64\.tar\.gz[\s\S]*https:\/\/github.com\/JosssphZhou\/poki\/releases\n/); assert.doesNotMatch(download.stdout, /releases\/latest/);
+  assert.equal(download.code, 0, download.stderr); assert.match(download.stdout, /tagged vX\.Y\.Z[\s\S]*https:\/\/github.com\/ImSingee\/poki-mcp\/releases\n/); assert.doesNotMatch(download.stdout, /releases\/latest/);
   t.diagnostic(`$ poki update (prebuilt package)\n${download.stdout}`);
 });
