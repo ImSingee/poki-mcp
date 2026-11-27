@@ -37,7 +37,9 @@
   .stage { position: relative; justify-self: center; width: 100%; max-width: 520px; background: #000; border-radius: 18px; overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; }
   canvas { display: block; width: 100%; height: auto; outline: none; cursor: crosshair; }
   canvas:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
-  .stats { position: absolute; top: 6px; right: 6px; padding: 2px 6px; border-radius: 6px; background: rgba(0,0,0,.55); color: #fff; font: 11px/1.3 var(--mono); pointer-events: none; white-space: nowrap; }
+  /* Below the picture, never over it: the phone's status bar is part of what the person watches. */
+  .meta { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; justify-self: center; width: 100%; max-width: 520px; }
+  .stats { color: var(--text-2); font: 11px/1.3 var(--mono); white-space: nowrap; }
   .notice { position: absolute; inset: auto 8px 8px 8px; padding: 8px 10px; border-radius: var(--radius-sm); background: rgba(0,0,0,.72); color: #fff; font-size: 12px; }
   .notice button { margin-left: 6px; color: #fff; background: rgba(255,255,255,.15); border-color: rgba(255,255,255,.3); }
   .placeholder { aspect-ratio: 9 / 19.5; display: grid; place-items: center; color: #9aa0a6; padding: 16px; text-align: center; }
@@ -58,10 +60,12 @@
   <div class="stage" id="stage">
     <div class="placeholder" id="placeholder">Connecting…</div>
     <canvas id="screen" tabindex="0" hidden aria-label="iPhone screen. Click to tap, drag to swipe, type to send keys."></canvas>
-    <div class="stats" id="stats" hidden></div>
     <div class="notice" id="notice" hidden></div>
   </div>
-  <div class="hint" id="hint">Click to tap, hold to long-press, drag to swipe, two fingers to pinch. Focus the screen and type to send keys.</div>
+  <div class="meta">
+    <div class="hint" id="hint">Click to tap, hold to long-press, drag to swipe, two fingers to pinch. Focus the screen and type to send keys.</div>
+    <div class="stats" id="stats" hidden></div>
+  </div>
   <div class="error" id="error" hidden></div>
 </main>
 <dialog id="confirm">
@@ -158,6 +162,7 @@ function layout() {
   const available = container.height ?? container.maxHeight ?? 1690;
   const pictureHeight = Math.max(240, Math.min(available, 2000) - 90);
   stage.style.maxWidth = `${Math.round(Math.min(520, pictureHeight * ratio))}px`;
+  document.querySelector('.meta').style.maxWidth = stage.style.maxWidth;
 }
 // A decoder that takes frames but shows none for this long is stuck: start again at a key frame.
 // After STUCK_LIMIT such restarts the codec is given up for the next one (as lody's viewer does).
