@@ -1,6 +1,6 @@
 ---
 name: poki-mcp
-description: How to send text and answer prompts with Poki MCP on a physical iPhone. Read before the first Poki call on a task that types into a field, meets a system prompt, or navigates with hardware buttons.
+description: Operate an iPhone and troubleshoot Poki errors with Poki MCP. Read before the first Poki call that types text, answers a prompt, or uses hardware buttons, and whenever Poki reports an error or stops responding.
 license: AGPL-3.0-only
 ---
 
@@ -11,6 +11,8 @@ license: AGPL-3.0-only
 The default `tools/list` contains the tools for device selection, screen reads, app launch, touch, text input, navigation, prompts, and batches. For tools outside that list, read `docs/tools.md` in the Poki checkout used by your registered MCP server. This skill can be copied into a client skill directory.
 
 Set `POKI_MCP_TOOLS=all` in the MCP client's process environment and reconnect to list the complete catalog. Tools absent from the default list still accept direct calls. Device actions can run inside `batch_commands`; lease management calls must stay outside a batch. Consecutive calls do not require `acquire_device`. Poki Agent selects the complete catalog for its own MCP process and retains its own tool allowlist.
+
+`run_code` is in the complete catalog, not the default list. It runs an async JavaScript function that calls device tools with `await tools.<name>(args)`, so the code reads a result and decides the next step in one call instead of a model round trip per step. Prefer it when a task is predictable but depends on what each step returns, such as scrolling until a row appears and then reading its value. A tool error throws and the code can catch it; an action that reports `sent=false` or an unknown outcome stops the script, as a batch stops. The sandbox has no require, file system, network, process or timers.
 
 The examples below record earlier physical-iPhone checks. They are not a guarantee for every iOS version or app. Verify the current screen after each task.
 
@@ -53,3 +55,11 @@ The verified hardware case is only iPhone17,1 in portrait orientation with a six
 Read the visible prompt and its reported kind. Use `handle_alert` with a button label or `action: "accept"` / `"dismiss"` to choose a visible button. For a purchase prompt, generic `action: "accept"` leaves the prompt open and returns its kind and available buttons. After the action, read the screen to confirm the dialog closed and the task reached its intended state.
 
 For login or verification, use the credentials available for the authorized task. Read a requested SMS verification code from Messages or notifications, enter it, and verify the resulting screen. Confirm a purchase only when the user's task explicitly requests that purchase. In that case, set `button` to the visible purchase button text. Otherwise dismiss the prompt or continue the task without purchasing.
+
+## When something goes wrong
+
+When Poki reports an error or stops responding, read [references/troubleshooting.md](references/troubleshooting.md) (or `skills/poki-mcp/references/troubleshooting.md` in the Poki checkout if this skill was copied alone). That reference covers diagnostic tool calls, failure classification, exact error strings, and secret redaction.
+
+- Run read-only diagnostic tools first to inspect versions and device state before retrying actions or changing service state.
+- Never enter passcodes, passwords, or verification codes on the user's behalf during setup or troubleshooting.
+- Strip personal data and secrets from every report draft and show the full draft to the user before sharing it.

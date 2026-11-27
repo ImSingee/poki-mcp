@@ -11,9 +11,12 @@ if [ "$(uname -s)" = Darwin ]; then
   xcrun clang -ffile-prefix-map="$project_dir=/poki" -fobjc-arc -fblocks -framework Foundation -framework AppKit -framework UniformTypeIdentifiers native/simulator.m -o build/simulator
 fi
 cargo build --locked --release --manifest-path native/bridge/Cargo.toml --target-dir build/native-target --bin poki-native --bin ocr --example unlock_iphone -j 4
-cp build/native-target/release/poki-native build/poki-native
+# Overwriting a running executable in place makes macOS kill every later launch of it, so install a new file.
+cp build/native-target/release/poki-native build/poki-native.tmp
+mv -f build/poki-native.tmp build/poki-native
 if [ "$(uname -s)" != Darwin ]; then
   # Off macOS the Rust recognizer in the bridge crate stands in for
   # the Vision one; it speaks the same JSON contract as build/ocr.
-  cp build/native-target/release/ocr build/ocr
+  cp build/native-target/release/ocr build/ocr.tmp
+  mv -f build/ocr.tmp build/ocr
 fi

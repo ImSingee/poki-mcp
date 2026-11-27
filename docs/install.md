@@ -1,6 +1,8 @@
 # Install
 
-For experimental access across networks, see [iPhone over Tailscale](remote-iphone.md). The iPhone needs the Tailscale app and an initial trusted USB setup.
+This guide installs Poki MCP from source on a Mac, which needs full Xcode.
+
+For remote access, see [Remote iPhone over LAN or Tailscale](remote-iphone.md). Both paths require initial trusted USB setup; cross-network access also requires Tailscale.
 
 > Using a Linux host instead of a Mac? This fork supports physical iPhones from Linux — follow [LINUX.md](../LINUX.md) rather than the requirements and steps below.
 
@@ -24,8 +26,8 @@ If you received the optional `poki-v0.1.1-macos-arm64.tar.gz` build, follow its 
 ## 1. Build from Source and Start the Daemon
 
 ```sh
-git clone https://github.com/JosssphZhou/poki.git
-cd poki
+git clone https://github.com/ImSingee/poki-mcp.git
+cd poki-mcp
 ./bin/setup
 npm start
 ```
@@ -40,7 +42,7 @@ Setup does **not** install Xcode, developer disk images, device profiles, or sig
 
 Keep `npm start` running while using an MCP client:
 
-- The daemon listens only on `127.0.0.1:47825` (not exposed to external networks, and not registered as a login item).
+- The daemon listens on `127.0.0.1:47825` by default, so it is not exposed to external networks and is not registered as a login item. `POKI_BIND_HOST` and `POKI_HOST_ALLOW` can move it onto a LAN or tailnet; see [Configuration](configuration.md).
 - Its endpoint and bearer token are written to `~/Library/Application Support/PokiMCP/mcp.json` (`0600`) and removed on normal shutdown.
 - The stdio wrapper (`src/stdio.mjs`) connects to this running daemon; it does not auto-start the service.
 
@@ -90,7 +92,7 @@ tool_timeout_sec = 900
 Paste this prompt into your agent:
 
 ```text
-Install https://github.com/JosssphZhou/poki following its root AGENTS.md, including the MCP skill, and stop whenever you need me to act.
+Install https://github.com/ImSingee/poki-mcp following its root AGENTS.md, including the MCP skill, and stop whenever you need me to act.
 ```
 
 [AGENTS.md](../AGENTS.md) covers prerequisites, source setup, the background daemon, registration in your own client, skill installation, iPhone pairing, Poki Agent, optional iMessage, and verification. It names each user-only stop, including Xcode setup, Trust This Computer, Developer Mode, UI Automation, and model login.
@@ -119,13 +121,12 @@ To use a physical iPhone, first pair it with your Mac over USB. After that, keep
 | --- | --- |
 | `Missing prerequisite: <tool>` from `./bin/setup` | Install what the message names, then run `./bin/setup` again. Setup keeps the existing `.deps/idevice` checkout, and Cargo continues its build. |
 | `Poki MCP needs the full Xcode` from `./bin/setup` | Only the Command Line Tools are active. Install Xcode and run the commands in the message. |
+| `STATUS=94`, `This device isn't eligible for the requested build`, or `ddi_refused` while installing a developer disk image | Check the Xcode and iOS versions in the error. The image may be too old for the phone, for example Xcode 26.6 with iOS 27.2. Update Xcode to support this iOS version (iOS 27 requires Xcode 27). Open Xcode once and wait for its components to finish installing. Rerun the same `prepare-device` or `install-iphone` command. Poki does not need to be reinstalled. If you passed `--image`, replace it with the updated Xcode image first. An unavailable or unknown version means detection failed, not that compatibility was confirmed. |
 | `Local Poki MCP is not running` | Run `npm start` in the checkout. If you set `POKI_MCP_STATE_DIR`, set the same value for the daemon and the client. |
+| `usbmuxd answered, but no iPhone is attached over USB` | macOS has not attached the iPhone. Check the Finder sidebar. If Finder does not show it either, connect it directly with a data cable, unlock it, and accept **Trust This Computer**. Poki cannot use an iPhone that `devicectl` reaches only over the network. |
 | `Multiple devices match` | Name the device: call `select_device` in an MCP client session, or pass `device` in each call. |
 | The default port is in use | Run `npm start -- --port <port>`. Clients read the port from `mcp.json`. |
 | A second daemon on one Mac | Give each daemon its own `POKI_MCP_STATE_DIR`. Both write `mcp.json` in that folder, and a normal shutdown removes it. |
 | `tap_text` cannot find English text | A new simulator uses the language of the Mac. Target the text as it appears on screen. |
+| Screenshots work, but touch fails with `no display service` | The developer disk image on the iPhone lacks the display service. See [Touch and text input fail](physical-iphone.md#touch-and-text-input-fail). |
 | `This device is not recording` from `bin/call.mjs` | A recording ends when its session closes. Record from one MCP client session. |
-
-## Names and distribution
-
-The repository is `poki`. The command, the MCP server key, and the package name stay `poki-mcp`, because the npm name `poki` belongs to another project. `package.json` is marked `"private": true`; this repository is used from source and does not publish an npm package.

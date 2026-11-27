@@ -1,6 +1,6 @@
 # Open-source notices
 
-The root AGPL-3.0-only license covers original Poki MCP contributions. Third-party code retains its respective copyright notices and license terms.
+The root AGPL-3.0-only license covers original Poki code. Poki's brand assets, including the Poki bear, are not covered; see [BRAND.md](BRAND.md). Third-party code retains its respective copyright notices and license terms.
 
 ## idevice
 
@@ -33,14 +33,14 @@ The exact installed versions come from `package-lock.json`. These packages provi
 | Repository | Packages and locked versions | License |
 | --- | --- | --- |
 | [Model Context Protocol TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk) | `@modelcontextprotocol/client`, `core`, `server` 2.4.0; `@modelcontextprotocol/node` 2.1.2 | Package metadata declares Apache-2.0. The upstream license also retains MIT for contributions without relicensing consent; its complete text is preserved in [third_party/LICENSE.typescript-sdk](third_party/LICENSE.typescript-sdk). |
-| [sharp](https://github.com/lovell/sharp/tree/e0624568686516209c434de2d3c0ef6688f0811d) | `sharp` and applicable `@img/sharp-*` packages 0.34.5 | Apache-2.0; full text in [third_party/LICENSE.sharp](third_party/LICENSE.sharp). |
+| [sharp](https://github.com/lovell/sharp/tree/51a990faa26ade5586a4934ac9673c98d8893326) | `sharp` and applicable `@img/sharp-*` packages 0.35.5 | Apache-2.0; full text in [third_party/LICENSE.sharp](third_party/LICENSE.sharp). |
 | [Zod](https://github.com/colinhacks/zod/tree/b500a2ee95134f81d74da7911d7378dd2853d042) | `zod` 4.6.7 | MIT; full text in [third_party/LICENSE.zod](third_party/LICENSE.zod). |
 
 The [dependency inventory](docs/third-party-dependencies.md#npm-packages) names every locked npm package, its source repository, declared license and platform conditions. It includes transitive packages such as Hono, EventSource, jose and cross-spawn.
 
 ## libvips and bundled image libraries
 
-`npm ci` selects sharp's prebuilt packages for the installing machine. On macOS arm64, `@img/sharp-libvips-darwin-arm64` 1.2.4 supplies libvips 8.17.3 and its bundled image libraries. The package is distributed by [sharp-libvips at commit 20b5e899954907a3039d6e3d4c200aaa0ec52c4c](https://github.com/lovell/sharp-libvips/tree/20b5e899954907a3039d6e3d4c200aaa0ec52c4c), with LGPL-3.0-or-later package metadata. Its components retain their own licenses.
+`npm ci` selects sharp's prebuilt packages for the installing machine. On macOS arm64, `@img/sharp-libvips-darwin-arm64` 1.3.4 supplies libvips 8.18.7 and its bundled image libraries. The package is distributed by [sharp-libvips at commit ebb95f8add54eee8bed840e3fb587e4cbec857d7](https://github.com/lovell/sharp-libvips/tree/ebb95f8add54eee8bed840e3fb587e4cbec857d7), with LGPL-3.0-or-later package metadata. Its components retain their own licenses.
 
 The upstream component notices are retained in [third_party/NOTICE.sharp-libvips.md](third_party/NOTICE.sharp-libvips.md). The [bundle inventory](docs/third-party-dependencies.md#image-libraries-in-the-macos-arm64-libvips-package) lists the versions reported by that package, source repositories and component terms. This includes libvips, libheif, libexif, librsvg, GLib, Pango, Cairo, FreeType, libpng, libwebp and the other reported libraries.
 
@@ -70,3 +70,4 @@ The prebuilt macOS package includes the native bridge, OCR and simulator helpers
 ## GitHub CLI update check
 
 [src/update-check.mjs](src/update-check.mjs) ports the complete release-check flow (`CheckForUpdate`, `getLatestReleaseInfo`, `getStateEntry`, and `setStateEntry`) from [GitHub CLI v2.83.0](https://github.com/cli/cli/blob/152d328db80d4d4d7318c7700b6644ee827618a7/internal/update/update.go), copyright 2019 GitHub Inc., under the [MIT license](third_party/LICENSE.github-cli). The port uses JavaScript and JSON instead of Go and YAML. Poki adds an anonymous short-timeout request, silent failed-attempt caching, release-note summaries, and cached notices for noninteractive MCP clients. It omits GitHub CLI's extension updates and terminal/CI restrictions.
+

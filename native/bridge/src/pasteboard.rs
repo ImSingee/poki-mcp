@@ -6,7 +6,7 @@ use idevice::{
 use std::time::Duration;
 
 /// The field a caller found on screen. Lists reuse cells, so an object id alone does not name it.
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 pub struct Target {
     object_id: String,
     role: String,
@@ -252,9 +252,11 @@ pub async fn paste_text(
 }
 
 async fn observe(adapter: &mut AdapterHandle, rsd: &RsdHandshake) -> Result<serde_json::Value> {
+    // 4 s, as before, unless the phone has a second built-in panel.
+    let wait = super::display::pre_input_read(adapter, rsd).await;
     tokio::time::timeout(
-        Duration::from_secs(4),
-        super::ax::read_tree_with_timeout(adapter, rsd, false, Duration::from_secs(4)),
+        wait,
+        super::ax::read_tree_with_timeout(adapter, rsd, false, wait),
     )
     .await
     .map_err(|_| "AX observation connection or handshake timed out")?

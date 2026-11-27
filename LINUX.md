@@ -5,9 +5,12 @@ This fork adds Linux host support for **physical iPhones** to
 the device protocol stack it is built on (usbmuxd, the CoreDeviceProxy
 software tunnel, RemoteXPC/RSD, the accessibility audit service and
 CoreDevice HID) is platform-independent, so the port is a set of small
-host-side adaptations, not a rewrite. The port tracks upstream `main`
-(it is based on the v0.1.1 development line) and stays AGPL-3.0-only,
-like upstream.
+host-side adaptations, not a rewrite. The port took upstream `main`
+once more on 2026-11-27 (commit `0719803`) and has diverged from it
+since. It carries the MCP daemon, the Rust bridge and Poki Agent;
+upstream's Poki iPhone app, Poki Setup installer, voice bridge and
+release pipeline are not part of it. It stays AGPL-3.0-only, like
+upstream.
 
 ## Scope
 
@@ -87,8 +90,8 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/path/to/poki-for-linux
-ExecStart=/usr/bin/node /path/to/poki-for-linux/src/daemon.mjs
+WorkingDirectory=/path/to/poki-mcp
+ExecStart=/usr/bin/node /path/to/poki-mcp/src/daemon.mjs
 Restart=on-failure
 
 [Install]
@@ -135,7 +138,7 @@ is unreachable, so a daemon restart needs no client-side change.
 Claude Code:
 
 ```sh
-claude mcp add --scope user poki-mcp -- node /path/to/poki-for-linux/src/stdio.mjs
+claude mcp add --scope user poki-mcp -- node /path/to/poki-mcp/src/stdio.mjs
 ```
 
 Pi (an entry in `~/.pi/agent/mcp.json`):
@@ -145,8 +148,8 @@ Pi (an entry in `~/.pi/agent/mcp.json`):
   "mcpServers": {
     "poki": {
       "command": "node",
-      "args": ["/path/to/poki-for-linux/src/stdio.mjs"],
-      "cwd": "/path/to/poki-for-linux"
+      "args": ["/path/to/poki-mcp/src/stdio.mjs"],
+      "cwd": "/path/to/poki-mcp"
     }
   }
 }
@@ -155,6 +158,18 @@ Pi (an entry in `~/.pi/agent/mcp.json`):
 With a non-default state directory, give the bridge the same
 `POKI_MCP_STATE_DIR` the daemon runs with: the `--env` flag for
 `claude mcp add`, or an `env` object next to `args` for Pi.
+
+To serve clients on other machines (a home server or a router, as in
+[deploy/istoreos](deploy/istoreos/README.md)), set `POKI_BIND_HOST` to
+the addresses to listen on and `POKI_HOST_ALLOW` to the `Host` headers
+those clients send; the allowlist must include `127.0.0.1` so local
+clients keep working. Those listeners serve HTTPS from
+`POKI_TLS_CERT` and `POKI_TLS_KEY`; without them the daemon refuses to
+put the bearer token on the network in plain HTTP, unless
+`POKI_ALLOW_PLAINTEXT_BIND=1` says the network is already encrypted end
+to end (a tailnet). `POKI_MCP_TOKEN` (at least 32 characters) fixes the
+bearer token across restarts for such clients. See
+[docs/configuration.md](docs/configuration.md).
 
 ## Verified on real hardware
 
@@ -191,25 +206,30 @@ and the test fixture did not stub `zenity` — both fixed since.
   UI text reads well, small or stylized text may be missed, so the
   accessibility tree stays the primary observation source (the same
   ordering upstream uses).
-- `get_clipboard` cannot classify clipboard image types on Linux; that
-  check uses the macOS simulator helper upstream.
+- `get_clipboard` decides whether the clipboard holds an image from a
+  list of known image types (`src/uti.mjs`) instead of macOS's UTType
+  registry, so an image type outside that list that does not end in
+  `-image` is reported as not an image.
 - `open_url` has no Linux implementation on any transport: upstream
   it calls `xcrun devicectl`, and neither pymobiledevice3 (lockdown,
   DVT and CoreDevice command groups) nor the idevice tools expose an
   open-URL service.
-- RemotePairing carries only the bridge-backed tools. For a remote
-  target, poki's transport gate rejects the platform tools —
-  `terminate_app`, `open_url`, `get_clipboard`, crash-log access,
-  app-container export, install/uninstall, settings, location —
-  before any host tool runs, on every host OS. The pymobiledevice3
+- RemotePairing carries only the bridge-backed tools (including the
+  `get_clipboard` read, which goes through the bridge's pasteboard
+  service). For a remote target, poki's transport gate rejects the
+  other platform tools — `terminate_app`, `open_url`, crash-log
+  access, app-container export, install/uninstall, settings,
+  location — before any host tool runs, on every host OS. The pymobiledevice3
   paths in this port therefore cover USB connections; over
   RemotePairing those tools stay unavailable, even though
   pymobiledevice3 could reach several of the same services over a
   tunnel of its own (it would need its own RemotePairing pairing
   record next to poki's, which this port does not set up). Clipboard
   writes are not affected: the bridge sets and restores the
-  pasteboard inside its own input path; only the standalone
-  `get_clipboard` read is gated.
+  pasteboard inside its own input path.
+- A RemotePairing host given as a `.local` name is resolved through
+  the system resolver, which on Linux needs avahi with nss-mdns.
+  Without them, configure the phone's numeric address instead.
 - Crash-report listings on Linux come from pymobiledevice3, which
   reports paths only: entries carry no modification time or size,
   and ordering falls back to the report names, which embed their
@@ -279,6 +299,16 @@ and the test fixture did not stub `zenity` — both fixed since.
 - `.github/workflows/tests.yml` (new): CI on Ubuntu — the full
   `./bin/setup`, the agent dependencies, then each test file in its
   own process
+- `src/uti.mjs` (new) and `src/platform.mjs`: on Linux, `get_clipboard`
+  classifies image types in JavaScript instead of calling the macOS
+  `build/simulator` helper, which is not built there
+- `src/config.mjs`: the "no USB iPhone" notice points to usbmuxd on
+  Linux instead of Finder and devicectl
+- The 2026-11-27 sync left out upstream's Poki App code (the iPhone
+  app, PokiCore, the on-phone launcher, Poki Setup, the voice bridge,
+  the relay, and their workflows, tests and docs), the `install_app`
+  special case for Poki's own bundles and the `look`/`do` guard
+  against Poki's own app, and upstream's `native/ocr-linux.py`, which
+  duplicates the Rust recognizer above
 
-Everything else is unmodified upstream code. Issues that reproduce on
-macOS belong upstream; Linux-specific issues belong here.
+Everything else is upstream code as of the sync.

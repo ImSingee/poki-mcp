@@ -27,7 +27,7 @@ function respond(res, tool, index, opening, finalText = 'Finished the local fixt
   res.end();
 }
 
-export async function taskServices(directory, { route = false, appSearch = false, pendingModel = false, beforeVerification, beforeFinalResponse, execution, scrollResults = [], beforeDeviceCall, devices = [] } = {}) {
+export async function taskServices(directory, { route = false, appSearch = false, pendingModel = false, beforeVerification, beforeFinalResponse, execution, scrollResults = [], beforeDeviceCall, devices = [], postActionObservation = false, screenshots = false } = {}) {
   const fixture = { modelRequests: [], deviceCalls: [], events: [], foreground: { bundle_id: 'org.example.channel-fixture', name: 'Channel fixture' }, value: '', observations: 0 };
   let executionIndex = 0, scrollIndex = 0;
   const model = http.createServer(async (req, res) => {
@@ -104,7 +104,23 @@ export async function taskServices(directory, { route = false, appSearch = false
       else if (name === 'press_key' && args.key === 'home') result = { sent: true };
       else if (name === 'press_button' && args.button === 'home') { fixture.foreground = fixture.homeForeground ?? { bundle_id: 'com.apple.springboard', name: 'SpringBoard' }; result = { sent: true }; }
       else if (route && ['acquire_device', 'renew_device', 'release_device'].includes(name)) result = { lease_id: 'fixture-lease', device: 'synthetic-device', released: true };
-      else if (route && name === 'fill') { fixture.value = args.text; result = { sent: true, screen: { foreground: fixture.foreground.name } }; }
+      else if (route && name === 'fill') {
+        fixture.value = args.text;
+        result = { sent: true, screen: { foreground: fixture.foreground.name } };
+        if (postActionObservation && args.return_observation === true) {
+          const at = offset => new Date(Date.now() + offset).toISOString();
+          result = { ...result, receipt_id: 'fixture-fill-receipt', input_completed_at: at(-350),
+            post_action_observation: { version: 1, action_receipt_id: 'fixture-fill-receipt',
+              observation: { id: 'fixture-after-fill', device: 'synthetic-device', revision: 2, atomic: false,
+                structure_started_at: at(-300), structure_completed_at: at(-200) },
+              source: 'accessibility', foreground: fixture.foreground, truncated: false,
+              prompt: { status: 'checked', source: 'accessibility', warning: null }, total: 2,
+              elements: [
+                { ref: 'e3', identifier: 'fixture-value', label: 'Value', value: fixture.value, role: 'TextField', visible: true },
+                { ref: 'e4', identifier: 'fixture-saved', label: 'Saved: ' + fixture.value, role: 'StaticText', visible: true },
+              ] } };
+        }
+      }
       else if (route && ['list_elements', 'observe_device'].includes(name)) result = {
         source: 'accessibility', truncated: false, foreground: fixture.foreground,
         observation: { id: `observation-${++fixture.observations}`, revision: fixture.observations, device: 'synthetic-device', capture_started_at: new Date().toISOString(), capture_completed_at: new Date().toISOString() },
@@ -114,10 +130,13 @@ export async function taskServices(directory, { route = false, appSearch = false
         ],
       };
       else if (['scroll', 'swipe'].includes(name) && scrollResults[scrollIndex]) result = scrollResults[scrollIndex++];
+      else if (screenshots && name === 'tap') result = { sent: true, screen_change_verified: false };
       else if (name === 'handle_alert') result = { isError: true, error: 'Device locked: fixture prompt still visible. Inspect and choose another approach.' };
       else if (name === 'list_elements') result = { foreground: fixture.foreground, elements: [{ ref: 'e1', label: 'Fixture ready.', value: 'Fixture ready.', role: 'text' }] };
       else throw new Error(`Unexpected fixture device call: ${name}`);
-      return { ...(result.isError ? { isError: true } : {}), content: [{ type: 'text', text: JSON.stringify(result) }] };
+      // With screenshots, an observation carries a picture as the daemon's observe_device does.
+      const picture = screenshots && name === 'observe_device' ? [{ type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' }] : [];
+      return { ...(result.isError ? { isError: true } : {}), content: [{ type: 'text', text: JSON.stringify(result) }, ...picture] };
     };
     const server = createServer(dispatch);
     const transport = new NodeStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });

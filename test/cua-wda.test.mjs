@@ -1,0 +1,193 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { once } from 'node:events';
+import sharp from 'sharp';
+import { Devices } from '../src/device.mjs';
+import { wdaContext } from '../src/cua-wda.mjs';
+import { Coordination } from '../src/coordination.mjs';
+
+// A stand-in for WebDriverAgent on a phone: W3C sessions plus the WDA routes the backend uses, over
+// a two-screen app (a home screen with its icon, a note with a title field).
+async function fakeWda(t) {
+  const state = { page: 'home', title: '', focused: false, sessions: new Set(), calls: [], forget: false };
+  const node = (type, label, x, y, width, height, extra = {}) => ({ type: `XCUIElementType${type}`, label, name: label, rect: { x, y, width, height }, isEnabled: '1', isVisible: '1', ...extra });
+  const tree = () => ({ type: 'XCUIElementTypeApplication', label: state.page === 'home' ? 'SpringBoard' : 'Jot', rect: { x: 0, y: 0, width: 200, height: 400 }, children: state.page === 'home'
+    ? [node('Icon', 'Jot', 20, 80, 50, 50), node('Icon', 'Hidden', 90, 80, 50, 50, { isVisible: '0' })]
+    : [node('TextField', 'Title', 10, 50, 180, 30, { value: state.title }), node('Button', 'Save', 150, 90, 40, 30)] });
+  const png = (await sharp({ create: { width: 400, height: 800, channels: 3, background: 'white' } }).png().toBuffer()).toString('base64');
+  const landscapePng = (await sharp({ create: { width: 800, height: 400, channels: 3, background: 'white' } }).png().toBuffer()).toString('base64');
+  const server = createServer(async (req, res) => {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    const args = body ? JSON.parse(body) : {};
+    const send = (value, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify({ value })); };
+    const path = req.url.replace(/^\/session\/([^/]+)/, (_, id) => { req.session = id; return ''; });
+    state.calls.push(`${req.method} ${path}`);
+    if (req.method === 'POST' && req.url === '/session') { const id = `s${state.sessions.size + 1}`; state.sessions.add(id); return send({ sessionId: id, capabilities: {} }); }
+    if (req.session && (!state.sessions.has(req.session) || state.forget)) { state.forget = false; state.sessions.delete(req.session); return send({ error: 'invalid session id', message: 'Session does not exist' }, 404); }
+    if (path === '/window/size') return send({ width: 200, height: 400 });
+    if (path === '/wda/screen') { state.screenReads = (state.screenReads ?? 0) + 1; return send({ screenSize: state.landscape ? { width: 400, height: 200 } : { width: 200, height: 400 }, scale: 2 }); }
+    if (path === '/screenshot') return send(state.landscape ? landscapePng : png);
+    if (path.startsWith('/source')) { assert.match(req.url, /excluded_attributes=visible/); return send(tree()); }
+    if (path === '/wda/activeAppInfo') return send(state.page === 'home' ? { bundleId: 'com.apple.springboard', name: 'SpringBoard', pid: 30 } : { bundleId: 'local.jot', name: '', pid: 700 });
+    if (path === '/wda/tap' && state.tapDelayMs) { state.taps = (state.taps ?? 0) + 1; await new Promise(done => setTimeout(done, state.tapDelayMs)); }
+    if (path === '/wda/tap') { if (state.page === 'home' && args.x >= 20 && args.x <= 70 && args.y >= 80 && args.y <= 130) state.page = 'note'; else if (state.page === 'note' && args.y >= 50 && args.y <= 80) state.focused = true; return send(null); }
+    if (path === '/wda/keys') { if (state.focused) for (const key of args.value) state.title = key === '\b' ? state.title.slice(0, -1) : state.title + key; return send(null); }
+    if (path === '/element/active') return send({ ELEMENT: 'field-1' });
+    if (path === '/element/field-1/attribute/value') return send(state.title);
+    if (path === '/element/field-1/clear') { state.calls.push('slow clear'); return send(null); }
+    if (path === '/wda/apps/terminate') { state.terminated = args.bundleId; state.page = 'home'; return send(true); }
+    if (path === '/wda/homescreen') { state.page = 'home'; return send(null); }
+    if (path === '/wda/apps/launch') { state.page = args.bundleId === 'local.jot' ? 'note' : state.page; return send(null); }
+    if (path === '/wda/dragfromtoforduration' || path === '/wda/touchAndHold' || path === '/actions') return send(null);
+    return send({ error: 'unknown command', message: `no route ${req.method} ${path}` }, 404);
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => server.close());
+  return { state, server, url: `http://127.0.0.1:${server.address().port}` };
+}
+
+class AnyPhone extends Devices {
+  async inventory() { return [{ id: 'phone-1', kind: 'physical', name: 'Test Phone', state: 'Booted' }]; }
+  liveScreen() { return undefined; }
+  async bridge() { throw new Error('the bridge is not used with the WebDriverAgent backend'); }
+}
+
+const text = result => result.content.find(block => block.type === 'text').text;
+const numberOf = (result, label) => Number(text(result).split('\n').find(line => line.includes(`"${label}`))?.match(/^[+ ](\d+) /)?.[1]);
+
+test('look and do answer the same way on WebDriverAgent: numbered elements, screenshot, actions sent', { timeout: 20000 }, async t => {
+  const wda = await fakeWda(t);
+  const saved = { backend: process.env.POKI_CUA_BACKEND, url: process.env.POKI_WDA_URL };
+  process.env.POKI_CUA_BACKEND = 'wda'; process.env.POKI_WDA_URL = wda.url;
+  t.after(() => { for (const [k, v] of [['POKI_CUA_BACKEND', saved.backend], ['POKI_WDA_URL', saved.url]]) if (v === undefined) delete process.env[k]; else process.env[k] = v; });
+  const phone = new AnyPhone();
+  const home = await phone.call('look', {});
+  assert.match(text(home), /^app: SpringBoard/m);
+  assert.match(text(home), /Icon "Jot" \[20,80,50,50\]/);
+  assert.doesNotMatch(text(home), /Hidden/);
+  assert.doesNotMatch(text(home), /^[+ ]\d+ Application/m, 'the application root is not an element');
+  assert.ok(home.content.some(block => block.type === 'image'));
+  const note = await phone.call('do', { actions: [{ tap: numberOf(home, 'Jot') }] });
+  assert.match(text(note), /did: tap \d+ \(sent/);
+  assert.match(text(note), /^app: Jot/m);
+  assert.match(text(note), /^\+\d+ TextField "Title"/m);
+  const typed = await phone.call('do', { actions: [{ type: 'Milk', ref: numberOf(note, 'Title') }] });
+  assert.match(text(typed), /type "Milk" \(keys\) \(sent/);
+  assert.equal(wda.state.title, 'Milk');
+  const cleared = await phone.call('do', { actions: [{ type: 'Tea', ref: numberOf(typed, 'Title = Milk'), clear: true }] });
+  assert.match(text(cleared), /TextField "Title = Tea"/);
+  assert.ok(!wda.state.calls.includes('slow clear'), 'clearing deletes with keys, not with WDA element clear');
+  // Every read has a tree of its own: the one after a tap shows the screen after it.
+  assert.equal(wda.state.calls.filter(c => c.startsWith('GET /source')).length, wda.state.calls.filter(c => c === 'GET /screenshot').length);
+  // WDA forgot the session: the next request opens a new one and goes through once.
+  wda.state.forget = true;
+  const home2 = await phone.call('do', { actions: [{ button: 'home' }] });
+  assert.match(text(home2), /button home \(sent/);
+  assert.equal(wda.state.page, 'home');
+  assert.equal(wda.state.sessions.size, 1);
+  assert.equal(wda.state.calls.filter(c => c === 'POST /session').length, 2);
+  const swiped = await phone.call('do', { actions: [{ swipe: 'up' }, { long_press: [50, 50] }, { launch: { bundle: 'local.jot', fresh: true } }] });
+  assert.match(text(swiped), /swipe up \(sent[\s\S]*long_press[\s\S]*launch local.jot \(fresh\) \(sent/);
+  assert.equal(wda.state.terminated, 'local.jot');
+  assert.match(text(swiped), /^app: Jot/m, 'an app WDA does not name is named by its application root');
+});
+
+test('an input WDA refuses is not_sent, and one it never answered is unknown', { timeout: 20000 }, async t => {
+  const wda = await fakeWda(t);
+  process.env.POKI_CUA_BACKEND = 'wda'; process.env.POKI_WDA_URL = wda.url;
+  t.after(() => { delete process.env.POKI_CUA_BACKEND; delete process.env.POKI_WDA_URL; });
+  const phone = new AnyPhone();
+  await phone.call('look', {});
+  const refused = await phone.call('do', { actions: [{ button: 'siri' }] });
+  assert.match(text(refused), /\(not_sent, \d+ ms\)/);
+  const view = phone.wdaView;
+  // A request with no answer at all may have reached the phone.
+  view.wda.fetch = () => Promise.reject(Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } }));
+  const lost = await view.input({ op: 'tap', x: 1, y: 1 });
+  assert.equal(lost.outcome, 'unknown');
+});
+
+test('a runner that stops taking connections is reported as down, its action not sent and nothing after it', { timeout: 20000 }, async t => {
+  const wda = await fakeWda(t);
+  process.env.POKI_CUA_BACKEND = 'wda'; process.env.POKI_WDA_URL = wda.url;
+  t.after(() => { delete process.env.POKI_CUA_BACKEND; delete process.env.POKI_WDA_URL; });
+  const phone = new AnyPhone();
+  await phone.call('look', {});
+  wda.server.close(); wda.server.closeAllConnections(); await once(wda.server, 'close');
+  const down = await phone.call('do', { actions: [{ tap: [45, 105] }, { button: 'home' }] });
+  assert.equal(down.isError, true);
+  assert.match(text(down), /\{"tap":\[45,105\]\} \(not_sent, \d+ ms\)/);
+  assert.match(text(down), /WebDriverAgent is not running at .* \(connection refused\)/);
+  assert.match(text(down), /the actions after it were not sent/);
+  assert.doesNotMatch(text(down), /button home/);
+});
+
+// WDA screenshots are in device pixels (400x800 here for a 200x400-point screen). OCR boxes are read
+// in pixels of frame.data and used as points, so the frame has to be in points, as a bridge capture is.
+test('a WebDriverAgent screenshot is scaled to the screen size in points', { timeout: 20000 }, async t => {
+  const wda = await fakeWda(t);
+  const frame = await wdaContext(new AnyPhone(), wda.url).capture();
+  const meta = await sharp(frame.data).metadata();
+  assert.deepEqual([frame.width, frame.height], [200, 400]);
+  assert.deepEqual([meta.width, meta.height], [200, 400], 'the image matches the frame size');
+  assert.equal(frame.scale, 2);
+  assert.deepEqual(await sharp(frame.original).metadata().then(m => [m.width, m.height]), [400, 800], 'the full-resolution capture is kept');
+});
+
+// Cancelling do (or a lease expiring) has to reach the HTTP requests: a tap WDA is still answering is
+// abandoned, and no action after it is sent.
+test('cancelling do on WebDriverAgent abandons the request in flight and sends nothing after it', { timeout: 20000 }, async t => {
+  const wda = await fakeWda(t);
+  const saved = { backend: process.env.POKI_CUA_BACKEND, url: process.env.POKI_WDA_URL };
+  process.env.POKI_CUA_BACKEND = 'wda'; process.env.POKI_WDA_URL = wda.url;
+  t.after(() => { for (const [k, v] of [['POKI_CUA_BACKEND', saved.backend], ['POKI_WDA_URL', saved.url]]) if (v === undefined) delete process.env[k]; else process.env[k] = v; });
+  const phone = new AnyPhone();
+  await phone.call('look', {});
+  wda.state.tapDelayMs = 3000;
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(new DOMException('Request cancelled', 'AbortError')), 300);
+  const started = performance.now();
+  const done = await phone.call('do', { actions: [{ tap: [45, 105] }, { tap: [170, 105] }, { tap: [100, 300] }] }, controller.signal).catch(error => ({ thrown: error }));
+  assert.ok(performance.now() - started < 2500, 'the call ends without waiting for the slow tap');
+  assert.ok(done.thrown || done.isError, JSON.stringify(done));
+  await new Promise(r => setTimeout(r, 3500));
+  assert.equal(wda.state.taps, 1, 'only the tap in flight reached WebDriverAgent');
+});
+
+// The screen size is cached from the first read. After the phone turns, the screenshot comes in the
+// other orientation, and squeezing it into the old size would put every box in the wrong place.
+test('a WebDriverAgent capture after the phone rotates uses the new screen size', { timeout: 20000 }, async t => {
+  const wda = await fakeWda(t);
+  const view = wdaContext(new AnyPhone(), wda.url);
+  assert.deepEqual(await view.capture().then(f => [f.width, f.height]), [200, 400]);
+  wda.state.landscape = true;
+  const turned = await view.capture();
+  assert.deepEqual([turned.width, turned.height], [400, 200]);
+  assert.deepEqual(await sharp(turned.data).metadata().then(m => [m.width, m.height]), [400, 200]);
+  assert.deepEqual([view.size.width, view.size.height], [400, 200], 'inputs use the new size as well');
+  assert.equal(wda.state.screenReads, 2, 'the size is read again only when the orientation changed');
+});
+
+// A lease on the phone has to hold on the WebDriverAgent backend too: another session's look or do
+// is refused before any request reaches WDA, as it is on the bridge.
+test('a device lease excludes other sessions on the WebDriverAgent backend', { timeout: 20000 }, async t => {
+  const wda = await fakeWda(t);
+  const saved = { backend: process.env.POKI_CUA_BACKEND, url: process.env.POKI_WDA_URL };
+  process.env.POKI_CUA_BACKEND = 'wda'; process.env.POKI_WDA_URL = wda.url;
+  t.after(() => { for (const [k, v] of [['POKI_CUA_BACKEND', saved.backend], ['POKI_WDA_URL', saved.url]]) if (v === undefined) delete process.env[k]; else process.env[k] = v; });
+  const coordinator = new Coordination();
+  const owner = new AnyPhone(coordinator), other = new AnyPhone(coordinator);
+  const lease = await owner.call('acquire_device', { device: 'phone-1' });
+  assert.notEqual(lease.isError, true, text(lease));
+  const before = wda.state.calls.length;
+  for (const [tool, args] of [['look', {}], ['do', { actions: [{ tap: [45, 105] }] }]]) {
+    const refused = await other.call(tool, args);
+    assert.equal(refused.isError, true, `${tool}: ${text(refused)}`);
+    assert.match(text(refused), /occupied/i, tool);
+  }
+  assert.equal(wda.state.calls.length, before, 'nothing reached WebDriverAgent for the other session');
+  assert.match(text(await owner.call('look', {})), /^app: SpringBoard/m, 'the owner keeps using the phone');
+});

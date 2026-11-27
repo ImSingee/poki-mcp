@@ -50,8 +50,8 @@ each one.
 ## Quick start
 
 ```sh
-git clone https://github.com/carrotciallo/poki-for-linux.git
-cd poki-for-linux
+git clone https://github.com/ImSingee/poki-mcp.git
+cd poki-mcp
 ./bin/setup
 ```
 
@@ -139,7 +139,7 @@ pymobiledevice3 11.50. Device: iPhone18,4 running iOS 27.0.1 over USB.
   tesseract's — clear UI text reads well, small or stylized text may
   be missed. Languages default to Simplified Chinese, English and
   Japanese (`POKI_OCR_LANGS`); the page-segmentation mode defaults to 11 (`POKI_OCR_PSM`).
-- `get_clipboard` cannot classify clipboard image types on Linux.
+- `get_clipboard` tells image types apart from a list of known image types on Linux, not from macOS's type registry.
 - `terminate_app`, crash-log access and app-container export run
   through pymobiledevice3 on Linux. `open_url` still calls
   `xcrun devicectl` upstream and fails on Linux; neither
