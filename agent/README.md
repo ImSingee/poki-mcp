@@ -19,7 +19,7 @@ Poki Agent starts its own MCP stdio process, which starts the shared Poki daemon
 export POKI_MCP_STATE_DIR="$PWD/agent/.runtime/mcp"
 ```
 
-To keep a daemon running instead, start it in a separate terminal with the same `POKI_MCP_STATE_DIR`: `node src/daemon.mjs --port 0`. Without `--device`, the poki task command uses the device that `list_devices` names as `default`, which it does only when exactly one device is listed, a previously used simulator included. Use `--device` when more than one device is listed or to target a particular one.
+To keep a daemon running instead, start it in a separate terminal with the same `POKI_MCP_STATE_DIR`: `node src/daemon.mjs --port 0`. Without `--device`, the poki task command uses the connected physical phone when there is exactly one, and stops when there are several or none. Use `--device` for a simulator, when several phones are connected, or to target a particular one.
 
 ## Configure OpenAI access
 
