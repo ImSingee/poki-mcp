@@ -27,6 +27,8 @@ const failure = error => ({ isError: true, ...text(error.message), _meta: { stop
 // - A lease keeps every other session off its device. A session may hold leases on several devices.
 export class Coordination {
   leases = new Map(); operations = new Set(); revisions = new Map(); scenes = new Map();
+  // Devices being unpaired: no session may resolve, lease or act on them until the removal ends.
+  unavailable = new Map();
   inputLock = inputLockFromEnv();
   unqueued = unqueuedTools;
   revision(id) { return this.revisions.get(id) ?? 0; }
@@ -40,6 +42,7 @@ export class Coordination {
   }
   access(session, target) {
     checkWork();
+    if (this.unavailable.has(target.id)) throw new Error(this.unavailable.get(target.id));
     const lease = this.leases.get(target.id);
     if (lease && (lease.owner !== session || lease.state !== 'active' || performance.now() >= lease.until)) throw new Error('Device is occupied or being released.');
     const operation = work.getStore()?.operation;
@@ -80,6 +83,8 @@ export class Coordination {
     // A call accepted before this stop that is still finding its device is stopped when it gets there.
     session.stoppedAt ??= new Map();
     for (const id of scope ?? ['*']) session.stoppedAt.set(id, { at: performance.now(), reason });
+    // The call's own cleanup then covers only the stopped devices, not the others it also used.
+    for (const op of operations) { op.stopScope ??= scope ?? 'all'; }
     for (const op of operations) op.controller.abort(Object.assign(new DOMException(`Session work ${reason}; dispatched input is not undone`, 'AbortError'), { stopReason: reason }));
     const entry = { scope };
     entry.promise = (async () => {
@@ -130,7 +135,13 @@ export class Coordination {
           catch (error) { result = { isError: true, content: [{ type: 'text', text: error.message }], _meta: { stop_reason: error.name === 'TimeoutError' || combined.aborted ? stoppingReason(error) : 'error', ...(error.code === 'stale_code' ? { stale_code: error.serviceStart } : {}) } }; }
           result._meta = { ...result._meta, timing: { relation: 'nested phases include their children; do not sum parents and children', stages: op.timings } };
           return result;
-        } finally { if (combined.aborted) { const cleanup = await work.run(undefined, () => session.cleanup(op.devices)); if (result) result._meta = { ...result._meta, cleanup }; } }
+        } finally {
+          if (combined.aborted) {
+            const devices = op.stopScope instanceof Set ? new Set([...op.devices].filter(id => op.stopScope.has(id))) : op.devices;
+            const cleanup = await work.run(undefined, () => session.cleanup(devices));
+            if (result) result._meta = { ...result._meta, cleanup };
+          }
+        }
       })).finally(() => release?.());
       if (!bypass) for (const id of route.keys) session.queues.set(id, settled.catch(() => {}));
       return { settled };

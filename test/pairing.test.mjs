@@ -225,3 +225,39 @@ test('unpair_device stops a helper that is busy installing the DDI and does not 
   const ended = data(await call('pairing_status', { job }));
   assert.equal(ended.state, 'cancelled');
 });
+
+test('pair_device with a device another session holds a lease on is refused', { timeout: 60000 }, async t => {
+  const { f, data, call, until, release } = await pairingFixture(t);
+  const { job } = data(await call('pair_device')).job;
+  await release('accept');
+  await until(job, j => j.terminal);
+  const other = await f.connect();
+  const lease = JSON.parse((await call('acquire_device', { device: 'wireless-27', ttl_seconds: 120 }, other)).content[0].text);
+  assert.ok(lease.lease_id, JSON.stringify(lease));
+  const installs = (await f.events()).filter(e => e.remote === 'install_ddi' || e.remote === 'ddi_status').length;
+  const refused = await call('pair_device', { device: 'wireless-27' });
+  assert.equal(refused.isError, true);
+  assert.match(refused.content[0].text, /occupied/);
+  assert.equal((await f.events()).filter(e => e.remote === 'install_ddi' || e.remote === 'ddi_status').length, installs, 'nothing reached the phone');
+});
+
+test('while a device is being unpaired, no session can lease or act on it', { timeout: 60000 }, async t => {
+  // A helper busy with an installation makes the unpair wait for it, so the window stays open.
+  const { f, data, call, until, release } = await pairingFixture(t, { remote: { hangInstall: true } });
+  const { job } = data(await call('pair_device')).job;
+  await release('accept');
+  await until(job, j => j.state === 'mounting_ddi');
+  await f.until(log => log.includes('"remote":"install_ddi"'));
+  const other = await f.connect();
+  const unpairing = call('unpair_device', { device: 'wireless-27' });
+  await new Promise(resolve => setTimeout(resolve, 500));
+  const lease = await call('acquire_device', { device: 'wireless-27', ttl_seconds: 120 }, other);
+  assert.equal(lease.isError, true, JSON.stringify(lease));
+  assert.match(lease.content[0].text, /being unpaired/);
+  const read = await call('take_screenshot', { device: 'wireless-27' }, other);
+  assert.equal(read.isError, true);
+  assert.equal(data(await unpairing).unpaired, true);
+  const after = await call('acquire_device', { device: 'wireless-27', ttl_seconds: 120 }, other);
+  assert.equal(after.isError, true);
+  assert.match(after.content[0].text, /No connected device/);
+});

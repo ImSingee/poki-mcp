@@ -12,7 +12,7 @@ import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import { root, stateDir, idevice, noUsbDevice } from './config.mjs';
-import { definitions, stepSchema, sessionTools, pairingTools, screenTools } from './tools.mjs';
+import { definitions, stepSchema, sessionTools, approvedTools, hostGated, pairingTools, screenTools } from './tools.mjs';
 import { runScreenTool } from './stream/tools.mjs';
 import { screens } from './stream/hub.mjs';
 import { platformTool, inventorySimulators, simulatorModels, readSettings, closePlatform } from './platform.mjs';
@@ -30,7 +30,6 @@ export const text = value => ({ content: [{ type: 'text', text: typeof value ===
 // then the same data as JSON for the model.
 const structured = (value, lead) => ({ content: [...(lead ? [{ type: 'text', text: lead }] : []), { type: 'text', text: JSON.stringify(value, null, 2) }], structuredContent: value });
 const usedSimulators = new Set();
-const approvedTools = new Set(['install_app', 'uninstall_app', 'build_and_run', 'open_url', 'download_app_container', 'get_clipboard', 'set_clipboard']);
 const platformTools = new Set(['start_simulator', 'shut_down_simulator', 'start_recording', 'stop_recording', 'set_appearance', 'set_accessibility', 'list_apps', 'launch_app', 'terminate_app', 'install_app', 'uninstall_app', 'open_settings', 'open_url', 'build_and_run', 'set_location', 'clear_location', 'get_clipboard', 'set_clipboard', 'list_crashes', 'get_crash', 'download_app_container']);
 
 // A simulator reads its screen in about 0.2 s, so five seconds covers the two reads that call a screen
@@ -453,7 +452,9 @@ export class DeviceContext {
   }
   // Runs one tool on this device. The call was routed here by its device argument (or it is a step of
   // a batch on this device), so device itself is no longer an argument.
-  async dispatch(name, original = {}) {
+  // direct: the client called this tool itself (not a batch step or a run_code call), so in host
+  // approval mode it was the one asked.
+  async dispatch(name, original = {}, { direct = false } = {}) {
     if (pairingTools.has(name)) throw new Error('Call pairing tools directly, not from a batch or run_code.');
     if (screenTools.has(name)) throw new Error('The screen tools are for the screen view, not for a batch or run_code.');
     if (sessionTools.has(name)) return this.session.dispatchSession(name, original);
@@ -478,6 +479,8 @@ export class DeviceContext {
       if (approvedTools.has(name)) await this.target();
       // Says on the result who let it run, so an agent can tell a gated call from an ordinary one.
       const mode = approvedTools.has(name) ? approvalMode() : undefined;
+      const refused = direct ? null : hostGated(name, mode);
+      if (refused) return { isError: true, ...text({ executed: false, error: refused }), _meta: { stop_reason: 'error' } };
       const approval = mode === undefined ? undefined : { allow: { mode: 'operator-preapproved', approved_by: 'operator' }, host: { mode: 'host', approved_by: 'mcp-client' }, ask: { mode: 'ask-human', approved_by: 'human' } }[mode];
       if (approval?.mode === 'ask-human') {
         const detail = args.path ?? args.project_path ?? args.bundle_id ?? args.url ?? (name === 'set_clipboard' ? `${Buffer.byteLength(args.text)} 字节的文本` : '');
@@ -686,34 +689,37 @@ export class Session {
     }
     return this.coordinator.call(this, name, args, requestSignal, requestId, order);
   }
-  // Resolves once the calls before `order` in its stream have been placed on their queues, or after
-  // orderWaitMs when one of them never arrives (cancelled before it was sent).
+  // Resolves once every call before `order` in its stream has been placed on its queue, or after
+  // orderWaitMs when one of them never arrives (cancelled before it was sent): only then are the
+  // missing ones skipped.
   inOrder(order) {
     if (!order || typeof order.stream !== 'string' || !Number.isInteger(order.seq)) return Promise.resolve();
-    const streams = this.streams ??= new Map();
     const entry = this.stream(order.stream);
     if (order.seq <= entry.placed + 1) return Promise.resolve();
     return new Promise(resolve => {
-      const waiter = { seq: order.seq, resolve };
-      entry.waiters.push(waiter);
+      entry.waiters.push({ seq: order.seq, resolve });
       setTimeout(() => { entry.placed = Math.max(entry.placed, order.seq - 1); this.wakeStream(entry); }, orderWaitMs).unref();
     });
   }
-  // A shim numbers its calls from 1 for each daemon it reaches (stdio.mjs).
+  // A shim numbers its calls from 1 for each daemon it reaches (stdio.mjs). placed is the highest seq
+  // up to which every call has been placed; done holds calls placed after a gap.
   stream(id) {
     const streams = this.streams ??= new Map();
-    if (!streams.has(id)) streams.set(id, { placed: 0, waiters: [] });
+    if (!streams.has(id)) streams.set(id, { placed: 0, done: new Set(), waiters: [] });
     return streams.get(id);
   }
   // Also called for calls that take no place on a queue (lease management, a call cancelled before it
-  // arrived), so the calls after them do not wait for them.
+  // arrived), so the calls after them do not wait for them. A call placed after a gap does not let
+  // later calls past the gap.
   placed(order) {
     if (!order || typeof order.stream !== 'string' || !Number.isInteger(order.seq)) return;
     const entry = this.stream(order.stream);
-    entry.placed = Math.max(entry.placed, order.seq);
+    if (order.seq > entry.placed) entry.done.add(order.seq);
     this.wakeStream(entry);
   }
   wakeStream(entry) {
+    for (const seq of entry.done) if (seq <= entry.placed) entry.done.delete(seq);
+    while (entry.done.delete(entry.placed + 1)) entry.placed++;
     entry.waiters.sort((a, b) => a.seq - b.seq);
     while (entry.waiters.length && entry.waiters[0].seq <= entry.placed + 1) entry.waiters.shift().resolve();
   }
@@ -768,6 +774,7 @@ export class Session {
   // The id a device argument names: an id, or the exact name of one device. A phone is known by its id
   // until it has been asked for its name, so an unmatched name asks the phones that are free.
   async resolveDevice(query) {
+    if (this.coordinator.unavailable.has(query)) throw new Error(this.coordinator.unavailable.get(query));
     if (this.contexts.has(query)) return query;
     const list = await this.inventory(true);
     let matches = list.filter(d => names(d, query));
@@ -782,6 +789,7 @@ export class Session {
     }
     if (!matches.length) throw new Error(`No connected device is named ${JSON.stringify(query)}. Use list_devices and pass one of its ids as device.`);
     if (matches.length !== 1) throw new Error(`Several devices match ${JSON.stringify(query)}: ${matches.map(d => `${d.name} (${d.id})`).join(', ')}. Pass the id as device.`);
+    if (this.coordinator.unavailable.has(matches[0].id)) throw new Error(this.coordinator.unavailable.get(matches[0].id));
     return matches[0].id;
   }
   // Which devices a call acts on and how to run it. Called in arrival order (Coordination.call).
@@ -807,12 +815,12 @@ export class Session {
     if (name === 'start_simulator' && args.simulator === undefined && args.device === undefined) {
       if (!args.model) throw new Error('Give simulator (name or UDID) or model.');
       // A new simulator has no id yet; creations run one at a time.
-      return { keys: ['simulator:create'], run: () => new DeviceContext(this).dispatch(name, args) };
+      return { keys: ['simulator:create'], run: () => new DeviceContext(this).dispatch(name, args, { direct: true }) };
     }
     const query = name === 'start_simulator' ? args.simulator ?? args.device : args.device;
     if (typeof query !== 'string' || !query) throw new Error(`${name} needs device: an id from list_devices.`);
     const id = await this.resolveDevice(query);
-    return { keys: [id], run: () => this.context(id).dispatch(name, args) };
+    return { keys: [id], run: () => this.context(id).dispatch(name, args, { direct: true }) };
   }
   // run_code's calls each name a device, which must be one of the devices it named (and holds).
   scriptContext(named, ids) {
@@ -861,7 +869,11 @@ export class Session {
         const matches = (await remoteDevices()).filter(d => d.id === args.device || d.name.toLocaleLowerCase() === args.device.toLocaleLowerCase());
         if (matches.length !== 1) throw new Error(matches.length ? `Several paired devices match ${JSON.stringify(args.device)}; pass the id.` : `No wirelessly paired device is named ${JSON.stringify(args.device)}. Call pair_device without device to pair a new iPhone.`);
         [device] = matches;
+        // Another session's lease keeps this session off the device, preparation included.
+        this.access(device);
       }
+      // A job's developer-image installation holds the device's input lock (jobs.mjs mount).
+      pairingJobs.coordinator ??= this.coordinator;
       const { job, existing } = pairingJobs.start({ name: args.name, device });
       const lead = existing ? 'A pairing is already running on this computer; this is its job.' : 'Pairing started.';
       return structured({ job, existing }, `${lead} ${describeJob(job)} Call pairing_status with job ${JSON.stringify(job.job)} about every two seconds: it shows the PIN to type on the iPhone, then reports when the iPhone is ready.`);
@@ -881,6 +893,14 @@ export class Session {
     }
     if (matches.length > 1) throw new Error(`Several paired devices match ${JSON.stringify(query)}: ${matches.map(d => `${d.name} (${d.id})`).join(', ')}. Pass the id.`);
     const [target] = matches;
+    if (this.coordinator.unavailable.has(target.id)) throw new Error(this.coordinator.unavailable.get(target.id));
+    // From here until the pairing is deleted, no session can resolve, lease or act on the device, so
+    // nothing can start on it after the cleanup below.
+    this.coordinator.unavailable.set(target.id, `${target.name} (${target.id}) is being unpaired. Call list_devices once it finishes.`);
+    try { return await this.removePairing(target); }
+    finally { this.coordinator.unavailable.delete(target.id); }
+  }
+  async removePairing(target) {
     await pairingJobs.cancelForDevice(target.id);
     // An open screen panel of it ends too, which releases the phone's camera and microphone.
     screens.closeDevice(target.id);
@@ -896,6 +916,7 @@ export class Session {
     // Before its config is deleted: the helper's socket is named after that config's path.
     const helper = await disconnectRemote(target).catch(error => ({ running: undefined, error: error.message }));
     await unregisterRemote(target.id);
+    for (const session of sessions) session.contexts.delete(target.id);
     const phoneCleanup = 'The iPhone may still list this computer as paired. To remove it there too, look in Settings › Privacy & Security › Developer Mode, or in the Developer settings for Clear Trusted Computers (which removes every trusted computer), depending on what your iOS version offers.';
     return structured({ unpaired: true, device: { id: target.id, name: target.name }, cancelled_operations: cancelled, helper, removed: ['remote-devices.json entry', `remote/${target.id}/ (configuration and pairing record)`], phone_cleanup: phoneCleanup },
       `Removed ${target.name} (${target.id}) from this computer. It no longer appears in list_devices. ${phoneCleanup}`);

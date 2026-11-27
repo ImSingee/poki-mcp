@@ -12,8 +12,9 @@ import { definitions } from '../src/tools.mjs';
 
 // Every device tool takes device. Tests that are not about choosing a device call through
 // withDevice, which names the fixture's device (the simulator in a simulator-only state, otherwise
-// the phone) wherever a call leaves it out. Tests about device arguments use a client's own callTool.
-const takesDevice = new Set(definitions.filter(([, , schema]) => schema.shape?.device).map(([name]) => name));
+// the phone) wherever a call leaves it out, except cancel_device. Tests about device arguments use a client's own callTool.
+// cancel_device takes device only to narrow what it stops: without one it stops the whole session.
+const takesDevice = new Set(definitions.filter(([name, , schema]) => schema.shape?.device && name !== 'cancel_device').map(([name]) => name));
 export function withDevice(args, name, device) {
   if (name === 'run_code') return args.devices === undefined ? { devices: [device], ...args } : args;
   return takesDevice.has(name) && args.device === undefined ? { device, ...args } : args;
@@ -34,7 +35,7 @@ import { createInterface } from 'node:readline';
 const args=process.argv.slice(2), tool=basename(process.argv[1]), state=JSON.parse(readFileSync(process.env.FIXTURE_STATE));
 const writeState=text=>{const temporary=process.env.FIXTURE_STATE+'.'+process.pid+'.tmp';writeFileSync(temporary,text);renameSync(temporary,process.env.FIXTURE_STATE);};
 const log=(event)=>appendFileSync(process.env.FIXTURE_LOG,JSON.stringify(event)+'\\n');
-log({tool,args,pid:process.pid});
+log({tool,args,pid:process.pid,...(process.env.FIXTURE_LOG_ENV?{env:Object.keys(process.env)}:{})});
 if(tool==='poki-native'&&args[0]==='--local-server') {
  const {createServer}=await import('node:net'),{execFile}=await import('node:child_process');
  const running=new Set();
@@ -144,7 +145,7 @@ export async function fixture(t, { approvalMode = 'ask', staleNative = false, to
  for(const tool of ['python3','xcrun','idevice','ffmpeg','ffprobe','osascript','zenity','pymobiledevice3'])await writeFile(join(dir,'bin',tool),fixtureProgram,{mode:0o755});
  for(const tool of ['poki-native','ocr','simulator'])await writeFile(join(dir,'build',tool),fixtureProgram,{mode:0o755});
  if(staleNative){await mkdir(join(dir,'native/bridge/src'),{recursive:true});await writeFile(join(dir,'native/bridge/src/main.rs'),'fn main() {}');await utimes(join(dir,'build/poki-native'),1,1);}
- const env={...process.env,POKI_DAEMON_IDLE_EXIT_MS:'120000',POKI_NO_UPDATE_CHECK:'1',POKI_MCP_TOOLS:toolsProfile,POKI_MCP_APPROVAL_MODE:approvalMode??'',HOME:dir,PATH:join(dir,'bin')+':'+process.env.PATH,POKI_MCP_STATE_DIR:join(dir,'state'),IDEVICE_TOOLS:join(dir,'bin/idevice'),FIXTURE_STATE:state,FIXTURE_LOG:log,FIXTURE_IMAGE:image,...extraEnv?.(dir)};
+ const env={...process.env,POKI_DAEMON_IDLE_EXIT_MS:'120000',POKI_NO_UPDATE_CHECK:'1',POKI_MCP_TOOLS:toolsProfile,POKI_MCP_APPROVAL_MODE:approvalMode??'',HOME:dir,PATH:join(dir,'bin')+':'+process.env.PATH,POKI_MCP_STATE_DIR:join(dir,'state'),POKI_DAEMON_ENV:'FIXTURE_STATE,FIXTURE_LOG,FIXTURE_IMAGE,FIXTURE_LOG_ENV',IDEVICE_TOOLS:join(dir,'bin/idevice'),FIXTURE_STATE:state,FIXTURE_LOG:log,FIXTURE_IMAGE:image,...extraEnv?.(dir)};
  let stderr='';
  const daemons=[];
  const startDaemon=async(port=0)=>{const child=spawn(process.execPath,[join(dir,'src/daemon.mjs'),'--port',String(port)],{env,stdio:['ignore','pipe',staleNative?'pipe':'inherit']});child.stderr?.on('data',chunk=>{stderr+=chunk;});const exited=once(child,'exit'),lines=createInterface({input:child.stdout});await once(lines,'line');const running={pid:child.pid,stop:async(signal='SIGTERM')=>{child.kill(signal);await exited;lines.close();}};daemons.push(running);return running;};
