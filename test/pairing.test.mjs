@@ -2,53 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, writeFile, readFile, stat, access } from 'node:fs/promises';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { fixture } from './fixture.mjs';
-
-// One stub for both helper modes the pairing flow starts:
-// --pair-host: plays `pairHost` from pairing.json, waiting at each `await` step for that file to
-//   appear; on SIGTERM prints a cancelled event and exits 1, as pair_host.rs does.
-// --remote-server: answers device_info, ddi_status, install_ddi and disconnect from `remote` in
-//   pairing.json, logging every request to the fixture log.
-const helper = `#!/usr/bin/env node
-import { appendFileSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { createServer } from 'node:net';
-import { createInterface } from 'node:readline';
-import { dirname, join } from 'node:path';
-const log = event => appendFileSync(process.env.FIXTURE_LOG, JSON.stringify(event) + '\\n');
-const config = () => JSON.parse(readFileSync(join(dirname(process.env.FIXTURE_STATE), 'pairing.json'), 'utf8'));
-const mode = process.argv[2];
-log({ helper: mode, args: process.argv.slice(3), pid: process.pid });
-if (mode === '--pair-host') {
-  const [, , , hostState, output, name] = process.argv;
-  process.on('SIGTERM', () => { log({ helper: 'pair-host-sigterm', pid: process.pid }); console.log(JSON.stringify({ event: 'cancelled' })); process.exit(1); });
-  for (const step of config().pairHost) {
-    if (step.await) { while (!existsSync(join(dirname(process.env.FIXTURE_STATE), step.await))) await new Promise(r => setTimeout(r, 20)); continue; }
-    if (step.fail) { console.error(step.fail); process.exit(1); }
-    if (step.event === 'paired') writeFileSync(output, 'pairing record for ' + name);
-    console.log(JSON.stringify(step));
-  }
-  process.exit(0);
-}
-if (mode === '--remote-server') {
-  let installed = false;
-  const server = createServer(socket => {
-    socket.write(JSON.stringify({ pid: process.pid }) + '\\n');
-    createInterface({ input: socket }).once('line', line => {
-      const request = JSON.parse(line);
-      log({ remote: request.op, request });
-      const remote = config().remote ?? {};
-      const reply = request.op === 'disconnect' ? { disconnected: true }
-        : request.op === 'device_info' ? { properties: { DeviceName: 'Wireless iPhone', ProductType: 'iPhone17,1', ProductVersion: '27.0' } }
-        : request.op === 'ddi_status' ? { display_service: installed || Boolean(remote.displayService), cryptexd: true, ddi: installed ? { identifier: 'com.apple.MobileAsset.DDI', version: '27B52' } : null }
-        : request.op === 'install_ddi' ? (remote.install ?? (installed = true, { installed: true, display_service: true, ddi: { identifier: 'com.apple.MobileAsset.DDI', version: '27B52' } }))
-        : { transport_error: true, error: 'Unexpected native request ' + request.op };
-      socket.end(JSON.stringify(reply) + '\\n');
-      if (request.op === 'disconnect') server.close(() => process.exit(0));
-    });
-  });
-  server.listen(process.argv[4], () => console.log(JSON.stringify({ ready: true })));
-} else if (mode !== '--pair-host') process.exit(1);
-`;
+import { pairingNative as helper } from './support/pairing-native.mjs';
 
 const paired = { event: 'paired', device: { udid: 'wireless-27', name: 'Wireless iPhone', model: 'iPhone17,1' }, peer: '192.0.2.27' };
 const happyPath = [{ event: 'advertising', port: 53124 }, { event: 'connected', peer: '192.0.2.27' }, { event: 'pin', pin: '482916' }, { await: 'accept' }, paired];
@@ -65,6 +21,8 @@ async function pairingFixture(t, { pairHost = happyPath, remote = {} } = {}) {
     },
     extraEnv: dir => ({ POKI_DDI_DIR: join(dir, 'ddi-image') }),
   });
+  // The stand-in RemotePairing helpers run detached, as real ones do; stop them with the test.
+  t.after(() => { try { execFileSync('pkill', ['-f', `${f.dir}/build/poki-native`]); } catch {} });
   const data = result => {
     assert.ok(!result.isError, JSON.stringify(result));
     return result.structuredContent;

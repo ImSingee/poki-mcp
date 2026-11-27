@@ -70,7 +70,13 @@ export async function disconnectRemote(target, { timeoutMs = 10000 } = {}) {
       socket.end();
     });
     socket.on('error', () => {});
-    socket.once('close', () => { clearTimeout(timer); lines.close(); resolve({ running: true, disconnected: reply?.disconnected === true }); });
+    socket.once('close', async () => {
+      clearTimeout(timer); lines.close();
+      const disconnected = reply?.disconnected === true;
+      // The helper is gone, and so is the configuration its socket is named after: nothing reuses it.
+      if (disconnected) await unlink(path).catch(() => {});
+      resolve({ running: true, disconnected });
+    });
   });
 }
 
