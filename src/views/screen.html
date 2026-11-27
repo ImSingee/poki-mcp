@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>iPhone screen</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: var(--color-background-primary, light-dark(#ffffff, #17181a));
+    --bg-2: var(--color-background-secondary, light-dark(#f4f5f7, #212327));
+    --text: var(--color-text-primary, light-dark(#17181a, #ececee));
+    --text-2: var(--color-text-secondary, light-dark(#5b5f66, #a3a7ae));
+    --border: var(--color-border-primary, light-dark(#e3e5e8, #34373c));
+    --accent: var(--color-text-info, light-dark(#1f6feb, #5ea0ff));
+    --warn: var(--color-text-warning, light-dark(#9a6700, #d9a43a));
+    --danger: var(--color-text-danger, light-dark(#cf222e, #ff7b72));
+    --radius: var(--border-radius-md, 10px);
+    --radius-sm: var(--border-radius-sm, 6px);
+    --font: var(--font-sans, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif);
+    --mono: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
+  }
+  :root[data-theme="light"] { color-scheme: light; }
+  :root[data-theme="dark"] { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: transparent; }
+  body { font: 13px/1.4 var(--font); color: var(--text); }
+  main { display: grid; gap: 8px; padding: 10px; }
+  .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .bar .grow { flex: 1; min-width: 0; }
+  select, button { font: inherit; color: var(--text); background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 4px 8px; min-height: 30px; }
+  button { cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  select { max-width: 100%; }
+  .stage { position: relative; justify-self: center; width: 100%; max-width: 520px; background: #000; border-radius: 18px; overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; }
+  canvas { display: block; width: 100%; height: auto; outline: none; cursor: crosshair; }
+  canvas:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
+  .stats { position: absolute; top: 6px; right: 6px; padding: 2px 6px; border-radius: 6px; background: rgba(0,0,0,.55); color: #fff; font: 11px/1.3 var(--mono); pointer-events: none; white-space: nowrap; }
+  .notice { position: absolute; inset: auto 8px 8px 8px; padding: 8px 10px; border-radius: var(--radius-sm); background: rgba(0,0,0,.72); color: #fff; font-size: 12px; }
+  .notice[hidden], .stats[hidden] { display: none; }
+  .notice button { margin-left: 6px; color: #fff; background: rgba(255,255,255,.15); border-color: rgba(255,255,255,.3); }
+  .placeholder { aspect-ratio: 9 / 19.5; display: grid; place-items: center; color: #9aa0a6; padding: 16px; text-align: center; }
+  .hint { color: var(--text-2); font-size: 12px; }
+  .error { color: var(--danger); font-size: 12px; white-space: pre-wrap; }
+  dialog { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); color: var(--text); max-width: 320px; }
+  dialog p { margin: 0 0 12px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="bar">
+    <select id="device" class="grow" aria-label="iPhone"></select>
+    <button id="home" title="Home" aria-label="Home">Home</button>
+    <button id="lock" title="Lock" aria-label="Lock">Lock</button>
+    <button id="takeover" hidden>Take over</button>
+  </div>
+  <div class="stage" id="stage">
+    <div class="placeholder" id="placeholder">Connecting…</div>
+    <canvas id="screen" tabindex="0" hidden aria-label="iPhone screen. Click to tap, drag to swipe, type to send keys."></canvas>
+    <div class="stats" id="stats" hidden></div>
+    <div class="notice" id="notice" hidden></div>
+  </div>
+  <div class="hint" id="hint">Click to tap, hold to long-press, drag to swipe, two fingers to pinch. Focus the screen and type to send keys.</div>
+  <div class="error" id="error" hidden></div>
+</main>
+<dialog id="confirm">
+  <p id="confirm-text">The agent is using this iPhone. Taking over stops what it is doing on this iPhone, and it cannot use the iPhone while you control it.</p>
+  <div class="bar"><button id="confirm-yes" class="primary">Take over</button><button id="confirm-no">Cancel</button></div>
+</dialog>
+<!-- poki:ext-apps -->
+<script type="module">
+const { App, PostMessageTransport, applyDocumentTheme, applyHostStyleVariables, applyHostFonts } = globalThis.PokiExtApps;
+const $ = id => document.getElementById(id);
+const app = new App({ name: 'poki-screen', version: '1.0.0' }, {}, { autoResize: true });
+
+// Settings a test or a host may adjust before the stream starts.
+const settings = Object.assign({ rtc: true, rtcTimeoutMs: 3000, inFlight: 2, waitMs: 1000, credit: 16, codecs: undefined }, globalThis.pokiScreenSettings ?? {});
+
+const state = {
+  device: undefined, devices: [], stream: undefined, codec: undefined, codecString: undefined, width: 0, height: 0,
+  transport: undefined, generation: 0, closed: false, canCall: true, busy: undefined, maxBytes: undefined, failures: 0,
+  served: undefined, unavailable: new Set(),
+};
+// Exposed for tests and diagnostics.
+globalThis.pokiScreen = state;
+
+function applyContext(context) {
+  if (!context) return;
+  if (context.theme) applyDocumentTheme(context.theme);
+  if (context.styles?.variables) applyHostStyleVariables(context.styles.variables);
+  if (context.styles?.css?.fonts) applyHostFonts(context.styles.css.fonts);
+}
+function data(result) {
+  if (result?.structuredContent) return result.structuredContent;
+  for (const text of (result?.content ?? []).filter(b => b.type === 'text').map(b => b.text).reverse()) { try { return JSON.parse(text); } catch {} }
+  return undefined;
+}
+async function call(name, args = {}) {
+  const result = await app.callServerTool({ name, arguments: args });
+  if (result.isError) {
+    const message = (result.content ?? []).filter(b => b.type === 'text').map(b => b.text).join('\n') || `${name} failed`;
+    throw Object.assign(new Error(message), { data: data(result) });
+  }
+  return data(result);
+}
+function showError(error) { $('error').hidden = !error; $('error').textContent = error ? (error.message ?? String(error)) : ''; }
+function notice(text, action) {
+  const box = $('notice');
+  box.hidden = !text;
+  box.replaceChildren();
+  if (!text) return;
+  box.append(text);
+  if (action) { const button = document.createElement('button'); button.textContent = action.label; button.onclick = action.run; box.append(button); }
+}
+
+// ---- Decoding: HEVC as the phone sends it, then H.264 or JPEG transcoded on this computer. -------
+const b64 = text => { const binary = atob(text); const out = new Uint8Array(binary.length); for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i); return out; };
+async function supportedCodecs() {
+  if (settings.codecs) return settings.codecs;
+  const out = [];
+  if (typeof VideoDecoder !== 'undefined') {
+    const check = codec => Promise.race([VideoDecoder.isConfigSupported({ codec, optimizeForLatency: true }).then(r => r.supported, () => false), new Promise(r => setTimeout(() => r(false), 2000))]);
+    if (await check('hvc1.1.6.L120.90')) out.push('hevc');
+    if (await check('avc1.42E01F')) out.push('h264');
+  }
+  out.push('jpeg');
+  return out;
+}
+
+const canvas = $('screen');
+const context2d = canvas.getContext('2d');
+let latest, drawScheduled = false;
+const stats = { decoded: 0, fpsAt: performance.now(), fpsFrames: 0, fps: 0, latency: 0 };
+function present(image) {
+  latest?.close?.();
+  latest = image;
+  stats.fpsFrames++;
+  if (!drawScheduled) { drawScheduled = true; requestAnimationFrame(draw); setTimeout(draw, 100); }
+}
+function draw() {
+  drawScheduled = false;
+  const image = latest; latest = undefined;
+  if (!image) return;
+  const width = image.displayWidth ?? image.width, height = image.displayHeight ?? image.height;
+  if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; layout(); }
+  context2d.drawImage(image, 0, 0, width, height);
+  image.close?.();
+  if (canvas.hidden) { canvas.hidden = false; $('placeholder').hidden = true; layout(); }
+}
+// The panel fills its width; inline on a phone the host caps the view's height, so the canvas is too.
+function layout() {
+  const stage = $('stage');
+  const ratio = canvas.width && canvas.height ? canvas.width / canvas.height : 9 / 19.5;
+  const maxHeight = Math.min(1800, Math.max(320, window.innerHeight > 200 && app.getHostContext?.()?.displayMode === 'fullscreen' ? window.innerHeight - 110 : 1800));
+  stage.style.maxWidth = `${Math.round(Math.min(520, maxHeight * ratio))}px`;
+}
+
+class Decoder {
+  constructor(codec, codecString, onDecoded, onFailure) {
+    Object.assign(this, { codec, codecString, onDecoded, onFailure, pending: new Map(), waitingKey: true, errors: 0 });
+    if (codec !== 'jpeg') this.open();
+  }
+  open() {
+    this.video?.close?.();
+    this.video = new VideoDecoder({
+      output: frame => { const seq = this.pending.get(frame.timestamp); this.pending.delete(frame.timestamp); present(frame); stats.decoded++; if (seq !== undefined) this.onDecoded(seq); },
+      error: () => { this.waitingKey = true; this.pending.clear(); if (++this.errors > 3) this.onFailure('decode'); else { try { this.open(); } catch { this.onFailure('decode'); } this.onDecoded(undefined, true); } },
+    });
+    this.video.configure({ codec: this.codecString, optimizeForLatency: true });
+  }
+  // frame: { seq, key, data (Uint8Array) }. A chain starts at a key frame.
+  async decode(frame) {
+    if (this.codec === 'jpeg') {
+      try { present(await createImageBitmap(new Blob([frame.data], { type: 'image/jpeg' }))); stats.decoded++; this.onDecoded(frame.seq); }
+      catch { if (++this.errors > 3) this.onFailure('decode'); }
+      return;
+    }
+    if (this.waitingKey && !frame.key) { this.onDecoded(frame.seq); return; }
+    this.waitingKey = false;
+    // The decoder reports frames by timestamp; seq is unique and increasing.
+    const timestamp = frame.seq * 1000;
+    this.pending.set(timestamp, frame.seq);
+    try { this.video.decode(new EncodedVideoChunk({ type: frame.key ? 'key' : 'delta', timestamp, data: frame.data })); }
+    catch { this.waitingKey = true; this.onDecoded(undefined, true); }
+  }
+  get backlog() { return this.video?.decodeQueueSize ?? 0; }
+  close() { try { this.video?.close(); } catch {} }
+}
+
+// ---- The stream: open, receive (A or B), acknowledge, fall back. -------------------------------
+let decoder, decodedSeq = 0, lastSeq = 0, held = [], reorderTimer, rtc;
+function resetChain() { lastSeq = 0; held = []; clearTimeout(reorderTimer); }
+
+// Frames arrive in batches; with several reads in flight, out of order. A batch is used once it
+// continues the frames already used (`after`) or starts a new chain (`discontinuity`).
+function accept(batch, generation) {
+  if (generation !== state.generation || !batch.frames?.length) return;
+  held.push(batch);
+  drain(generation);
+}
+function drain(generation) {
+  for (let progressed = true; progressed;) {
+    progressed = false;
+    held.sort((a, b) => a.frames[0].seq - b.frames[0].seq);
+    for (const [index, batch] of held.entries()) {
+      const usable = batch.discontinuity || batch.after === lastSeq || lastSeq === 0;
+      const stale = batch.frames.at(-1).seq <= lastSeq;
+      if (!usable && !stale) continue;
+      held.splice(index, 1);
+      if (!stale) for (const frame of batch.frames) if (frame.seq > lastSeq) { lastSeq = frame.seq; void decoder?.decode({ seq: frame.seq, key: frame.key, data: typeof frame.data === 'string' ? b64(frame.data) : frame.data }); }
+      progressed = true;
+      break;
+    }
+  }
+  clearTimeout(reorderTimer);
+  // A batch that cannot be placed after two seconds: its predecessor was lost; start again at a key frame.
+  if (held.length) reorderTimer = setTimeout(() => { if (generation === state.generation && held.length) { held = []; resync(); } }, 2000);
+}
+let resyncWanted = false;
+function resync() { resyncWanted = true; if (state.transport === 'webrtc') rtc?.send({ type: 'keyframe' }); }
+function decoded(seq, broken) {
+  if (broken) { resync(); return; }
+  if (seq > decodedSeq) decodedSeq = seq;
+  if (state.transport === 'webrtc') rtc?.send({ type: 'ack', seq: decodedSeq });
+}
+
+async function openStream() {
+  const generation = ++state.generation;
+  stop(false);
+  if (!state.device) return;
+  showError(); notice('');
+  const codecs = (await supportedCodecs()).filter(codec => !state.unavailable.has(codec));
+  if (!codecs.length) { notice('This browser cannot show the screen.'); return; }
+  let opened;
+  try { opened = await call('screen_open', { device: state.device, codecs }); }
+  catch (error) { if (generation === state.generation) { $('placeholder').hidden = false; $('placeholder').textContent = error.message; } return; }
+  if (generation !== state.generation) { call('screen_close', { stream: opened.stream }).catch(() => {}); return; }
+  Object.assign(state, { stream: opened.stream, codec: opened.codec, codecString: opened.codec_string, width: opened.width, height: opened.height, failures: 0 });
+  decodedSeq = 0; resetChain();
+  decoder = new Decoder(state.codec, state.codecString ?? (state.codec === 'hevc' ? 'hvc1.1.6.L120.90' : 'avc1.42E01F'), decoded, () => fallBack(generation));
+  if (settings.rtc && typeof RTCPeerConnection !== 'undefined' && await tryRtc(generation)) return;
+  if (generation !== state.generation) return;
+  startPolling(generation);
+}
+
+// A codec this browser failed to decode is not tried again in this view.
+function fallBack(generation) {
+  if (generation !== state.generation) return;
+  state.unavailable.add(state.codec);
+  void openStream();
+}
+
+// Transport B: long-polled screen_read calls, several in flight.
+function startPolling(generation) {
+  state.transport = 'tool-calls';
+  for (let i = 0; i < settings.inFlight; i++) void poll(generation, i);
+}
+async function poll(generation, lane) {
+  while (generation === state.generation && state.stream && !state.closed) {
+    const started = performance.now();
+    try {
+      const args = { stream: state.stream, ack: decodedSeq, credit: Math.max(1, settings.credit - (decoder?.backlog ?? 0)), wait_ms: settings.waitMs };
+      if (resyncWanted) { args.resync = true; resyncWanted = false; }
+      if (state.maxBytes) args.max_bytes = state.maxBytes;
+      const reply = await call('screen_read', args);
+      if (generation !== state.generation) return;
+      state.failures = 0;
+      if (reply.closed) { void openStream(); return; }
+      if (reply.frames?.length) { stats.latency = Math.round(performance.now() - started); accept(reply, generation); }
+      if (reply.width && !state.width) Object.assign(state, { width: reply.width, height: reply.height });
+    } catch (error) {
+      if (generation !== state.generation) return;
+      // A relay that refuses large replies: ask for smaller batches before giving up on the codec.
+      state.failures++;
+      state.maxBytes = Math.max(16 * 1024, Math.floor((state.maxBytes ?? 256 * 1024) / 2));
+      if (/ended|closed/i.test(error.message)) { void openStream(); return; }
+      if (state.failures >= 6) { if (state.codec !== 'jpeg') fallBack(generation); else notice(error.message); return; }
+      await new Promise(r => setTimeout(r, 300 * state.failures));
+    }
+  }
+}
+
+// Transport A: WebRTC DataChannels, if ICE connects within rtcTimeoutMs.
+async function tryRtc(generation) {
+  let pc;
+  try {
+    const config = await call('screen_rtc_config', { stream: state.stream });
+    if (!config?.enabled) return false;
+    pc = new RTCPeerConnection({ iceServers: config.ice_servers ?? [] });
+    const media = pc.createDataChannel('media', { ordered: true }), control = pc.createDataChannel('control', { ordered: true });
+    media.binaryType = 'arraybuffer';
+    let frame, offset = 0;
+    media.onmessage = event => {
+      const bytes = event.data;
+      if (!(bytes instanceof ArrayBuffer) || bytes.byteLength <= 8) return;
+      const view = new DataView(bytes), total = view.getUint32(0), at = view.getUint32(4), part = new Uint8Array(bytes, 8);
+      if (!total || at !== offset || at + part.length > total) { frame = undefined; offset = 0; resync(); return; }
+      frame ??= new Uint8Array(total);
+      frame.set(part, at); offset += part.length;
+      if (offset < total) return;
+      const packet = frame; frame = undefined; offset = 0;
+      receivePacket(packet, generation);
+    };
+    const opened = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('ICE did not connect')), settings.rtcTimeoutMs);
+      control.onmessage = event => {
+        let message; try { message = JSON.parse(event.data); } catch { return; }
+        if (message.type === 'ready') { clearTimeout(timer); resolve(); }
+        else if (message.type === 'discontinuity') resetChain();
+        else if (message.type === 'input-result') inputReplies.get(message.id)?.(message);
+      };
+      pc.onconnectionstatechange = () => { if (['failed', 'closed'].includes(pc.connectionState)) { clearTimeout(timer); reject(new Error('ICE failed')); } };
+    });
+    await pc.setLocalDescription(await pc.createOffer());
+    await new Promise(resolve => {
+      if (pc.iceGatheringState === 'complete') return resolve();
+      const done = () => { if (pc.iceGatheringState === 'complete') resolve(); };
+      pc.addEventListener('icegatheringstatechange', done);
+      setTimeout(resolve, 1500);
+    });
+    const answer = await call('screen_rtc_offer', { stream: state.stream, sdp: pc.localDescription.sdp });
+    await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
+    await opened;
+    if (generation !== state.generation) { pc.close(); return true; }
+    rtc = { pc, send: value => { if (control.readyState === 'open') control.send(JSON.stringify(value)); } };
+    state.transport = 'webrtc';
+    const heartbeat = setInterval(() => { if (generation !== state.generation) { clearInterval(heartbeat); return; } rtc?.send({ type: 'ping' }); }, 3000);
+    pc.addEventListener('connectionstatechange', () => {
+      // A peer lost after it worked: carry on over tool calls with the same stream.
+      if (['failed', 'disconnected', 'closed'].includes(pc.connectionState) && generation === state.generation && state.transport === 'webrtc') { rtc = undefined; resetChain(); resync(); startPolling(generation); }
+    });
+    return true;
+  } catch {
+    pc?.close();
+    return false;
+  }
+}
+const MAGIC = { 0x4c485643: 'hevc', 0x4c415643: 'h264', 0x4c4f4459: 'jpeg' };
+function receivePacket(packet, generation) {
+  const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
+  const codec = MAGIC[view.getUint32(0)], seq = view.getUint32(4);
+  if (!codec) return;
+  if (codec === 'jpeg') { accept({ discontinuity: true, frames: [{ seq, key: true, data: packet.subarray(8) }] }, generation); return; }
+  const key = packet[8] === 2, configLength = view.getUint16(9);
+  accept({ after: lastSeq, frames: [{ seq, key, data: packet.subarray(11 + configLength) }] }, generation);
+}
+
+function stop(closeStream = true) {
+  const stream = state.stream;
+  state.stream = undefined; state.transport = undefined;
+  rtc?.pc.close(); rtc = undefined;
+  decoder?.close(); decoder = undefined;
+  resetChain();
+  if (closeStream && stream) call('screen_close', { stream }).catch(() => {});
+}
+
+// ---- Input: pointer gestures become screen_input calls, one per gesture, in order. -------------
+const inputReplies = new Map();
+let inputQueue = Promise.resolve(), inputId = 0;
+function sendInput(args) {
+  if (!state.stream) return;
+  inputQueue = inputQueue.then(async () => {
+    try {
+      let reply;
+      if (state.transport === 'webrtc' && rtc) {
+        const id = ++inputId;
+        reply = await new Promise(resolve => { inputReplies.set(id, resolve); rtc.send({ type: 'input', id, ...args }); setTimeout(() => resolve({ isError: true, error: 'No reply' }), 15000); });
+        inputReplies.delete(id);
+        if (reply.isError && reply.reason !== 'busy') throw new Error(reply.error);
+      } else {
+        reply = await call('screen_input', { stream: state.stream, ...args }).catch(error => ({ isError: true, ...(error.data ?? {}), error: error.message }));
+      }
+      if (reply?.reason === 'busy') { $('takeover').hidden = false; notice(reply.error ?? 'The agent is using this iPhone.', { label: 'Take over', run: askTakeover }); }
+      else if (reply?.isError) notice(reply.error);
+      else notice('');
+    } catch (error) { notice(error.message); }
+  });
+}
+globalThis.pokiScreenInput = sendInput;
+
+// Normalized position (0..1) of a pointer on the phone's screen.
+function position(event) {
+  const rect = canvas.getBoundingClientRect();
+  return { x: Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)), y: Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height)) };
+}
+// Classifies one pointer gesture (exported for tests): a short still press is a tap, a long still
+// press a long press, a quick movement a swipe and a slow one a drag; two pointers make a pinch.
+globalThis.pokiGesture = function gesture(points, second) {
+  const first = points[0], last = points.at(-1), duration = Math.max(1, last.t - first.t);
+  if (second) {
+    const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+    return { kind: 'pinch', x: (first.x + second[0].x) / 2, y: (first.y + second[0].y) / 2, start_distance: distance(first, second[0]), end_distance: distance(last, second.at(-1)), t_ms: duration };
+  }
+  const moved = Math.hypot(last.x - first.x, last.y - first.y) * Math.max(canvas.clientWidth || 390, 1);
+  if (moved < 8) return duration >= 500 ? { kind: 'long_press', x: first.x, y: first.y, t_ms: duration } : { kind: 'tap', x: first.x, y: first.y, t_ms: duration };
+  return { kind: duration <= 300 ? 'swipe' : 'drag', x: first.x, y: first.y, x2: last.x, y2: last.y, t_ms: duration };
+};
+const pointers = new Map();
+canvas.addEventListener('pointerdown', event => {
+  canvas.focus();
+  canvas.setPointerCapture(event.pointerId);
+  pointers.set(event.pointerId, [{ ...position(event), t: performance.now() }]);
+  event.preventDefault();
+});
+canvas.addEventListener('pointermove', event => { pointers.get(event.pointerId)?.push({ ...position(event), t: performance.now() }); });
+const finish = event => {
+  const points = pointers.get(event.pointerId);
+  if (!points) return;
+  points.push({ ...position(event), t: performance.now() });
+  pointers.delete(event.pointerId);
+  // The first finger to lift ends a two-finger gesture; the other's path makes it a pinch.
+  const [other] = pointers.values();
+  if (other) { pointers.clear(); sendInput(globalThis.pokiGesture(points, other)); return; }
+  sendInput(globalThis.pokiGesture(points));
+};
+canvas.addEventListener('pointerup', finish);
+canvas.addEventListener('pointercancel', event => pointers.delete(event.pointerId));
+canvas.addEventListener('contextmenu', event => event.preventDefault());
+// Keys typed while the screen has focus: printable text in one call per burst, special keys alone.
+let typed = '', typedTimer;
+const special = { Enter: 'return', Backspace: 'backspace', Tab: 'tab', Escape: 'escape', ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down', Delete: 'forward_delete' };
+canvas.addEventListener('keydown', event => {
+  if (event.metaKey || event.ctrlKey || event.altKey) {
+    if (event.key.length === 1) { sendInput({ kind: 'key', key: event.key.toLowerCase(), modifiers: [event.metaKey && 'command', event.ctrlKey && 'control', event.altKey && 'option', event.shiftKey && 'shift'].filter(Boolean) }); event.preventDefault(); }
+    return;
+  }
+  if (event.key.length === 1) { typed += event.key; clearTimeout(typedTimer); typedTimer = setTimeout(flushTyped, 250); event.preventDefault(); return; }
+  if (special[event.key]) { flushTyped(); sendInput({ kind: 'key', key: special[event.key] }); event.preventDefault(); }
+});
+function flushTyped() { clearTimeout(typedTimer); if (typed) { sendInput({ kind: 'text', text: typed }); typed = ''; } }
+$('home').onclick = () => sendInput({ kind: 'button', button: 'home' });
+$('lock').onclick = () => sendInput({ kind: 'button', button: 'lock' });
+
+// Taking over interrupts the agent: only after the person confirms.
+function askTakeover() { $('confirm').showModal(); }
+$('takeover').onclick = askTakeover;
+$('confirm-no').onclick = () => $('confirm').close();
+$('confirm-yes').onclick = async () => {
+  $('confirm').close();
+  try { await call('screen_takeover', { stream: state.stream, confirm: true }); $('takeover').hidden = true; notice(''); }
+  catch (error) { notice(error.message); }
+};
+
+// ---- Devices --------------------------------------------------------------------------------
+async function refreshDevices() {
+  try {
+    const listed = await call('list_devices');
+    state.devices = (listed?.devices ?? []).filter(d => d.kind === 'physical');
+  } catch (error) { showError(error); }
+  const select = $('device');
+  select.replaceChildren(...state.devices.map(d => { const option = document.createElement('option'); option.value = d.id; option.textContent = d.name && d.name !== d.id ? `${d.name}` : d.id; return option; }));
+  if (!state.device && state.devices.length) state.device = (state.devices.find(d => d.connection === 'RemotePairing') ?? state.devices[0]).id;
+  if (state.device) select.value = state.device;
+  if (!state.devices.length) { $('placeholder').textContent = 'No iPhone is paired with this computer.'; $('placeholder').hidden = false; }
+}
+$('device').onchange = () => { state.device = $('device').value; $('takeover').hidden = true; void openStream(); };
+
+// Stats in the corner: transport, codec, frames shown per second, and the last batch's round trip.
+setInterval(() => {
+  const now = performance.now();
+  stats.fps = Math.round(stats.fpsFrames * 1000 / Math.max(1, now - stats.fpsAt)); stats.fpsFrames = 0; stats.fpsAt = now;
+  const box = $('stats');
+  box.hidden = !state.transport;
+  box.textContent = `${state.transport === 'webrtc' ? 'WebRTC' : 'tool calls'} · ${state.codec?.toUpperCase() ?? ''} · ${stats.fps} fps${state.transport === 'webrtc' ? '' : ` · ${stats.latency} ms`}`;
+  state.stats = { fps: stats.fps, latency: stats.latency, decoded: stats.decoded };
+}, 1000);
+
+app.ontoolresult = params => {
+  const value = data(params);
+  const device = value?.device;
+  if (device && device !== state.device) { state.device = device; $('device').value = device; void openStream(); }
+};
+app.onhostcontextchanged = context => { applyContext(context); layout(); };
+app.onteardown = async () => { state.closed = true; state.generation++; stop(); return {}; };
+window.addEventListener('pagehide', () => stop());
+
+try {
+  await app.connect(new PostMessageTransport(window.parent, window.parent));
+  applyContext(app.getHostContext());
+  if (!app.getHostCapabilities()?.serverTools) state.canCall = false;
+} catch (error) {
+  state.canCall = false;
+  showError(new Error(`Could not connect to the host: ${error.message}`));
+}
+layout();
+if (state.canCall) { await refreshDevices(); if (state.device && !state.stream) await openStream(); }
+else $('placeholder').textContent = 'This host cannot call Poki tools, so the screen cannot be shown here.';
+</script>
+</body>
+</html>

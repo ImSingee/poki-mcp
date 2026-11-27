@@ -63,8 +63,12 @@ class ScreenHub {
     // A media restart (native.reset) begins with a key frame, which starts a new chain anyway.
     const frame = { seq, key: native.key, pts_us: native.pts_us, config: native.config, data: native.data, at: performance.now() };
     this.tracks.get('hevc').push(frame);
+    this.pushed('hevc');
     for (const transcoder of this.transcoders.values()) transcoder.write(frame);
   }
+
+  // Viewers on WebRTC are pushed to: they have no pending read to wake.
+  pushed(codec) { for (const viewer of this.viewers) if (viewer.codec === codec) viewer.rtc?.pump(); }
 
   // The track a codec reads, starting its encoder when it is a transcoded one.
   track(codec) {
@@ -74,7 +78,7 @@ class ScreenHub {
       let seq = 0;
       const transcoder = new Transcoder(codec, {
         bitrate: this.bitrate(codec), spawn: this.deps.spawn,
-        onFrame: frame => track.push({ ...frame, seq: ++seq, at: performance.now() }),
+        onFrame: frame => { track.push({ ...frame, seq: ++seq, at: performance.now() }); this.pushed(codec); },
         onExit: ({ closed }) => { if (!closed) { track.reset(); seq++; } },
       });
       this.tracks.set(codec, track); this.transcoders.set(codec, transcoder);
@@ -158,22 +162,34 @@ class Viewer {
     return { stream: this.id, device: this.device, codec: this.codec, ...(track.info?.codec ? { codec_string: track.info.codec } : {}), ...(size ? { width: size.width, height: size.height } : {}), lease_ms: this.screens.ttlMs };
   }
 
+  // The frames this viewer may receive now, without waiting.
+  take({ credit, ...limits } = readLimits()) {
+    const now = performance.now();
+    const taken = this.flow.take(this.track, now, { credit: Number.isSafeInteger(credit) ? credit : undefined, ...limits });
+    if (taken.recover) this.hub.requestKeyframe(this.codec);
+    this.hub.retune(this.codec, now);
+    return taken;
+  }
+
   // Long poll: returns as soon as there are frames to send, or after wait_ms.
-  async read({ cursor, ack, credit, wait_ms = MAX_WAIT_MS, resync = false } = {}, signal) {
+  async read({ cursor, ack, credit, wait_ms = MAX_WAIT_MS, resync = false, max_bytes } = {}, signal) {
     this.renew();
     const now = () => performance.now();
     if (Number.isSafeInteger(ack ?? cursor)) this.flow.acknowledge(ack ?? cursor, now());
     if (resync) { this.flow.resync(); this.hub.requestKeyframe(this.codec); }
+    // A view whose reads fail (a relay's size limit, say) asks for smaller batches.
     const limits = readLimits();
+    if (Number.isSafeInteger(max_bytes) && max_bytes >= 16 * 1024) limits.maxBytes = Math.min(limits.maxBytes, max_bytes);
     const deadline = now() + Math.min(Math.max(0, wait_ms), MAX_WAIT_MS);
     for (;;) {
       if (this.closed) return { stream: this.id, device: this.device, codec: this.codec, closed: true, frames: [] };
       const track = this.track;
-      const taken = this.flow.take(track, now(), { credit: Number.isSafeInteger(credit) ? credit : undefined, ...limits });
-      if (taken.recover) this.hub.requestKeyframe(this.codec);
-      this.hub.retune(this.codec, now());
+      // Several reads may be in flight and their replies may arrive out of order: `after` says
+      // which frame a batch continues, so the view can put batches back in order.
+      const after = this.flow.sent;
+      const taken = this.take({ credit, ...limits });
       if (taken.frames.length || now() >= deadline || signal?.aborted) {
-        return { ...this.describe(), ...(taken.discontinuity ? { discontinuity: true } : {}), ...(this.hub.error && !this.hub.subscription ? { source_error: this.hub.error } : {}), flow: this.flow.snapshot(now()),
+        return { ...this.describe(), after, ...(taken.discontinuity ? { discontinuity: true } : {}), ...(this.hub.error && !this.hub.subscription ? { source_error: this.hub.error } : {}), flow: this.flow.snapshot(now()),
           frames: taken.frames.map(frame => ({ seq: frame.seq, key: frame.key, pts_us: frame.pts_us, ...(frame.config ? { config: frame.config.toString('base64') } : {}), data: frame.data.toString('base64') })) };
       }
       await track.wait(deadline - now(), signal);
@@ -181,7 +197,7 @@ class Viewer {
     }
   }
 
-  close() { this.closed = true; this.screens.detach(this); }
+  close() { this.closed = true; void this.rtc?.close(); this.screens.detach(this); }
 }
 
 // Every device's live screen in this daemon.
