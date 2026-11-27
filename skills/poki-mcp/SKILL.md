@@ -16,6 +16,8 @@ Set `POKI_MCP_TOOLS=all` in the MCP client's process environment and reconnect t
 
 Call `list_devices` once and pass one of its ids as `device` on every device tool call; an exact device name also works. When exactly one device is listed, its `default` field names it. There is no selected device to fall back on. `batch_commands` takes one top-level `device`, and its steps name none. `run_code` takes `devices`, and each `tools.<name>(...)` call in the script names one of them as `device`. `start_simulator` returns the new simulator's id; use it as `device` afterwards. Calls to different devices may run at the same time; calls to one device run in the order sent.
 
+To pair a new iPhone over Wi-Fi (iOS 27+, same network, no USB), call `pair_device`, then `pairing_status` with its `job` about every two seconds. Tell the person what its `instruction` says, and the `pin` while one is shown; stop when `terminal` is true. On `failed`, relay `action`. When `list_devices` reports `display_service: false` for a wireless device, call `pair_device` with that `device` to reinstall its developer disk image. `unpair_device` removes a wireless pairing; call it only when asked.
+
 ## Approval
 
 `poki_mcp_status.approval_mode` says who approves `install_app`, `uninstall_app`, `build_and_run`, `open_url`, `download_app_container`, `get_clipboard` and `set_clipboard`. With `ask-human`, Poki shows a dialog on its host and waits. With `host`, Poki shows no dialog: your client decides, and a client that runs tools without asking runs them unconfirmed. In `host` mode `request_human_action` is refused, so ask the user in the conversation instead. Run these tools only when the user's task calls for them.

@@ -34,6 +34,11 @@ jobs:
       - name: Install Poki Agent dependencies
         run: npm ci --prefix agent
 
+      # The MCP Apps views are tested in Chromium inside a mock host
+      # (test/pairing-view.test.mjs).
+      - name: Install Chromium for the view tests
+        run: npx playwright install --with-deps chromium
+
       # The suite is specified per file: each test file runs in its own
       # process, matching how the port is verified locally. A failure is
       # also surfaced as a workflow annotation naming the file and the

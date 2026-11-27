@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/client": "2.4.0",
+    "@modelcontextprotocol/ext-apps": "2.1.0",
     "@modelcontextprotocol/node": "2.1.2",
     "@modelcontextprotocol/server": "2.4.0",
     "acorn": "8.19.0",
@@ -29,5 +30,9 @@
   "homepage": "https://github.com/ImSingee/poki-mcp",
   "bin": {
     "poki-mcp": "bin/poki-mcp"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "playwright": "1.65.1"
   }
 }

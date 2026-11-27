@@ -9,6 +9,9 @@ import { root, stateDir } from './config.mjs';
 import { checkWork, signal, phase } from './work.mjs';
 
 const starting = new Map();
+// The pid each RemotePairing helper greeted with, by socket path: a helper busy with one long request
+// (a developer disk image installation) answers no one else, so disconnectRemote may have to stop it.
+const helperPids = new Map();
 const localHelpers = new Map();
 const readOnly = new Set(['ax_tree', 'screenshot', 'device_info', 'display_info', 'panels', 'list_apps']);
 let closing = false;
@@ -44,14 +47,75 @@ function connect(path) {
   });
 }
 
-async function socketFor(target) {
-  // macOS Unix socket names are limited to 104 bytes, regardless of the state directory's length.
-  if (!target.remote && closing) throw new Error('Local native helpers are shutting down.');
+// macOS Unix socket names are limited to 104 bytes, regardless of the state directory's length.
+async function socketPath(target) {
   const directory = `/tmp/poki-${target.remote ? 'remote' : 'native'}-${process.getuid()}`;
   await mkdir(directory, { mode: 0o700, recursive: true });
   const info = await lstat(directory);
   if (!info.isDirectory() || info.uid !== process.getuid() || (info.mode & 0o077)) throw new Error('Remote socket directory must be private and owned by this user.');
-  const path = join(directory, createHash('sha256').update(target.remote ?? JSON.stringify([root, stateDir, process.pid, target.id])).digest('hex').slice(0, 24) + '.sock');
+  return join(directory, createHash('sha256').update(target.remote ?? JSON.stringify([root, stateDir, process.pid, target.id])).digest('hex').slice(0, 24) + '.sock');
+}
+
+// Asks a running RemotePairing helper to close its tunnel and exit. A helper that is not running is
+// left alone: none is started just to stop it. One that does not confirm in time (busy with another
+// request) is stopped with SIGTERM when this daemon knows its pid. Resolves { running, disconnected,
+// stopped? }.
+export async function disconnectRemote(target, { timeoutMs = 5000 } = {}) {
+  const path = await socketPath(target);
+  let socket;
+  try { socket = await connect(path); }
+  catch (error) { if (['ENOENT', 'ECONNREFUSED'].includes(error.code)) return { running: false, disconnected: false }; throw error; }
+  const result = await askToDisconnect(socket, path, timeoutMs);
+  if (result.disconnected) { helperPids.delete(path); return result; }
+  const pid = helperPids.get(path);
+  if (!pid) return { ...result, stopped: false, note: 'The helper did not confirm and its process is unknown to this service; it ends when its tunnel closes or the computer restarts.' };
+  const stopped = await stopProcess(pid);
+  helperPids.delete(path);
+  if (stopped) await unlink(path).catch(() => {});
+  return { ...result, stopped, pid };
+}
+
+// SIGTERM, then SIGKILL after two seconds. Resolves whether the process is gone.
+async function stopProcess(pid) {
+  const gone = () => { try { process.kill(pid, 0); return false; } catch (error) { return error.code === 'ESRCH'; } };
+  try { process.kill(pid, 'SIGTERM'); } catch (error) { return error.code === 'ESRCH'; }
+  for (let waited = 0; waited < 4000; waited += 50) {
+    if (gone()) return true;
+    if (waited === 2000) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  return gone();
+}
+
+function askToDisconnect(socket, path, timeoutMs) {
+  return new Promise(resolve => {
+    const lines = lineReader(socket);
+    let greeted = false, reply;
+    const timer = setTimeout(() => socket.destroy(), timeoutMs);
+    lines.on('line', line => {
+      if (!greeted) {
+        greeted = true;
+        try { const { pid } = JSON.parse(line); if (Number.isSafeInteger(pid) && pid > 1) helperPids.set(path, pid); } catch {}
+        socket.write('{"op":"disconnect"}\n');
+        return;
+      }
+      try { reply = JSON.parse(line); } catch {}
+      socket.end();
+    });
+    socket.on('error', () => {});
+    socket.once('close', async () => {
+      clearTimeout(timer); lines.close();
+      const disconnected = reply?.disconnected === true;
+      // The helper is gone, and so is the configuration its socket is named after: nothing reuses it.
+      if (disconnected) await unlink(path).catch(() => {});
+      resolve({ running: true, disconnected });
+    });
+  });
+}
+
+async function socketFor(target) {
+  if (!target.remote && closing) throw new Error('Local native helpers are shutting down.');
+  const path = await socketPath(target);
   try { return { socket: await connect(path), path }; }
   catch (error) { if (!['ENOENT', 'ECONNREFUSED'].includes(error.code)) throw error; }
   if (!starting.has(path)) {
@@ -111,7 +175,9 @@ export async function warmRemote(target) {
   await nativeRequest(target, { op: 'device_info' });
 }
 
-export async function nativeRequest(target, request) {
+// timeoutMs: how long the helper may take to answer (default two minutes). Installing a developer disk
+// image over Wi-Fi takes longer.
+export async function nativeRequest(target, request, { timeoutMs = 120000 } = {}) {
   checkWork();
   const callerSignal = signal();
   const { socket, path } = await phase('native_helper', () => socketFor(target));
@@ -124,7 +190,7 @@ export async function nativeRequest(target, request) {
       socket.destroy();
     };
     const onAbort = () => abort(callerSignal.reason);
-    const timer = setTimeout(() => abort(new DOMException('Remote operation timed out; inspect before retrying input.', 'TimeoutError')), 120000);
+    const timer = setTimeout(() => abort(new DOMException('Remote operation timed out; inspect before retrying input.', 'TimeoutError')), timeoutMs);
     callerSignal?.addEventListener('abort', onAbort, { once: true });
     lines.on('line', line => {
       if (abortReason) return;
@@ -133,6 +199,7 @@ export async function nativeRequest(target, request) {
       if (!pid) {
         if (!Number.isSafeInteger(value.pid) || value.pid <= 1) { abort(new Error('Invalid remote helper identity.')); return; }
         pid = value.pid;
+        if (target.remote) helperPids.set(path, pid);
         if (callerSignal?.aborted) { abort(callerSignal.reason); return; }
         socket.write(JSON.stringify(request) + '\n');
       } else { outcome = value; socket.end(); }
