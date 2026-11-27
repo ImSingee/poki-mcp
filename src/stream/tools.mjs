@@ -70,6 +70,10 @@ export async function screenInput(session, viewer, args, { signal, native = nati
   const request = nativeInput(args);
   const taken = viewer.takeover && coordinator.leases.get(target.id)?.lease_id === viewer.takeover.lease_id;
   const owner = taken ? viewer.owner : session;
+  // The view's calls may come on the agent's own MCP session (one stdio connection): a lease the
+  // agent took on that session must still need a takeover. Only the view's own lease lets it in.
+  const foreignLease = () => { const lease = coordinator.leases.get(target.id); return lease && lease.owner !== viewer.owner; };
+  if (foreignLease()) return failure('The agent is using this iPhone (it holds the device). Take over to control it from here.', { reason: 'busy' });
   try { outsideCall(() => coordinator.access(owner, target)); }
   catch { return failure('The agent is using this iPhone (it holds the device). Take over to control it from here.', { reason: 'busy' }); }
   let release;
@@ -82,6 +86,7 @@ export async function screenInput(session, viewer, args, { signal, native = nati
   const dispatch = { owner, devices: new Set([target.id]), controller: new AbortController(), timings: [] };
   try {
     // Someone may have taken the device's lease while this gesture waited for the lock.
+    if (foreignLease()) return failure('The agent is using this iPhone (it holds the device). Take over to control it from here.', { reason: 'busy' });
     try { outsideCall(() => coordinator.access(owner, target)); }
     catch { return failure('The agent is using this iPhone (it holds the device). Take over to control it from here.', { reason: 'busy' }); }
     let finished;

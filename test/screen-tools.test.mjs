@@ -181,3 +181,12 @@ test('a takeover also stops another session\'s recording or simulated location o
   assert.equal(taken.structuredContent?.taken_over, true, JSON.stringify(taken));
   assert.deepEqual(cleaned, [target.id], 'the recording kept running under the takeover');
 });
+
+test('a lease the agent took on the same MCP session still keeps the view\'s gestures off', async t => {
+  const { coordinator, view, viewer, sent, native } = await setup(t);
+  // One stdio connection carries both the agent's calls and the view's: the same session.
+  await coordinator.acquire(view, target, 120);
+  const reply = await screenInput(view, viewer, { kind: 'tap', x: 0.5, y: 0.5 }, { native });
+  assert.equal(reply.structuredContent.reason, 'busy', JSON.stringify(reply));
+  assert.deepEqual(sent, []);
+});

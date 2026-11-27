@@ -55,17 +55,18 @@ const hostPage = `<!doctype html><html><head><meta charset="utf-8"><style>body{m
 </script></body></html>`;
 
 // Poki's stream tools over a stand-in phone that sends the sample stream in a loop, 10 frames a second.
-function backend({ busy = false, garbleHevc = false, rtcOffer, openCodecString, inputDelayMs = 0, devices = [{ id: 'fixture-phone', name: 'Lab iPhone', kind: 'physical', connection: 'RemotePairing' }] } = {}) {
+function backend({ busy = false, garbleHevc = false, rtcOffer, openCodecString, inputDelayMs = 0, onlyFirstKey = false, delayFirstFramesMs = 0, devices = [{ id: 'fixture-phone', name: 'Lab iPhone', kind: 'physical', connection: 'RemotePairing' }] } = {}) {
   const native = fakeNative();
   const screens = new Screens({ subscribe: native.subscribe, keyframe: native.keyframe });
   const session = { coordinator: new Coordination(), label: 'view session' };
   const calls = [], inputs = [];
-  let inFlight = 0, maxInFlight = 0, seq = 0;
+  let inFlight = 0, maxInFlight = 0, seq = 0, firstFramesSent = false;
   const frames = sampleFrames();
   const feeder = setInterval(() => {
     const subscription = native.subscriptions.at(-1);
     if (!subscription?.open) return;
-    const frame = frames[seq % frames.length];
+    // onlyFirstKey: one key frame, then deltas only, as a still screen after its first picture.
+    const frame = onlyFirstKey && seq > 0 ? frames[1 + (seq - 1) % 3] : frames[seq % frames.length];
     seq++;
     subscription.send({ ...frame, seq, data: garbleHevc ? Buffer.alloc(frame.data.length, 0x55) : frame.data });
   }, 100);
@@ -75,11 +76,14 @@ function backend({ busy = false, garbleHevc = false, rtcOffer, openCodecString, 
     if (name === 'screen_rtc_offer' && rtcOffer) return rtcOffer(args);
     if (name === 'screen_input' && busy) { inputs.push(args); return { isError: true, content: [{ type: 'text', text: 'The agent is using this iPhone right now.' }], structuredContent: { reason: 'busy', error: 'The agent is using this iPhone right now.' } }; }
     inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
+    let delayed = false;
     try {
       const result = await runScreenTool(session, name, args, {
         screens, resolve: async id => ({ id, kind: 'physical' }),
         native: async (target, request) => { inputs.push({ ...args, device: target.id, request }); if (inputDelayMs) await delay(inputDelayMs); return { sent: true }; },
       });
+      // The reply carrying the first frames is slow: the next read's later frames overtake it.
+      if (name === 'screen_read' && delayFirstFramesMs && !firstFramesSent && result.structuredContent?.frames?.length) { firstFramesSent = true; delayed = true; await delay(delayFirstFramesMs); }
       // A codec string the browser cannot configure, to make the first decoder fail at once.
       if (name === 'screen_open' && openCodecString && result.structuredContent?.codec === 'hevc') result.structuredContent.codec_string = openCodecString;
       // Through the bridge, as JSON: a Buffer would not survive.
@@ -302,4 +306,24 @@ test('a WebRTC offer that never gets an answer falls back to tool calls', { skip
   await until(async () => (await h.screen()).transport === 'tool-calls', 15000);
   assert.ok(Date.now() - started < 10000, `fell back after ${Date.now() - started} ms`);
   await until(() => painted(h.frame()));
+});
+
+test('frames that overtake the first batch wait for it instead of blanking the screen', { skip, timeout: 60000 }, async t => {
+  const h = await open(t, { settings: { rtc: false }, backendOptions: { onlyFirstKey: true, delayFirstFramesMs: 800 } });
+  await h.mount(showResult);
+  const codec = await until(async () => (await h.screen()).codec);
+  if (codec === 'jpeg') return t.skip('JPEG pictures are all key frames; the chain order does not matter there');
+  await until(() => painted(h.frame()), 8000);
+});
+
+test('characters typed just before a tap reach the phone before the tap', { skip, timeout: 60000 }, async t => {
+  const h = await open(t, { settings: { rtc: false, codecs: (await ffmpegAvailable()) ? ['jpeg'] : undefined } });
+  await h.mount(showResult);
+  await until(() => painted(h.frame()));
+  const box = await h.view.locator('#screen').boundingBox();
+  await h.view.locator('#screen').focus();
+  await h.page.keyboard.type('hi');
+  await h.page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await until(() => h.poki.inputs.length >= 2);
+  assert.deepEqual(h.poki.inputs.map(i => i.kind), ['text', 'tap']);
 });

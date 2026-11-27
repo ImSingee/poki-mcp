@@ -235,7 +235,9 @@ function drain(generation) {
     progressed = false;
     held.sort((a, b) => a.frames[0].seq - b.frames[0].seq);
     for (const [index, batch] of held.entries()) {
-      const usable = batch.discontinuity || batch.after === lastSeq || lastSeq === 0;
+      // Before anything was used, only a batch starting at a key frame can begin: a later batch of
+      // deltas that overtook the first one waits for it.
+      const usable = lastSeq === 0 ? batch.frames[0].key : batch.discontinuity || batch.after === lastSeq;
       const stale = batch.frames.at(-1).seq <= lastSeq;
       if (!usable && !stale) continue;
       held.splice(index, 1);
@@ -426,6 +428,8 @@ let inputQueue = Promise.resolve(), inputId = 0;
 // person switches to another iPhone, or the stream is replaced, is dropped, never sent elsewhere.
 function sendInput(args) {
   if (!state.stream) return;
+  // Characters still waiting for their debounce were typed before this gesture: they go first.
+  if (args.kind !== 'text') flushTyped();
   const made = { stream: state.stream, generation: state.generation, peer: state.transport === 'webrtc' ? rtc : undefined };
   inputQueue = inputQueue.then(async () => {
     if (made.generation !== state.generation || made.stream !== state.stream) return;

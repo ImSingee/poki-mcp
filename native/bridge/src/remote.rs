@@ -223,14 +223,33 @@ impl Session {
         }
         let connection = self.connection.as_mut().unwrap();
         if connection.media.is_none() {
-            let media = tokio::time::timeout(
+            let started = tokio::time::timeout(
                 Duration::from_secs(25),
                 InputMedia::connect(&mut connection.adapter, &mut connection.rsd, &self.stream.hub),
             )
             .await
-            .map_err(|_| "Starting the screen video timed out")??;
-            connection.media = Some(media);
-            self.stream.hub.clear_keyframe_request();
+            .unwrap_or_else(|_| Err("Starting the screen video timed out".into()));
+            let error = match started {
+                Ok(media) => {
+                    connection.media = Some(media);
+                    self.stream.hub.clear_keyframe_request();
+                    return Ok(());
+                }
+                Err(error) => error,
+            };
+            // A tunnel that died (a pulled cable, a phone gone from Wi-Fi) is dropped, so the next
+            // attempt builds a new one; a live tunnel that only refused the service is kept, as the
+            // request path does.
+            let closed = connection.adapter.bind_udp(0).await.is_err()
+                || (socket_failure(error.as_ref())
+                    && connection.adapter.connect(connection.rsd_port).await.is_err());
+            if closed {
+                self.connection = None;
+                if matches!(&self.transport, Transport::Remote(config) if config.uses_bonjour()) {
+                    self.control = None;
+                }
+            }
+            return Err(error);
         }
         Ok(())
     }
@@ -2365,6 +2384,32 @@ mod tests {
         assert_eq!(served.unwrap()["closed"], true);
         PHONE.with(|slot| slot.borrow_mut().take());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A tunnel that died while the screen was watched is replaced on the next attempt, instead of
+    // retrying the media session on the dead adapter for ever.
+    #[tokio::test(start_paused = true)]
+    async fn a_watched_screen_rebuilds_a_dead_tunnel() {
+        let (sender, mut phones) = mpsc::unbounded_channel();
+        PHONE.with(|slot| *slot.borrow_mut() = Some(sender));
+        let hub: Arc<VideoHub> = Default::default();
+        let mut session = Session {
+            transport: Transport::Local("fixture-phone".into()),
+            control: None,
+            connection: Some(unplugged().await),
+            stream: Streaming {
+                hub: hub.clone(),
+                ..Default::default()
+            },
+        };
+        let _viewer = hub.subscribe();
+        assert!(Box::pin(session.ensure_media()).await.is_err());
+        assert!(session.connection.is_none(), "the dead tunnel was kept");
+        // The next attempt asks for a new tunnel (the fixture phone answers nothing, so the media
+        // session itself still fails).
+        let _ = Box::pin(session.ensure_media()).await;
+        assert!(phones.try_recv().is_ok(), "no new tunnel was built");
+        PHONE.with(|slot| slot.borrow_mut().take());
     }
 
     #[test]
