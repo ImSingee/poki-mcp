@@ -86,6 +86,7 @@ export async function taskServices(directory, { route = false, appSearch = false
   const phone = http.createServer(async (req, res) => {
     if (req.headers.authorization !== 'Bearer local-mcp-fixture') { res.writeHead(401).end(); return; }
     if (req.url === '/version') { res.end(daemonVersion()); return; }
+    if (req.url === '/session/heartbeat') { res.end('{}'); return; }
     if (req.url === '/session/close' || req.url === '/request/cancel') { fixture.events.push({ type: req.url, foreground: fixture.foreground }); res.end('{}'); return; }
     if (req.url !== '/mcp') { res.writeHead(404).end(); return; }
     const dispatch = async (name, args) => {
