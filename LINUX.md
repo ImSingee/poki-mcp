@@ -81,23 +81,33 @@ runs a long-lived daemon instead. State lives in
 `$XDG_STATE_HOME/PokiMCP` (default `~/.local/state/PokiMCP`) unless
 `POKI_MCP_STATE_DIR` is set.
 
-For wireless use, [remote-iphone.md](docs/remote-iphone.md) now has two
-pairing paths. On iOS 27+ the RemotePairing record itself can be created
-without USB:
+For wireless use on iOS 27+, pairing needs no USB at all. From any MCP
+client, call `pair_device` (or ask the agent to pair the iPhone) and
+follow `pairing_status`, or the pairing view in an MCP Apps client such
+as LobeHub ([docs/lobehub.md](docs/lobehub.md)). Keep the Linux host and
+iPhone on the same LAN, select the host in Settings › Privacy & Security
+› Developer Mode on the phone, and type the six-digit PIN. Poki then
+installs the DeveloperDiskImage through the new RemotePairing tunnel
+(cryptexd, personalized by Apple, so the host needs internet access);
+pymobiledevice3 is not involved on this path. After an iPhone restart,
+`pair_device` with `device` installs the image again. `unpair_device`
+removes a pairing without restarting anything. See
+[docs/tools.md](docs/tools.md#pair-iphones-over-wi-fi).
+
+The same pairing works from a terminal:
 
 ```sh
 node bin/prepare-remote.mjs --wireless
 ```
 
-Keep the Linux host and iPhone on the same LAN while pairing, select the
-host in Settings › Privacy & Security › Developer Mode on the phone, and
-enter the six-digit code printed by the command. This replaces only the
-pairing-file bootstrap: Developer Mode, UI Automation and any needed
-DeveloperDiskImage preparation are still separate device-preparation
-steps. Without `HOST`, the LAN address that paired is saved, and DHCP can
-change it later. Pass the phone's advertised `.local` name as `HOST` to
-keep resolving it on the LAN, or its Tailscale address when the saved
-route should use Tailscale.
+That command creates only the pairing record; run
+`node bin/prepare-device.mjs` over USB, or `pair_device` with `device`,
+for the DeveloperDiskImage. Either way, the LAN address that paired is
+saved unless you pass `HOST`, and DHCP can change it later. Pass the
+phone's advertised `.local` name as `HOST` to keep resolving it on the
+LAN, or its Tailscale address when the saved route should use
+Tailscale. Developer Mode and UI Automation stay separate
+device-preparation steps on the phone.
 
 ## Running the daemon as a user service
 
@@ -212,7 +222,9 @@ decides from the tools' `destructiveHint`/`openWorldHint` annotations.
 stdio MCP server on a headless Linux machine reached through
 `lh connect`, these tools therefore run with no confirmation at all
 unless you set them to require approval in the LobeHub connector's
-tool settings.
+tool settings. `unpair_device` is one of them. Setting up the
+connector, binding it to the machine that runs Poki, and the pairing
+view are described in [docs/lobehub.md](docs/lobehub.md).
 
 With a display, the default is `ask`, which shows a `zenity` question
 dialog. `POKI_MCP_APPROVAL_MODE=allow` lets the tools run with nobody
@@ -334,6 +346,11 @@ and the test fixture did not stub `zenity` — both fixed since.
   (defaults `chi_sim+eng+jpn`, `11`, `2`)
 - `bin/prepare-device.mjs`: on Linux, installs the DeveloperDiskImage
   through pymobiledevice3 instead of the Xcode `iOS_DDI` directory
+- Wireless pairing from MCP (`pair_device`, `pairing_status`,
+  `pairing_cancel`, `unpair_device`, `src/pairing/`): daemon-held
+  pairing jobs, DeveloperDiskImage installation over the RemotePairing
+  tunnel (`native/bridge/src/ddi.rs`), and the `ui://poki/pairing`
+  MCP Apps view (`src/views/`)
 - `src/config.mjs`: default state directory follows the XDG state
   convention on Linux (macOS path unchanged)
 - `src/human.mjs`: approval dialogs fall back to `zenity` on Linux;

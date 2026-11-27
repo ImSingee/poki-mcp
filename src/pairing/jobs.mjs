@@ -8,7 +8,7 @@
 // One job runs per host at a time: the Bonjour name and pairing listener exist once.
 import { randomBytes } from 'node:crypto';
 import { stateDir as defaultStateDir, pokiNative } from '../config.mjs';
-import { startPairHost, stagePairing, completeWirelessPairing, discardStaging, defaultHostName, advertisingInstruction, pinInstruction } from './wireless.mjs';
+import { startPairHost, stagePairing, completeWirelessPairing, discardStaging, defaultHostName, advertisingInstruction } from './wireless.mjs';
 import { ensureDeveloperImage } from './ddi.mjs';
 import { work } from '../work.mjs';
 import { nativeRequest as helperRequest } from '../remote.mjs';
@@ -24,7 +24,7 @@ export const isTerminal = state => terminal.has(state);
 const instructions = {
   starting: () => 'Starting wireless pairing on this computer.',
   advertising: job => `${advertisingInstruction(job.host_name)} Keep the iPhone on the same local network as this computer; wireless first pairing needs iOS 27 or newer.`,
-  pin: job => `${pinInstruction(job.pin)}. Type it on the iPhone, then keep the iPhone unlocked.`,
+  pin: job => `Type ${job.pin} on the iPhone when it asks for the pairing code, then keep the iPhone unlocked.`,
   paired: () => 'The iPhone accepted the pairing. Saving it on this computer.',
   registering: () => 'Saving the pairing on this computer.',
   mounting_ddi: () => 'Preparing developer services: installing the developer disk image over Wi-Fi. This can take a few minutes; keep the iPhone unlocked and nearby.',

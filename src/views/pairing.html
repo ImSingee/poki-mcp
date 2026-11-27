@@ -254,7 +254,7 @@ function renderDevices() {
   });
   const others = $('others');
   others.hidden = !state.others;
-  others.textContent = state.others ? `${state.others} other device${state.others === 1 ? '' : 's'} (USB or simulator) are not managed here.` : '';
+  others.textContent = state.others ? (state.others === 1 ? '1 other device (USB or simulator) is not managed here.' : `${state.others} other devices (USB or simulator) are not managed here.`) : '';
 }
 
 function render() {
