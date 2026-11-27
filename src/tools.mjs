@@ -13,18 +13,25 @@ const defaultTools = new Set([
   'scroll_to', 'terminate_app', 'pinch', 'list_apps', 'get_clipboard',
 ]);
 const instructions = 'When the request already says what to do on the device, use batch_commands for launch_app and steps whose targets are already known; use fill without field for a single visible input, and use exact observed labels when a selector is needed; it is usually the only device call needed. Tapping steps wait for their target, and the reply ends with the visible text. Every device tool takes device: call list_devices once and pass the id it reports (its default when it names one) on every call. Calls to different devices may run at the same time; calls to one device run in the order sent. Consecutive calls do not require an explicit device lease. Single-step tools remain for exploring an unknown screen.';
-// The tools Poki asks a human about before running (approvedTools in device.mjs). Their annotations
-// let an MCP client ask instead, which is how POKI_MCP_APPROVAL_MODE=host works. They are set in every
-// mode, so tools/list does not depend on which process answers it.
+// The tools that need approval before they run (approvedTools). Their annotations let an MCP client
+// ask instead of Poki, which is how POKI_MCP_APPROVAL_MODE=host works. They are set in every mode, so
+// tools/list does not depend on which process answers it. get_clipboard reads, but what it reads
+// leaves the device, so a client that runs read-only tools without asking must not take it as one.
 export const approvalHints = {
   install_app: { destructiveHint: true, openWorldHint: false },
   uninstall_app: { destructiveHint: true, openWorldHint: false },
   build_and_run: { destructiveHint: true, openWorldHint: false },
   open_url: { destructiveHint: true, openWorldHint: true },
   download_app_container: { destructiveHint: false, openWorldHint: true },
-  get_clipboard: { openWorldHint: true },
+  get_clipboard: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   set_clipboard: { destructiveHint: true, openWorldHint: true },
 };
+export const approvedTools = new Set(Object.keys(approvalHints));
+// In host mode only the client approves, and it sees only the tool it is asked about. A gated tool
+// inside batch_commands or run_code would run under the wrapper's approval, so there it is refused.
+export const hostGated = (tool, mode) => mode === 'host' && approvedTools.has(tool)
+  ? `${tool} needs approval, and in host approval mode the MCP client gives it. Inside batch_commands or run_code the client would not be asked, so it does not run there: call ${tool} on its own.`
+  : null;
 const readOnly = new Set(['observe_device','list_devices', 'get_device_info', 'take_screenshot', 'get_foreground_app', 'list_elements', 'list_apps', 'get_clipboard', 'list_crashes', 'get_crash', 'wait_for', 'wait']);
 const guidance = {
   acquire_device: 'Only needed to keep other sessions off a device across several calls. One batch_commands call already runs without interruption, so a single-call task needs no lease. If you take one, keep the returned lease_id, renew before expiry, then release.',

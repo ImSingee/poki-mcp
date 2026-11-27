@@ -113,8 +113,33 @@ async function checkHost(f) {
   const asked = await f.call('request_human_action', { reason: 'Unlock the phone' });
   assert.equal(asked.isError, true);
   assert.match(text(asked), /host approval mode/);
+  assert.equal(tools.find(tool => tool.name === 'get_clipboard').annotations.readOnlyHint, false, 'a client that auto-runs read-only tools still asks about the clipboard');
+  // The client approves the tool it is asked about. Inside batch_commands or run_code it would only be
+  // asked about the wrapper, so a gated tool does not run there.
+  const opens = async () => (await f.events()).filter(event => event.args?.includes('openurl')).length;
+  const before = await opens();
+  const batch = await f.call('batch_commands', { commands: [{ tool: 'tap', arguments: { x: 5, y: 5 } }, { tool: 'open_url', arguments: { url: 'https://example.org' } }] });
+  assert.equal(batch.isError, true);
+  assert.match(text(batch), /host approval mode/);
+  assert.match(text(batch), /Nothing ran/);
+  const through = await f.call('batch_commands', { stop_on_error: false, commands: [{ tool: 'open_url', arguments: { url: 'https://example.org' } }, { tool: 'set_clipboard', arguments: { text: 'x' } }] });
+  assert.equal(through.isError, true);
+  assert.match(text(through), /call open_url on its own/);
+  const script = await f.call('run_code', { code: `try { await tools.open_url({ device: ${JSON.stringify(f.device)}, url: 'https://example.org' }); return 'opened'; } catch (error) { return String(error.message ?? error); }` });
+  assert.doesNotMatch(text(script), /"result": "opened"/);
+  assert.match(text(script), /host approval mode/);
+  assert.equal(await opens(), before, 'no URL was opened inside a batch or a script');
   assert.equal((await f.events()).filter(event => event.dialog).length, 0, 'no dialog process starts');
 }
+
+test('outside host mode a gated batch step still asks with the dialog', { timeout: 40000 }, async t => {
+  const f = await fixture(t, { approvalMode: 'ask' });
+  await f.set({ simulatorOnly: true, simulatorBooted: true });
+  const pending = f.call('batch_commands', { commands: [{ tool: 'open_url', arguments: { url: 'https://example.com' } }] });
+  await f.until(log => log.includes('"dialog":true'));
+  assert.ok(value(await f.call('cancel_device')).stopped);
+  assert.equal((await pending).isError, true);
+});
 
 test('in host mode Poki shows no dialog: gated tools carry annotations and run, and request_human_action is refused', { timeout: 40000 }, async t => {
   await checkHost(await fixture(t, { approvalMode: 'host', extraEnv: () => ({ DISPLAY: ':0' }) }));

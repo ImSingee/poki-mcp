@@ -10,7 +10,7 @@ import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import { root, stateDir, idevice, noUsbDevice } from './config.mjs';
-import { definitions, stepSchema, sessionTools } from './tools.mjs';
+import { definitions, stepSchema, sessionTools, approvedTools, hostGated } from './tools.mjs';
 import { platformTool, inventorySimulators, simulatorModels, readSettings, closePlatform } from './platform.mjs';
 import { interaction, promptWarning, readScreen, describeScreen, screenChanged, whatMoved, justReadMs, confirmAfterMs, launchWithinMs, launchPollMs } from './interaction.mjs';
 import { askHuman, approvalMode } from './human.mjs';
@@ -23,7 +23,6 @@ import { version, buildInfo, requireCurrentCode } from './build-info.mjs';
 
 export const text = value => ({ content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] });
 const usedSimulators = new Set();
-const approvedTools = new Set(['install_app', 'uninstall_app', 'build_and_run', 'open_url', 'download_app_container', 'get_clipboard', 'set_clipboard']);
 const platformTools = new Set(['start_simulator', 'shut_down_simulator', 'start_recording', 'stop_recording', 'set_appearance', 'set_accessibility', 'list_apps', 'launch_app', 'terminate_app', 'install_app', 'uninstall_app', 'open_settings', 'open_url', 'build_and_run', 'set_location', 'clear_location', 'get_clipboard', 'set_clipboard', 'list_crashes', 'get_crash', 'download_app_container']);
 
 // A simulator reads its screen in about 0.2 s, so five seconds covers the two reads that call a screen
@@ -446,7 +445,9 @@ export class DeviceContext {
   }
   // Runs one tool on this device. The call was routed here by its device argument (or it is a step of
   // a batch on this device), so device itself is no longer an argument.
-  async dispatch(name, original = {}) {
+  // direct: the client called this tool itself (not a batch step or a run_code call), so in host
+  // approval mode it was the one asked.
+  async dispatch(name, original = {}, { direct = false } = {}) {
     if (sessionTools.has(name)) return this.session.dispatchSession(name, original);
     const schema = stepSchema(name);
     if (!schema) throw new Error(`Unknown tool: ${name}`);
@@ -469,6 +470,8 @@ export class DeviceContext {
       if (approvedTools.has(name)) await this.target();
       // Says on the result who let it run, so an agent can tell a gated call from an ordinary one.
       const mode = approvedTools.has(name) ? approvalMode() : undefined;
+      const refused = direct ? null : hostGated(name, mode);
+      if (refused) return { isError: true, ...text({ executed: false, error: refused }), _meta: { stop_reason: 'error' } };
       const approval = mode === undefined ? undefined : { allow: { mode: 'operator-preapproved', approved_by: 'operator' }, host: { mode: 'host', approved_by: 'mcp-client' }, ask: { mode: 'ask-human', approved_by: 'human' } }[mode];
       if (approval?.mode === 'ask-human') {
         const detail = args.path ?? args.project_path ?? args.bundle_id ?? args.url ?? (name === 'set_clipboard' ? `${Buffer.byteLength(args.text)} 字节的文本` : '');
@@ -785,12 +788,12 @@ export class Session {
     if (name === 'start_simulator' && args.simulator === undefined && args.device === undefined) {
       if (!args.model) throw new Error('Give simulator (name or UDID) or model.');
       // A new simulator has no id yet; creations run one at a time.
-      return { keys: ['simulator:create'], run: () => new DeviceContext(this).dispatch(name, args) };
+      return { keys: ['simulator:create'], run: () => new DeviceContext(this).dispatch(name, args, { direct: true }) };
     }
     const query = name === 'start_simulator' ? args.simulator ?? args.device : args.device;
     if (typeof query !== 'string' || !query) throw new Error(`${name} needs device: an id from list_devices.`);
     const id = await this.resolveDevice(query);
-    return { keys: [id], run: () => this.context(id).dispatch(name, args) };
+    return { keys: [id], run: () => this.context(id).dispatch(name, args, { direct: true }) };
   }
   // run_code's calls each name a device, which must be one of the devices it named (and holds).
   scriptContext(named, ids) {
