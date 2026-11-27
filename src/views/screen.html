@@ -23,6 +23,7 @@
   :root[data-theme="light"] { color-scheme: light; }
   :root[data-theme="dark"] { color-scheme: dark; }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html, body { margin: 0; background: transparent; }
   body { font: 13px/1.4 var(--font); color: var(--text); }
   main { display: grid; gap: 8px; padding: 10px; }
@@ -38,7 +39,6 @@
   canvas:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); }
   .stats { position: absolute; top: 6px; right: 6px; padding: 2px 6px; border-radius: 6px; background: rgba(0,0,0,.55); color: #fff; font: 11px/1.3 var(--mono); pointer-events: none; white-space: nowrap; }
   .notice { position: absolute; inset: auto 8px 8px 8px; padding: 8px 10px; border-radius: var(--radius-sm); background: rgba(0,0,0,.72); color: #fff; font-size: 12px; }
-  .notice[hidden], .stats[hidden] { display: none; }
   .notice button { margin-left: 6px; color: #fff; background: rgba(255,255,255,.15); border-color: rgba(255,255,255,.3); }
   .placeholder { aspect-ratio: 9 / 19.5; display: grid; place-items: center; color: #9aa0a6; padding: 16px; text-align: center; }
   .hint { color: var(--text-2); font-size: 12px; }
@@ -148,23 +148,39 @@ function draw() {
   image.close?.();
   if (canvas.hidden) { canvas.hidden = false; $('placeholder').hidden = true; layout(); }
 }
-// The panel fills its width; inline on a phone the host caps the view's height, so the canvas is too.
+// The picture fills the width, up to the height the host gives the view: a side panel's fixed
+// height, an inline view's maximum (LobeHub on a phone caps inline views at 2000 px), else 1600 px.
+// The frame's own height is no guide: it follows this content (autoResize).
 function layout() {
   const stage = $('stage');
   const ratio = canvas.width && canvas.height ? canvas.width / canvas.height : 9 / 19.5;
-  const maxHeight = Math.min(1800, Math.max(320, window.innerHeight > 200 && app.getHostContext?.()?.displayMode === 'fullscreen' ? window.innerHeight - 110 : 1800));
-  stage.style.maxWidth = `${Math.round(Math.min(520, maxHeight * ratio))}px`;
+  const container = app.getHostContext?.()?.containerDimensions ?? {};
+  const available = container.height ?? container.maxHeight ?? 1690;
+  const pictureHeight = Math.max(240, Math.min(available, 2000) - 90);
+  stage.style.maxWidth = `${Math.round(Math.min(520, pictureHeight * ratio))}px`;
 }
-
+// A decoder that takes frames but shows none for this long is stuck: start again at a key frame.
+// After STUCK_LIMIT such restarts the codec is given up for the next one (as lody's viewer does).
+const STUCK_MS = 3000, STUCK_LIMIT = 3;
 class Decoder {
   constructor(codec, codecString, onDecoded, onFailure) {
-    Object.assign(this, { codec, codecString, onDecoded, onFailure, pending: new Map(), waitingKey: true, errors: 0 });
+    Object.assign(this, { codec, codecString, onDecoded, onFailure, pending: new Map(), waitingKey: true, errors: 0, stuck: 0, submittedAt: 0, outputAt: 0 });
     if (codec !== 'jpeg') this.open();
+    this.watchdog = setInterval(() => {
+      const now = performance.now();
+      if (!this.submittedAt || this.outputAt >= this.submittedAt || now - this.submittedAt < STUCK_MS) return;
+      this.submittedAt = 0;
+      if (++this.stuck > STUCK_LIMIT) { this.onFailure('stuck'); return; }
+      if (this.codec !== 'jpeg') { try { this.open(); } catch { this.onFailure('decode'); return; } }
+      this.waitingKey = true; this.pending.clear();
+      this.onDecoded(undefined, true);
+    }, 500);
   }
+  shown() { this.outputAt = performance.now(); if (this.outputAt - (this.healthySince ??= this.outputAt) > 10000) { this.stuck = 0; this.healthySince = this.outputAt; } }
   open() {
     this.video?.close?.();
     this.video = new VideoDecoder({
-      output: frame => { const seq = this.pending.get(frame.timestamp); this.pending.delete(frame.timestamp); present(frame); stats.decoded++; if (seq !== undefined) this.onDecoded(seq); },
+      output: frame => { const seq = this.pending.get(frame.timestamp); this.pending.delete(frame.timestamp); present(frame); this.shown(); stats.decoded++; if (seq !== undefined) this.onDecoded(seq); },
       error: () => { this.waitingKey = true; this.pending.clear(); if (++this.errors > 3) this.onFailure('decode'); else { try { this.open(); } catch { this.onFailure('decode'); } this.onDecoded(undefined, true); } },
     });
     this.video.configure({ codec: this.codecString, optimizeForLatency: true });
@@ -172,7 +188,8 @@ class Decoder {
   // frame: { seq, key, data (Uint8Array) }. A chain starts at a key frame.
   async decode(frame) {
     if (this.codec === 'jpeg') {
-      try { present(await createImageBitmap(new Blob([frame.data], { type: 'image/jpeg' }))); stats.decoded++; this.onDecoded(frame.seq); }
+      this.submittedAt ||= performance.now();
+      try { present(await createImageBitmap(new Blob([frame.data], { type: 'image/jpeg' }))); this.shown(); stats.decoded++; this.onDecoded(frame.seq); }
       catch { if (++this.errors > 3) this.onFailure('decode'); }
       return;
     }
@@ -181,11 +198,12 @@ class Decoder {
     // The decoder reports frames by timestamp; seq is unique and increasing.
     const timestamp = frame.seq * 1000;
     this.pending.set(timestamp, frame.seq);
+    if (!this.submittedAt || this.outputAt >= this.submittedAt) this.submittedAt = performance.now();
     try { this.video.decode(new EncodedVideoChunk({ type: frame.key ? 'key' : 'delta', timestamp, data: frame.data })); }
     catch { this.waitingKey = true; this.onDecoded(undefined, true); }
   }
   get backlog() { return this.video?.decodeQueueSize ?? 0; }
-  close() { try { this.video?.close(); } catch {} }
+  close() { clearInterval(this.watchdog); try { this.video?.close(); } catch {} }
 }
 
 // ---- The stream: open, receive (A or B), acknowledge, fall back. -------------------------------
@@ -220,12 +238,23 @@ function drain(generation) {
 let resyncWanted = false;
 function resync() { resyncWanted = true; if (state.transport === 'webrtc') rtc?.send({ type: 'keyframe' }); }
 function decoded(seq, broken) {
-  if (broken) { resync(); return; }
+  // Starting again at a key frame supersedes everything received so far: acknowledge it, or the
+  // credit those frames hold would never come back.
+  if (broken) { decodedSeq = Math.max(decodedSeq, lastSeq); if (state.transport === 'webrtc') rtc?.send({ type: 'ack', seq: decodedSeq }); resync(); return; }
   if (seq > decodedSeq) decodedSeq = seq;
   if (state.transport === 'webrtc') rtc?.send({ type: 'ack', seq: decodedSeq });
 }
 
-async function openStream() {
+// One stream per device: a second request while one opens for the same device waits for it.
+let opening;
+function openStream() {
+  if (opening?.device === state.device && opening.generation === state.generation) return opening.promise;
+  const promise = startStream();
+  opening = { device: state.device, generation: state.generation, promise };
+  promise.finally(() => { if (opening?.promise === promise) opening = undefined; });
+  return promise;
+}
+async function startStream() {
   const generation = ++state.generation;
   stop(false);
   if (!state.device) return;
@@ -398,10 +427,11 @@ globalThis.pokiGesture = function gesture(points, second) {
 };
 const pointers = new Map();
 canvas.addEventListener('pointerdown', event => {
-  canvas.focus();
-  canvas.setPointerCapture(event.pointerId);
   pointers.set(event.pointerId, [{ ...position(event), t: performance.now() }]);
   event.preventDefault();
+  canvas.focus({ preventScroll: true });
+  // Keeps the gesture when it leaves the canvas; not every host's frame allows it.
+  try { canvas.setPointerCapture(event.pointerId); } catch {}
 });
 canvas.addEventListener('pointermove', event => { pointers.get(event.pointerId)?.push({ ...position(event), t: performance.now() }); });
 const finish = event => {
@@ -463,7 +493,7 @@ setInterval(() => {
   const box = $('stats');
   box.hidden = !state.transport;
   box.textContent = `${state.transport === 'webrtc' ? 'WebRTC' : 'tool calls'} · ${state.codec?.toUpperCase() ?? ''} · ${stats.fps} fps${state.transport === 'webrtc' ? '' : ` · ${stats.latency} ms`}`;
-  state.stats = { fps: stats.fps, latency: stats.latency, decoded: stats.decoded };
+  state.stats = { fps: stats.fps, latency: stats.latency, decoded: stats.decoded, stuck: decoder?.stuck ?? 0, errors: decoder?.errors ?? 0, held: held.length, last: lastSeq };
 }, 1000);
 
 app.ontoolresult = params => {

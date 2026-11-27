@@ -2,7 +2,7 @@
 // the screen view only (ui.visibility ["app"]). None of them waits in a device's queue: a view
 // polling for frames must not stall behind an agent's long batch. screen_input still goes through
 // the device's lease and input lock, so a person's tap never lands in the middle of the agent's input.
-import { screens } from './hub.mjs';
+import { screens as defaultScreens } from './hub.mjs';
 import { iceServers, answer } from './rtc.mjs';
 import { nativeRequest } from '../remote.mjs';
 export { screenTools, screenDefinitions, screenToolMeta, INPUT_WAIT_MS, TAKEOVER_TTL_SECONDS } from './catalog.mjs';
@@ -99,7 +99,7 @@ let rtcAvailable;
 const weriftAvailable = () => rtcAvailable ??= import('werift').then(() => true, () => false);
 
 // Runs one screen tool. `resolve(device)` gives a device's target; screen streams are for iPhones.
-export async function runScreenTool(session, name, args, { resolve, signal } = {}) {
+export async function runScreenTool(session, name, args, { resolve, signal, screens = defaultScreens, native = nativeRequest } = {}) {
   if (name === 'show_screen') {
     const device = args.device === undefined ? undefined : (await resolve(args.device)).id;
     return result({ ...(device ? { device } : {}), panel: 'ui://poki/screen' }, device ? `The live screen of ${device} is shown in the screen panel.` : 'The screen panel is open; the person chooses an iPhone there.');
@@ -122,7 +122,7 @@ export async function runScreenTool(session, name, args, { resolve, signal } = {
     }
     case 'screen_close': viewer.close(); return result({ closed: true });
     case 'screen_keyframe': viewer.flow.resync(); return result({ requested: viewer.hub.requestKeyframe(viewer.codec) });
-    case 'screen_input': return screenInput(session, viewer, args, { signal });
+    case 'screen_input': return screenInput(session, viewer, args, { signal, native });
     case 'screen_takeover': return takeOver(session, viewer);
     case 'screen_rtc_config': {
       const enabled = (await weriftAvailable()) && process.env.POKI_SCREEN_RTC !== '0';
@@ -130,7 +130,7 @@ export async function runScreenTool(session, name, args, { resolve, signal } = {
     }
     case 'screen_rtc_offer': {
       if (!(await weriftAvailable())) return failure('WebRTC is not available on this computer.');
-      const { sdp } = await answer(viewer, args.sdp, { onInput: input => screenInput(session, viewer, { ...input, stream: viewer.id }).then(r => r.structuredContent ?? {}) });
+      const { sdp } = await answer(viewer, args.sdp, { onInput: input => screenInput(session, viewer, { ...input, stream: viewer.id }, { native }).then(r => r.structuredContent ?? {}) });
       return result({ sdp }, 'answer');
     }
   }
