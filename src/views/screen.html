@@ -315,6 +315,7 @@ async function poll(generation, lane) {
       if (generation !== state.generation) return;
       state.failures = 0;
       if (reply.closed) { void openStream(); return; }
+      if (reply.codec_failed) { fallBack(generation); return; }
       if (reply.codec_string && reply.codec_string !== state.codecString) { state.codecString = reply.codec_string; decoder?.reconfigure(reply.codec_string); }
       if (reply.frames?.length) { stats.latency = Math.round(performance.now() - started); accept(reply, generation); }
       if (reply.width && !state.width) Object.assign(state, { width: reply.width, height: reply.height });
@@ -370,6 +371,7 @@ async function attemptRtc(generation, attempt) {
         let message; try { message = JSON.parse(event.data); } catch { return; }
         if (message.type === 'ready') { clearTimeout(timer); if (message.codec_string) { state.codecString = message.codec_string; decoder?.reconfigure(message.codec_string); } resolve(); }
         else if (message.type === 'discontinuity') resetChain();
+        else if (message.type === 'codec-failed') fallBack(generation);
         else if (message.type === 'input-result') inputReplies.get(message.id)?.(message);
       };
       pc.onconnectionstatechange = () => { if (['failed', 'closed'].includes(pc.connectionState)) { clearTimeout(timer); reject(new Error('ICE failed')); } };
@@ -462,7 +464,10 @@ globalThis.pokiGesture = function gesture(points, second) {
   const first = points[0], last = points.at(-1), duration = Math.max(1, last.t - first.t);
   if (second) {
     const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
-    return { kind: 'pinch', x: (first.x + second[0].x) / 2, y: (first.y + second[0].y) / 2, start_distance: distance(first, second[0]), end_distance: distance(last, second.at(-1)), t_ms: duration };
+    // The fingers' axis, in the same normalized space as the native contacts (0..65535 on both axes),
+    // so a vertical or diagonal pinch stays where the fingers were.
+    const angle = Math.atan2(second[0].y - first.y, second[0].x - first.x) * 180 / Math.PI;
+    return { kind: 'pinch', x: (first.x + second[0].x) / 2, y: (first.y + second[0].y) / 2, start_distance: distance(first, second[0]), end_distance: distance(last, second.at(-1)), angle, t_ms: duration };
   }
   const moved = Math.hypot(last.x - first.x, last.y - first.y) * Math.max(canvas.clientWidth || 390, 1);
   if (moved < 8) return duration >= 500 ? { kind: 'long_press', x: first.x, y: first.y, t_ms: duration } : { kind: 'tap', x: first.x, y: first.y, t_ms: duration };
@@ -491,17 +496,23 @@ canvas.addEventListener('pointerup', finish);
 canvas.addEventListener('pointercancel', event => pointers.delete(event.pointerId));
 canvas.addEventListener('contextmenu', event => event.preventDefault());
 // Keys typed while the screen has focus: printable text in one call per burst, special keys alone.
-let typed = '', typedTimer;
+let typed = '', typedTimer, typedFor;
 const special = { Enter: 'return', Backspace: 'backspace', Tab: 'tab', Escape: 'escape', ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down', Delete: 'forward_delete' };
 canvas.addEventListener('keydown', event => {
   if (event.metaKey || event.ctrlKey || event.altKey) {
     if (event.key.length === 1) { sendInput({ kind: 'key', key: event.key.toLowerCase(), modifiers: [event.metaKey && 'command', event.ctrlKey && 'control', event.altKey && 'option', event.shiftKey && 'shift'].filter(Boolean) }); event.preventDefault(); }
     return;
   }
-  if (event.key.length === 1) { typed += event.key; clearTimeout(typedTimer); typedTimer = setTimeout(flushTyped, 250); event.preventDefault(); return; }
+  if (event.key.length === 1) { if (!typed) typedFor = state.stream; typed += event.key; clearTimeout(typedTimer); typedTimer = setTimeout(flushTyped, 250); event.preventDefault(); return; }
   if (special[event.key]) { flushTyped(); sendInput({ kind: 'key', key: special[event.key] }); event.preventDefault(); }
 });
-function flushTyped() { clearTimeout(typedTimer); if (typed) { sendInput({ kind: 'text', text: typed }); typed = ''; } }
+// Characters typed on one iPhone never go to another: typing still buffered when the stream was
+// replaced is dropped.
+function flushTyped() {
+  clearTimeout(typedTimer);
+  const text = typed; typed = '';
+  if (text && typedFor === state.stream) sendInput({ kind: 'text', text });
+}
 $('home').onclick = () => sendInput({ kind: 'button', button: 'home' });
 $('lock').onclick = () => sendInput({ kind: 'button', button: 'lock' });
 

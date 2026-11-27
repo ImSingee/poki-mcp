@@ -25,7 +25,7 @@ export const CODECS = ['hevc', 'h264', 'jpeg'];
 export const MAX_VIEWERS = 8;
 
 class ScreenHub {
-  viewers = new Set(); tracks = new Map(); transcoders = new Map();
+  viewers = new Set(); tracks = new Map(); transcoders = new Map(); failed = new Map();
   subscription; starting; stopped = false; lastKeyframe = -Infinity; retry = 0; retryTimer;
   localSeq = 0; nativeBase; error;
   constructor(target, deps) {
@@ -84,15 +84,16 @@ class ScreenHub {
       const transcoder = new Transcoder(codec, {
         bitrate: this.bitrate(codec), spawn: this.deps.spawn,
         onFrame: frame => { track.push({ ...frame, seq: ++seq, at: performance.now() }); this.pushed(codec); },
-        onExit: ({ closed }) => {
+        onExit: ({ closed, code, stderr }) => {
           if (closed) return;
+          transcoder.lastExit = stderr || `exit code ${code}`;
           track.reset(); seq++;
           // It died on its own: start a new one on the cached HEVC chain (a still screen sends no
           // new key frame), at most ENCODER_RESTARTS times a minute.
           const now = performance.now();
           transcoder.exits = (transcoder.exits ?? []).filter(at => now - at < 60000);
           transcoder.exits.push(now);
-          if (transcoder.exits.length > ENCODER_RESTARTS) { this.error = `The ${codec} encoder keeps stopping; showing the screen in another codec may help.`; return; }
+          if (transcoder.exits.length > ENCODER_RESTARTS) { this.failed.set(codec, `The ${codec} encoder keeps stopping (${transcoder.lastExit ?? 'no reason given'}).`); this.pushed(codec); track.wake(); return; }
           const timer = setTimeout(() => { if (this.transcoders.get(codec) === transcoder && !transcoder.closed) this.feedChain(transcoder); }, 500);
           timer.unref?.();
         },
@@ -199,6 +200,8 @@ class Viewer {
     const deadline = now() + Math.min(Math.max(0, wait_ms), MAX_WAIT_MS);
     for (;;) {
       if (this.closed) return { stream: this.id, device: this.device, codec: this.codec, closed: true, frames: [] };
+      // The codec cannot be served any more: the view opens the stream again in another one.
+      if (this.hub.failed.has(this.codec)) return { ...this.describe(), codec_failed: true, error: this.hub.failed.get(this.codec), frames: [] };
       const track = this.track;
       // Several reads may be in flight and their replies may arrive out of order: `after` says
       // which frame a batch continues, so the view can put batches back in order.
@@ -227,7 +230,9 @@ export class Screens {
   // A new viewer of target's screen in the first of `codecs` this host serves.
   async open(target, { codecs = CODECS, signal } = {}) {
     const served = await this.codecs();
-    const codec = codecs.find(c => served.includes(c));
+    // A codec whose encoder kept failing for this device is not offered again while its hub lives.
+    const failed = this.hubs.get(target.id)?.failed ?? new Map();
+    const codec = codecs.find(c => served.includes(c) && !failed.has(c));
     if (!codec) throw new Error(`None of the codecs ${codecs.join(', ')} can be served here${served.length === 1 ? ' (ffmpeg with libx264 is not installed, so only HEVC is available)' : ''}.`);
     let hub = this.hubs.get(target.id);
     // Each viewer holds reads, credit and possibly a WebRTC peer; an unrenewed one goes in 10 s.

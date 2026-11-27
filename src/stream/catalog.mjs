@@ -20,7 +20,7 @@ export const screenDefinitions = [
   ['screen_input', 'One gesture or key from the screen view, at coordinates normalized to the screen (0..1), sent through the device\'s lease and input lock.', z.object({
     stream, kind: z.enum(['tap', 'long_press', 'swipe', 'drag', 'pinch', 'button', 'key', 'text']),
     x: unit.optional(), y: unit.optional(), x2: unit.optional(), y2: unit.optional(), t_ms: z.number().min(0).max(10000).optional(),
-    start_distance: unit.optional(), end_distance: unit.optional(),
+    start_distance: z.number().min(0).max(1.5).optional(), end_distance: z.number().min(0).max(1.5).optional(), angle: z.number().min(-360).max(360).optional(),
     button: z.enum(['home', 'lock', 'volume_up', 'volume_down']).optional(), key: z.string().min(1).max(20).optional(),
     modifiers: z.array(z.enum(['command', 'control', 'option', 'shift'])).max(4).optional(), text: z.string().min(1).max(2000).optional(),
   }), false],

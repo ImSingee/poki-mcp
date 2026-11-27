@@ -30,6 +30,9 @@ test('view gestures become the native ops, with coordinates normalized to 0..655
   assert.deepEqual(nativeInput({ kind: 'long_press', x: 0, y: 1, t_ms: 900 }), { op: 'long_press', x: 0, y: 65535, duration_ms: 900 });
   assert.deepEqual(nativeInput({ kind: 'swipe', x: 0.5, y: 0.8, x2: 0.5, y2: 0.2, t_ms: 20 }), { op: 'drag', x1: 32768, y1: 52428, x2: 32768, y2: 13107, duration_ms: 60 });
   assert.equal(nativeInput({ kind: 'drag', x: 0, y: 0, x2: 1, y2: 1, t_ms: 1500 }).duration_ms, 1500);
+  // A vertical pinch near the left edge keeps its axis, so its contacts stay on the screen.
+  const vertical = nativeInput({ kind: 'pinch', x: 0.1, y: 0.5, start_distance: 0.5, end_distance: 0.3, angle: 90 });
+  assert.equal(vertical.angle, 90);
   const pinch = nativeInput({ kind: 'pinch', x: 0.5, y: 0.5, start_distance: 0.1, end_distance: 0.4, t_ms: 300 });
   assert.equal(pinch.op, 'pinch'); assert.equal(Math.round(pinch.start_distance), 6554); assert.equal(Math.round(pinch.end_distance), 26214);
   assert.deepEqual(nativeInput({ kind: 'button', button: 'volume_up' }), { op: 'button', button: 'volume-up' });

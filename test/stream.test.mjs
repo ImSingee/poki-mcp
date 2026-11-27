@@ -327,3 +327,23 @@ test('an encoder that exits on its own is restarted on the cached chain', async 
   children[0].emit('close', 1);
   await until(() => children.length === 2 && children[1].written > 0, 3000);
 });
+
+test('an encoder that keeps failing tells its viewers, and the codec is not offered again', async t => {
+  const native = fakeNative();
+  const children = [];
+  const spawnFake = () => { const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough(), kill() {} }); children.push(child); return child; };
+  const screens = new Screens({ ...native, spawn: spawnFake, ffmpeg: async () => true });
+  t.after(() => screens.closeAll());
+  await screens.open(target, { codecs: ['hevc'] });
+  native.subscriptions[0].send(sampleFrames()[0]);
+  const viewer = await screens.open(target, { codecs: ['jpeg', 'hevc'] });
+  assert.equal(viewer.codec, 'jpeg');
+  for (let exit = 0; exit < 4; exit++) {
+    await until(() => children.length === exit + 1, 3000);
+    children[exit].emit('close', 1);
+  }
+  const read = await viewer.read({ wait_ms: 500 });
+  assert.equal(read.codec_failed, true, JSON.stringify(read));
+  assert.match(read.error, /keeps stopping/);
+  assert.equal((await screens.open(target, { codecs: ['jpeg', 'hevc'] })).codec, 'hevc');
+});

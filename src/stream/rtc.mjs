@@ -94,6 +94,7 @@ export async function answer(viewer, sdp, { onInput, servers = iceServers() } = 
     sending = true;
     try {
       while (!closing && !viewer.closed && media?.readyState === 'open') {
+        if (viewer.hub.failed.has(viewer.codec)) { sendControl({ type: 'codec-failed', error: viewer.hub.failed.get(viewer.codec) }); break; }
         const { frames, discontinuity } = viewer.take();
         if (!frames.length) break;
         if (discontinuity) sendControl({ type: 'discontinuity' });

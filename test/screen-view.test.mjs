@@ -327,3 +327,20 @@ test('characters typed just before a tap reach the phone before the tap', { skip
   await until(() => h.poki.inputs.length >= 2);
   assert.deepEqual(h.poki.inputs.map(i => i.kind), ['text', 'tap']);
 });
+
+test('a vertical pinch keeps its axis, and typing buffered before switching iPhones is dropped', { skip, timeout: 60000 }, async t => {
+  const devices = [{ id: 'phone-a', name: 'Phone A', kind: 'physical', connection: 'RemotePairing' }, { id: 'phone-b', name: 'Phone B', kind: 'physical', connection: 'RemotePairing' }];
+  const h = await open(t, { settings: { rtc: false, codecs: (await ffmpegAvailable()) ? ['jpeg'] : undefined }, backendOptions: { devices } });
+  await h.mount({ content: [{ type: 'text', text: 'shown' }], structuredContent: { device: 'phone-a' } });
+  await until(() => painted(h.frame()));
+  // Two fingers at (0.1, 0.25) and (0.1, 0.75): a vertical pinch at the left edge.
+  const gesture = await h.frame().evaluate(() => globalThis.pokiGesture([{ x: 0.1, y: 0.25, t: 0 }, { x: 0.1, y: 0.25, t: 300 }], [{ x: 0.1, y: 0.75, t: 0 }, { x: 0.1, y: 0.7, t: 300 }]));
+  assert.equal(Math.round(gesture.angle), 90);
+  // Characters typed on phone A, then phone B chosen within the typing debounce.
+  await h.view.locator('#screen').focus();
+  await h.page.keyboard.type('ab');
+  await h.view.locator('#device').selectOption('phone-b');
+  await until(() => h.poki.calls.some(c => c.name === 'screen_open' && c.args.device === 'phone-b'));
+  await delay(1500);
+  assert.deepEqual(h.poki.inputs.filter(i => i.kind === 'text'), [], 'typing from phone A reached phone B');
+});

@@ -42,7 +42,7 @@ export function nativeInput(args) {
     }
     case 'pinch': {
       if (args.start_distance === undefined || args.end_distance === undefined) throw new Error('pinch needs start_distance and end_distance.');
-      return { op: 'pinch', x: point(args.x), y: point(args.y), start_distance: clamp(args.start_distance, 0.02, 1) * 65535, end_distance: clamp(args.end_distance, 0.02, 1) * 65535, duration_ms: Math.round(clamp(duration ?? 400, 150, 5000)) };
+      return { op: 'pinch', x: point(args.x), y: point(args.y), start_distance: clamp(args.start_distance, 0.02, 1.42) * 65535, end_distance: clamp(args.end_distance, 0.02, 1.42) * 65535, angle: args.angle ?? 0, duration_ms: Math.round(clamp(duration ?? 400, 150, 5000)) };
     }
     case 'button': {
       const button = BUTTONS[args.button];
