@@ -84,13 +84,32 @@ async fn bind_pairing_listener(port: u16) -> Result<TcpListener> {
     }
 }
 
-async fn with_pairing_limit<T>(future: impl std::future::Future<Output = Result<T>>) -> Result<T> {
-    match tokio::time::timeout(PAIRING_LIMIT, future).await {
-        Ok(result) => result,
-        Err(_) => Err(
-            "Wireless pairing was not finished in Settings within 10 minutes. Run the wireless pairing command again to retry."
-                .into(),
-        ),
+/// Why a pairing stopped before the phone finished it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stop {
+    /// SIGTERM or SIGINT: the daemon cancelled the pairing job, or the person pressed Ctrl-C.
+    Signal,
+    /// Nobody finished pairing in Settings within the limit.
+    Timeout,
+}
+
+const TIMEOUT_MESSAGE: &str = "Wireless pairing was not finished in Settings within 10 minutes. Run the wireless pairing command again to retry.";
+const CANCELLED_MESSAGE: &str = "Wireless pairing was cancelled.";
+
+/// Resolves when the pairing limit passes or the process is asked to stop.
+async fn stop_signal() -> Stop {
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    tokio::select! {
+        _ = tokio::time::sleep(PAIRING_LIMIT) => Stop::Timeout,
+        _ = terminate => Stop::Signal,
+        _ = tokio::signal::ctrl_c() => Stop::Signal,
     }
 }
 
@@ -102,7 +121,16 @@ fn pairing_file_bytes(pairing_file: &RpPairingFile, host_name: &str) -> Result<V
     Ok(bytes)
 }
 
-async fn pair_host_once(state_dir: &str, output: &str, name: &str, port: u16) -> Result<Value> {
+/// Advertises this host and waits for one phone to pair, or for `stop`. Whatever ends the wait, the
+/// Bonjour service is unregistered (iOS drops it from Settings at once) and the responder shut down
+/// before this returns, so a cancelled pairing never leaves a stale "Pair with" entry behind.
+async fn pair_host_until(
+    state_dir: &str,
+    output: &str,
+    name: &str,
+    port: u16,
+    stop: impl std::future::Future<Output = Stop>,
+) -> Result<Value> {
     let host_info = load_host_info(Path::new(state_dir), name)?;
     let mut pairing_file = RpPairingFile::generate(name);
 
@@ -127,6 +155,7 @@ async fn pair_host_once(state_dir: &str, output: &str, name: &str, port: u16) ->
         &properties[..],
     )?
     .enable_addr_auto();
+    let fullname = service_info.get_fullname().to_string();
     mdns.register(service_info)?;
     emit(json!({
         "event":"advertising",
@@ -149,14 +178,31 @@ async fn pair_host_once(state_dir: &str, output: &str, name: &str, port: u16) ->
             .await?;
         write_private(&output_path, &pairing_file_bytes(&pairing_file, name)?)?;
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>((peer_device, peer))
-    }
-    .await;
+    };
+    let accepted = tokio::select! {
+        result = accepted => Ok(result),
+        reason = stop => Err(reason),
+    };
 
+    if let Ok(receiver) = mdns.unregister(&fullname) {
+        let _ = tokio::task::spawn_blocking(move || receiver.recv_timeout(Duration::from_secs(2)))
+            .await;
+    }
     if let Ok(receiver) = mdns.shutdown() {
         let _ = tokio::task::spawn_blocking(move || receiver.recv_timeout(Duration::from_secs(2)))
             .await;
     }
-    let (peer_device, peer) = accepted?;
+    let (peer_device, peer) = match accepted {
+        Ok(result) => result?,
+        Err(Stop::Signal) => {
+            emit(json!({"event":"cancelled"}));
+            return Err(CANCELLED_MESSAGE.into());
+        }
+        Err(Stop::Timeout) => {
+            emit(json!({"event":"timeout"}));
+            return Err(TIMEOUT_MESSAGE.into());
+        }
+    };
     Ok(json!({
         "event":"paired",
         "device":{
@@ -169,7 +215,7 @@ async fn pair_host_once(state_dir: &str, output: &str, name: &str, port: u16) ->
 }
 
 pub async fn pair_host(state_dir: &str, output: &str, name: &str, port: u16) -> Result<Value> {
-    with_pairing_limit(pair_host_once(state_dir, output, name, port)).await
+    pair_host_until(state_dir, output, name, port, stop_signal()).await
 }
 
 #[cfg(test)]
@@ -269,13 +315,13 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn an_abandoned_pairing_stops_waiting_after_ten_minutes() {
-        let result = with_pairing_limit(std::future::pending::<Result<Value>>()).await;
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("not finished in Settings within 10 minutes")
-        );
+        let started = tokio::time::Instant::now();
+        let stop = tokio::select! {
+            stop = stop_signal() => stop,
+            _ = tokio::time::sleep(PAIRING_LIMIT * 2) => panic!("the pairing limit never fired"),
+        };
+        assert_eq!(stop, Stop::Timeout);
+        assert_eq!(started.elapsed(), PAIRING_LIMIT);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -335,6 +381,77 @@ mod tests {
         // Closing the first connection ends the test pairing immediately instead of waiting ten minutes.
         std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, info.get_port())).unwrap();
         let _ = pairing_thread.join();
+        if let Ok(receiver) = browser.shutdown() {
+            let _ = receiver.recv_timeout(Duration::from_secs(2));
+        }
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cancelled_pairing_withdraws_its_bonjour_service() {
+        let directory =
+            std::env::temp_dir().join(format!("poki-pair-host-cancel-{}", uuid::Uuid::new_v4()));
+        let host_name = format!("poki-cancel-test-{}", uuid::Uuid::new_v4());
+        let state = directory.join("state");
+        let output = directory.join("pairing.plist");
+        let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+        let pairing_thread = std::thread::spawn({
+            let state = state.clone();
+            let output = output.clone();
+            let host_name = host_name.clone();
+            move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(pair_host_until(
+                        state.to_str().unwrap(),
+                        output.to_str().unwrap(),
+                        &host_name,
+                        0,
+                        async move {
+                            let _ = cancelled.await;
+                            Stop::Signal
+                        },
+                    ))
+            }
+        });
+
+        let browser = ServiceDaemon::new().unwrap();
+        let events = browser.browse(PAIRABLE_HOST_SERVICE_TYPE).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut fullname = None;
+        while fullname.is_none() && std::time::Instant::now() < deadline {
+            if let Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) =
+                events.recv_timeout(Duration::from_millis(500))
+                && info.get_property_val_str("name") == Some(host_name.as_str())
+            {
+                fullname = Some(info.get_fullname().to_string());
+            }
+        }
+        let fullname = fullname.expect("the pairable host did not resolve over mDNS");
+
+        cancel.send(()).unwrap();
+        let result = tokio::task::spawn_blocking(move || pairing_thread.join().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(result.unwrap_err().to_string(), CANCELLED_MESSAGE);
+
+        // The goodbye packet reaches browsers: the phone stops offering "Pair with" at once.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut removed = false;
+        while !removed && std::time::Instant::now() < deadline {
+            if let Ok(mdns_sd::ServiceEvent::ServiceRemoved(_, name)) =
+                events.recv_timeout(Duration::from_millis(500))
+            {
+                removed = name == fullname;
+            }
+        }
+        assert!(removed, "the cancelled pairing left {fullname} advertised");
+        assert!(
+            !output.exists(),
+            "a cancelled pairing wrote a pairing record"
+        );
         if let Ok(receiver) = browser.shutdown() {
             let _ = receiver.recv_timeout(Duration::from_secs(2));
         }

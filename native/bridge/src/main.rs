@@ -2,6 +2,7 @@ mod apps;
 mod ax;
 mod configuration;
 mod device_ops;
+mod ddi;
 mod display;
 mod gesture;
 mod installation;
