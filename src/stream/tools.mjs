@@ -155,7 +155,7 @@ export async function runScreenTool(session, name, args, { resolve, signal, scre
     }
     case 'screen_rtc_offer': {
       if (!(await weriftAvailable())) return failure('WebRTC is not available on this computer.');
-      const { sdp } = await answer(viewer, args.sdp, { onInput: input => screenInput(session, viewer, { ...input, stream: viewer.id }, { native }).then(r => r.structuredContent ?? {}) });
+      const { sdp } = await answer(viewer, args.sdp, { onInput: input => screenInput(session, viewer, { ...input, stream: viewer.id }, { native }).then(r => ({ ...r.structuredContent, ...(r.isError ? { isError: true } : {}) })) });
       return result({ sdp }, 'answer');
     }
   }

@@ -105,10 +105,13 @@ class ScreenHub {
   }
 
   // Starts an encoder on the cached HEVC chain, so it has a key frame however still the screen is.
+  // With no cached chain (it outgrew its limit), the phone is asked for a key frame instead.
   feedChain(transcoder) {
     const hevc = this.tracks.get('hevc');
     const key = hevc.latestKey();
-    if (key) for (const frame of hevc.since(key.seq - 1)) transcoder.write(frame);
+    if (key) { for (const frame of hevc.since(key.seq - 1)) transcoder.write(frame); return; }
+    const now = performance.now();
+    if (now - (this.chainKeyframeAt ?? -Infinity) >= KEYFRAME_INTERVAL_MS) { this.chainKeyframeAt = now; this.deps.keyframe(this.target).catch(() => {}); }
   }
 
   bitrate(codec) {

@@ -347,3 +347,18 @@ test('an encoder that keeps failing tells its viewers, and the codec is not offe
   assert.match(read.error, /keeps stopping/);
   assert.equal((await screens.open(target, { codecs: ['jpeg', 'hevc'] })).codec, 'hevc');
 });
+
+test('a restarted encoder with no cached chain asks the phone for a key frame', async t => {
+  const native = fakeNative();
+  const spawnFake = () => Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough(), kill() {} });
+  const screens = new Screens({ ...native, spawn: spawnFake, ffmpeg: async () => true });
+  t.after(() => screens.closeAll());
+  await screens.open(target, { codecs: ['hevc'] });
+  const [key, delta] = sampleFrames();
+  native.subscriptions[0].send(key);
+  // A long still-screen chain outgrows the cache: nothing is left to start an encoder on.
+  for (let seq = 2; seq <= 905; seq++) native.subscriptions[0].send({ ...delta, seq });
+  const before = native.keyframes.length;
+  await screens.open(target, { codecs: ['jpeg'] });
+  assert.equal(native.keyframes.length, before + 1, 'the new encoder got no chain and no key frame was asked for');
+});

@@ -369,10 +369,8 @@ async function attemptRtc(generation, attempt) {
       pc.addEventListener('connectionstatechange', () => { if (pc.connectionState === 'closed') { clearTimeout(timer); reject(new Error('closed')); } });
       control.onmessage = event => {
         let message; try { message = JSON.parse(event.data); } catch { return; }
-        if (message.type === 'ready') { clearTimeout(timer); if (message.codec_string) { state.codecString = message.codec_string; decoder?.reconfigure(message.codec_string); } resolve(); }
-        else if (message.type === 'discontinuity') resetChain();
-        else if (message.type === 'codec-failed') fallBack(generation);
-        else if (message.type === 'input-result') inputReplies.get(message.id)?.(message);
+        if (message.type === 'ready') { clearTimeout(timer); resolve(); }
+        receiveControl(message, generation);
       };
       pc.onconnectionstatechange = () => { if (['failed', 'closed'].includes(pc.connectionState)) { clearTimeout(timer); reject(new Error('ICE failed')); } };
     });
@@ -404,6 +402,13 @@ async function attemptRtc(generation, attempt) {
     return false;
   }
 }
+// Messages on the WebRTC control channel. It is not ordered with the media channel, so nothing
+// here touches the decoding chain (a key frame on the media channel starts a chain by itself).
+function receiveControl(message, generation) {
+  if (message.type === 'ready' && message.codec_string) { state.codecString = message.codec_string; decoder?.reconfigure(message.codec_string); }
+  else if (message.type === 'codec-failed') fallBack(generation);
+  else if (message.type === 'input-result') inputReplies.get(message.id)?.(message);
+}
 const MAGIC = { 0x4c485643: 'hevc', 0x4c415643: 'h264', 0x4c4f4459: 'jpeg' };
 function receivePacket(packet, generation) {
   const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
@@ -411,7 +416,9 @@ function receivePacket(packet, generation) {
   if (!codec) return;
   if (codec === 'jpeg') { accept({ discontinuity: true, frames: [{ seq, key: true, data: packet.subarray(8) }] }, generation); return; }
   const key = packet[8] === 2, configLength = view.getUint16(9);
-  accept({ after: lastSeq, frames: [{ seq, key, data: packet.subarray(11 + configLength) }] }, generation);
+  // The media channel is ordered: a key frame on it begins a new chain by itself, so the control
+  // channel's discontinuity notice (not ordered with the media) is never needed to reset one.
+  accept(key ? { discontinuity: true, frames: [{ seq, key, data: packet.subarray(11 + configLength) }] } : { after: lastSeq, frames: [{ seq, key, data: packet.subarray(11 + configLength) }] }, generation);
 }
 
 function stop(closeStream = true) {
@@ -452,6 +459,8 @@ function sendInput(args) {
   });
 }
 globalThis.pokiScreenInput = sendInput;
+// For tests: the WebRTC receive path, without a peer.
+globalThis.pokiScreenInternals = { receivePacket: packet => receivePacket(packet, state.generation), receiveControl: message => receiveControl(message, state.generation), lastSeq: () => lastSeq, held: () => held.length };
 
 // Normalized position (0..1) of a pointer on the phone's screen.
 function position(event) {

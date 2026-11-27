@@ -87,3 +87,32 @@ test('an offer without the two ordered channels is refused', { timeout: 30000 },
   // The unordered channel makes the answering side close the peer.
   await until(() => !viewer.rtc, 15000);
 });
+
+test('a gesture the phone refuses stays an error over WebRTC', { timeout: 30000 }, async t => {
+  const { runScreenTool } = await import('../src/stream/tools.mjs');
+  const { Coordination } = await import('../src/coordination.mjs');
+  const native = fakeNative();
+  const screens = new Screens({ ...native, ffmpeg: async () => false });
+  t.after(() => screens.closeAll());
+  const session = { coordinator: new Coordination(), label: 'view' };
+  const opened = (await runScreenTool(session, 'screen_open', { device: target.id, codecs: ['hevc'] }, { screens, resolve: async () => target })).structuredContent;
+  const browser = new RTCPeerConnection({ iceServers: [] });
+  t.after(() => browser.close());
+  browser.createDataChannel('media', { ordered: true });
+  const control = browser.createDataChannel('control', { ordered: true });
+  const messages = [];
+  control.onMessage.subscribe(message => messages.push(JSON.parse(message)));
+  await browser.setLocalDescription(await browser.createOffer());
+  await until(() => browser.iceGatheringState === 'complete');
+  process.env.POKI_STUN_URL = '';
+  t.after(() => { delete process.env.POKI_STUN_URL; });
+  const refuse = async () => ({ isError: true, outcome: 'not_sent', error: 'Nothing reached the iPhone.' });
+  const answered = await runScreenTool(session, 'screen_rtc_offer', { stream: opened.stream, sdp: browser.localDescription.sdp }, { screens, native: refuse });
+  await browser.setRemoteDescription({ type: 'answer', sdp: answered.structuredContent.sdp });
+  await until(() => messages.some(m => m.type === 'ready'));
+  control.send(JSON.stringify({ type: 'input', id: 3, kind: 'tap', x: 0.5, y: 0.5 }));
+  await until(() => messages.some(m => m.type === 'input-result'));
+  const reply = messages.find(m => m.type === 'input-result');
+  assert.equal(reply.isError, true, JSON.stringify(reply));
+  assert.match(reply.error, /Nothing reached/);
+});

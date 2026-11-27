@@ -344,3 +344,20 @@ test('a vertical pinch keeps its axis, and typing buffered before switching iPho
   await delay(1500);
   assert.deepEqual(h.poki.inputs.filter(i => i.kind === 'text'), [], 'typing from phone A reached phone B');
 });
+
+test('over WebRTC a key frame resumes the chain, and a late discontinuity notice does not undo it', { skip, timeout: 60000 }, async t => {
+  const h = await open(t, { settings: { rtc: false, codecs: (await ffmpegAvailable()) ? ['jpeg'] : undefined } });
+  await h.mount(showResult);
+  await until(() => painted(h.frame()));
+  const state = await h.frame().evaluate(() => {
+    const packet = (seq, key) => { const p = new Uint8Array(11 + 4); const v = new DataView(p.buffer); v.setUint32(0, 0x4c485643); v.setUint32(4, seq); p[8] = key ? 2 : 3; v.setUint16(9, 0); return p; };
+    const r = globalThis.pokiScreenInternals;
+    const base = r.lastSeq() + 1000;
+    // The recovery key frame arrives on the media channel before the control channel's notice.
+    r.receivePacket(packet(base, true));
+    r.receiveControl({ type: 'discontinuity' });
+    r.receivePacket(packet(base + 1, false));
+    return { last: r.lastSeq() - base, held: r.held() };
+  });
+  assert.deepEqual(state, { last: 1, held: 0 }, 'the delta after the recovery key frame was held');
+});
