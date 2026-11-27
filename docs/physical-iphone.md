@@ -38,7 +38,7 @@ In **Settings > Display & Brightness > Auto-Lock**, choose a longer interval or 
 
 When the iPhone locks or sleeps, accessibility and input can fail or time out. Waking the screen does not unlock the phone. Unlock it manually, return to the target app, and read the screen again before retrying. Repeated retries while the phone is locked can spend time reconnecting to device services without completing the action.
 
-After updating Poki or rebuilding the native helper, restart the daemon. A daemon that a client started automatically is replaced by the next stdio process that connects once it is idle, for example by `node bin/call.mjs poki_mcp_status`. A `npm start` service or user service must be stopped and started again by you. An existing daemon keeps its loaded JavaScript until it restarts. If it reports that it is running old code, restart it before retrying the phone task.
+After updating Poki or rebuilding the native helper, restart the daemon. A daemon that a client started automatically is replaced on the next call once it is idle, from a connected client or a new one such as `node bin/call.mjs poki_mcp_status`. A `npm start` service or user service must be stopped and started again by you. An existing daemon keeps its loaded JavaScript until it restarts. If it reports that it is running old code, restart it before retrying the phone task.
 
 ## Post-Pairing Wi-Fi Operation
 

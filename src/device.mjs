@@ -778,7 +778,9 @@ export class Session {
       const named = args.devices;
       if (!Array.isArray(named) || !named.length) throw new Error('run_code needs devices: the ids from list_devices the script may use.');
       const ids = await Promise.all(named.map(query => this.resolveDevice(String(query))));
-      return { keys: [...new Set(ids)], run: () => runCode(this.scriptContext(named, ids), args) };
+      // Checked before the sandbox starts, so an outdated service refuses the whole script the way it
+      // refuses a direct call (with the stale_code marker the stdio shim acts on).
+      return { keys: [...new Set(ids)], run: async () => { await requireCurrentCode(); return runCode(this.scriptContext(named, ids), args); } };
     }
     if (name === 'start_simulator' && args.simulator === undefined && args.device === undefined) {
       if (!args.model) throw new Error('Give simulator (name or UDID) or model.');

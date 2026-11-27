@@ -10,7 +10,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { fixture, value } from './fixture.mjs';
 import { olderRelease, removeIf } from '../src/daemon-launch.mjs';
 import { createServer } from 'node:http';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 
 const endpointOf = f => readFile(join(f.dir, 'state/mcp.json'), 'utf8').then(JSON.parse).catch(() => null);
@@ -229,4 +229,62 @@ test('removeIf removes only the content it was asked about, and puts anything el
   assert.equal(await removeIf(file, content => content === 'theirs'), true);
   assert.equal(await readFile(file, 'utf8').catch(() => null), null);
   assert.equal(await removeIf(file, () => true), false, 'a missing file is not an error');
+});
+
+test('a shim whose client leaves while its first call still waits for a service exits cleanly', { timeout: 30000 }, async t => {
+  const f = await fixture(t, { daemon: false });
+  await f.a.close();
+  // A live process holds the start lock, so the first call waits for a service that does not come.
+  const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  t.after(() => holder.kill('SIGKILL'));
+  await mkdir(join(f.dir, 'state'), { recursive: true });
+  await writeFile(join(f.dir, 'state/daemon.lock'), JSON.stringify({ pid: holder.pid, nonce: 'held' }));
+  const child = spawn(process.execPath, [join(f.dir, 'src/stdio.mjs')], { env: f.env, stdio: ['pipe', 'pipe', 'pipe'] });
+  let output = '', errors = '';
+  child.stdout.on('data', chunk => { output += chunk; });
+  child.stderr.on('data', chunk => { errors += chunk; });
+  const exited = once(child, 'exit');
+  const send = message => child.stdin.write(JSON.stringify(message) + '\n');
+  send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'raw', version: '1' } } });
+  await until(() => output.includes('"id":1'), 10000, 'initialize');
+  send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+  send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'poki_mcp_status', arguments: {} } });
+  await sleep(300);
+  const ended = performance.now();
+  child.stdin.end();
+  const [code] = await exited;
+  assert.equal(code, 0, errors);
+  assert.ok(performance.now() - ended < 5000, 'it does not wait for the service');
+  assert.doesNotMatch(errors, /TypeError/);
+  assert.equal((await readyLines(f)).length, 0);
+});
+
+test('a shim killed while its session records the screen: the recording is stopped and the service still exits', { timeout: 40000 }, async t => {
+  const f = await fixture(t, { daemon: false, extraEnv: () => ({ POKI_DAEMON_IDLE_EXIT_MS: '400' }) });
+  await f.a.close();
+  const child = spawn(process.execPath, [join(f.dir, 'src/stdio.mjs')], { env: f.env, stdio: ['pipe', 'pipe', 'inherit'] });
+  const exited = once(child, 'exit');
+  let output = '';
+  child.stdout.on('data', chunk => { output += chunk; });
+  const send = message => child.stdin.write(JSON.stringify(message) + '\n');
+  send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'raw', version: '1' } } });
+  await until(() => output.includes('"id":1'), 10000, 'initialize');
+  send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+  send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'start_recording', arguments: { device: 'fixture-phone' } } });
+  await until(() => output.includes('"id":2'), 20000, 'start_recording');
+  assert.match(output, /\\"recording\\": true/);
+  const { pid } = await endpointOf(f);
+  child.kill('SIGKILL'); await exited;
+  await until(() => !alive(pid), 15000, 'the service to stop the dead shim\'s recording and exit');
+});
+
+test('run_code through a connected client whose automatic service turns out to run older code runs on a new one', { timeout: 40000 }, async t => {
+  const f = await fixture(t, { daemon: false });
+  await f.set({ label: 'Ready' });
+  assert.notEqual((await f.call('list_elements')).isError, true);
+  const old = await endpointOf(f);
+  await touchCode(f);
+  const result = await f.call('run_code', { code: `return (await tools.list_elements({ device: 'fixture-phone' })).elements.length;` });
+  assert.notEqual(result.isError, true, result.content[0].text);
+  assert.notEqual((await endpointOf(f)).pid, old.pid);
 });

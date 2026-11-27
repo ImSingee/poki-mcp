@@ -83,7 +83,10 @@ const active = new Set();
 let posting = 0;
 // Each session's shim sends its pid, so a shim that died without closing its session (a pool that
 // reaps idle stdio processes with SIGKILL) does not keep the session, or this daemon, alive forever.
-// A session without one is dropped after being idle for as long as an automatic daemon waits.
+// Such a session is closed even while it still owns work: closing it stops its recordings and
+// simulated locations and releases its leases, which nobody else could. A session without a pid (a
+// direct HTTP client) is dropped only once it owns nothing and has been idle for as long as an
+// automatic daemon waits.
 const lastSeen = new Map(), clientPids = new Map();
 let lastActivity = performance.now();
 const sessionBusy = session => [...coordinator.operations].some(op => op.owner === session)
@@ -99,8 +102,8 @@ const busyReasons = () => {
 async function pruneSessions() {
   for (const [id, session] of [...sessions]) {
     const pid = clientPids.get(id);
-    const gone = pid ? !alive(pid) : performance.now() - (lastSeen.get(id) ?? 0) > idleExitMs;
-    if (gone && !sessionBusy(session)) {
+    const gone = pid ? !alive(pid) : performance.now() - (lastSeen.get(id) ?? 0) > idleExitMs && !sessionBusy(session);
+    if (gone) {
       sessions.delete(id); lastSeen.delete(id); clientPids.delete(id);
       await session.close().catch(() => {});
     }

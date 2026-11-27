@@ -81,8 +81,9 @@ Poki Agent starts its own stdio process with `POKI_MCP_TOOLS=all`. Its existing 
 - `POKI_CUA_BACKEND=wda` with `POKI_WDA_URL=http://<phone>:8100` reads and acts through a
   WebDriverAgent runner deliberately launched for network access from the host instead of the bridge.
   That WDA must use a reachable, non-loopback `USE_IP`. `look` and `do` answer the same way on either backend.
-  WDA drives the iPhone named by `device`, so device leases apply to it as they do to the bridge; a host that
-  sees no iPhone at all coordinates it under its WDA address instead.
+  WDA drives the iPhone named by `device`, so device leases apply to it as they do to the bridge. A host that
+  sees no iPhone at all lists the phone as `wda:<POKI_WDA_URL>` (name `WebDriverAgent`) in `list_devices`;
+  pass that id as `device` to `look` and `do`. Only those two drive it.
 
 The complete catalog (`POKI_MCP_TOOLS=all`) includes `look` and `do` too.
 

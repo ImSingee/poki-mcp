@@ -63,17 +63,18 @@ async function request(path, init) {
 // is gone there is nothing to close or cancel, and starting a new daemon for it would be wasted.
 const controls = new Set();
 const control = (path, extra = {}) => {
+  if (!endpoint) return Promise.resolve();
   const result = send(path, { method: 'POST', headers: extra, signal: AbortSignal.timeout(35000) }).then(response => response.body?.cancel());
   controls.add(result); result.finally(() => controls.delete(result)).catch(() => {});
   return result;
 };
-let remote;
+let remote, connected;
 // Connected on the first call, so listing tools never starts a daemon.
 const remoteClient = () => remote ??= (async () => {
   const client = new Client({ name: 'poki-mcp-bridge', version });
   await connectDaemon();
   await client.connect(new StreamableHTTPClientTransport(endpoint.url, { fetch: (input, init) => request(new URL(input).pathname, init) }));
-  return client;
+  return connected = client;
 })().catch(error => { remote = undefined; throw error; });
 const server = createServer(async (name, args, extra) => {
   const id = randomUUID();
@@ -99,9 +100,11 @@ let stopping;
 function stop() {
   return stopping ??= (async () => {
     // A shim that never reached a daemon has no session to close, and must not start one to close it.
-    if (remote) await control('/session/close').catch(() => {});
+    if (connected) await control('/session/close').catch(() => {});
     await Promise.allSettled([...controls]);
-    await server.close(); await (await remote?.catch(() => undefined))?.close();
+    await server.close(); await connected?.close().catch(() => {});
+    // A first call still waiting for a daemon to start must not keep this process alive.
+    setTimeout(() => process.exit(0), 1000).unref();
   })();
 }
 process.stdin.once('end', () => { void stop(); });
