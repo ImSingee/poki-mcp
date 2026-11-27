@@ -32,7 +32,12 @@ const send = (path, init, to = endpoint) => {
 };
 const refused = error => error.cause?.code === 'ECONNREFUSED';
 const lost = error => error.name === 'TypeError' && error.cause ? new Error('The connection to Poki MCP was lost during this call. The device may already have acted, so look at the screen before retrying.') : error;
-const unavailable = () => Object.assign(new Error(`Poki MCP is not running (no service answers for ${endpointFile}). The next tool call starts it.`), { code: 'poki_unavailable' });
+// POKI_MCP_AUTOSTART=0: this client only uses a daemon that runs (a container whose daemon runs in
+// another container, which has the USB connection).
+const autostart = process.env.POKI_MCP_AUTOSTART !== '0';
+const unavailable = () => Object.assign(new Error(autostart
+  ? `Poki MCP is not running (no service answers for ${endpointFile}). The next tool call starts it.`
+  : `Poki MCP is not running (no service answers for ${endpointFile}), and POKI_MCP_AUTOSTART=0 keeps this client from starting one. Start the service, then retry.`), { code: 'poki_unavailable' });
 // The approval mode this client's environment asks for explicitly, when it is stricter than the one
 // the shared daemon runs with: calls are then refused rather than run under the weaker mode.
 const requestedMode = (() => { if (!process.env.POKI_MCP_APPROVAL_MODE?.trim()) return undefined; try { return approvalMode(); } catch { return undefined; } })();
@@ -40,7 +45,7 @@ let modeConflict;
 // Reaches the daemon named in mcp.json. With start (a tool call only), also starts or replaces it.
 async function connectDaemon({ start }) {
   const previous = endpoint?.pid;
-  if (start) endpoint = await ensureDaemon();
+  if (start && autostart) endpoint = await ensureDaemon();
   else {
     const running = await runningDaemon().catch(() => null);
     if (!running?.info) throw unavailable();

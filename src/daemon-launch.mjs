@@ -129,14 +129,33 @@ async function lockHolder() {
   return ` The start lock ${lockFile} is held${pid ? ` by pid ${pid}` : ''} (touched ${age} s ago); if no Poki MCP client is starting the service, delete it.`;
 }
 
+// The environment an automatically started daemon gets. It outlives the client that started it and
+// serves every other client of this state directory, so it takes only what it and the host tools it
+// runs need: never the starting client's secrets (POKI_IPHONE_PASSCODE, model API keys, tokens).
+// POKI_DAEMON_ENV names further variables to pass, comma-separated.
+const systemEnv = new Set(['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LANGUAGE', 'TZ',
+  // Dialogs (ask approval mode), Xcode, usbmuxd, certificates and proxies.
+  'DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS', 'DEVELOPER_DIR', 'USBMUXD_SOCKET_ADDRESS',
+  'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS', 'NODE_USE_ENV_PROXY', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
+  'IDEVICE_TOOLS']);
+// Every POKI_ setting the daemon reads. Not POKI_MCP_TOKEN (an automatic daemon makes its own), and
+// not POKI_PARENT_PID or POKI_MCP_SESSION, which belong to the shim's own client.
+export const daemonSettings = new Set(['POKI_ALLOW_PLAINTEXT_BIND', 'POKI_BIND_HOST', 'POKI_BUILD_COMMIT', 'POKI_CUA_ACTION_CAP_MS', 'POKI_CUA_BACKEND',
+  'POKI_CUA_TREE_MS', 'POKI_DAEMON_IDLE_EXIT_MS', 'POKI_HOST_ALLOW', 'POKI_INPUT_LOCK_WAIT_MS', 'POKI_MAX_CONCURRENT_READS', 'POKI_MCP_APPROVAL_MODE',
+  'POKI_MCP_CALL_LOG', 'POKI_MCP_NATIVE_TRACE', 'POKI_MCP_STATE_DIR', 'POKI_MCP_TOOLS', 'POKI_NATIVE', 'POKI_NO_UPDATE_CHECK', 'POKI_PYMOBILEDEVICE3',
+  'POKI_TLS_CERT', 'POKI_TLS_KEY', 'POKI_TOOL_PROFILE', 'POKI_WDA_URL']);
+export function daemonEnvironment(env = process.env) {
+  const extra = new Set((env.POKI_DAEMON_ENV ?? '').split(',').map(name => name.trim()).filter(Boolean));
+  const passed = name => systemEnv.has(name) || daemonSettings.has(name) || /^(LC_|XDG_)/.test(name) || extra.has(name);
+  return Object.fromEntries(Object.entries(env).filter(([name, value]) => value !== undefined && passed(name)));
+}
+
 const logTail = () => { try { return readFileSync(logFile, 'utf8').trim().split('\n').slice(-5).join('\n'); } catch { return ''; } };
 
 // Resolves to the started daemon's endpoint, or null when it found another daemon and left.
 async function spawnDaemon(deadline, lock) {
   const log = openSync(logFile, 'a', 0o600);
-  const env = { ...process.env };
-  // The daemon outlives this shim: it must not watch the shim's parent or carry its session.
-  delete env.POKI_PARENT_PID; delete env.POKI_MCP_SESSION;
+  const env = daemonEnvironment();
   let child;
   try { child = spawn(process.execPath, [join(root, 'src/daemon.mjs'), '--auto'], { detached: true, stdio: ['ignore', log, log], env, cwd: root }); }
   finally { closeSync(log); }

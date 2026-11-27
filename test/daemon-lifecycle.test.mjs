@@ -371,3 +371,37 @@ test('a call that cannot start the service because of a held lock names that loc
   assert.ok(output.includes(lock), output);
   assert.match(output, new RegExp(`held by pid ${process.pid}`));
 });
+
+// The daemon a shim starts outlives that client and serves every other one, so the client's secrets
+// stay with the client. Its helpers inherit its environment, which shows what it got.
+test('a service a shim starts does not take the client\'s secrets', { timeout: 30000 }, async t => {
+  const f = await fixture(t, { daemon: false, extraEnv: () => ({ POKI_IPHONE_PASSCODE: '123456', OPENAI_API_KEY: 'sk-test-fixture', POKI_MCP_TOKEN: 'x'.repeat(40), FIXTURE_LOG_ENV: '1' }) });
+  await status(f.a);
+  const helper = (await f.events()).find(event => event.tool === 'python3' && event.env);
+  assert.ok(helper, 'a helper of the service ran');
+  for (const secret of ['POKI_IPHONE_PASSCODE', 'OPENAI_API_KEY', 'POKI_MCP_TOKEN', 'POKI_PARENT_PID', 'POKI_MCP_SESSION']) assert.ok(!helper.env.includes(secret), `${secret} reached the service`);
+  for (const needed of ['PATH', 'HOME', 'POKI_MCP_STATE_DIR', 'FIXTURE_STATE']) assert.ok(helper.env.includes(needed), `${needed} is passed`);
+  const entry = await endpointOf(f);
+  assert.notEqual(entry.token, 'x'.repeat(40), 'the service made its own token');
+});
+
+test('every POKI_ setting the service reads reaches a service a shim starts', async () => {
+  const { readdir } = await import('node:fs/promises');
+  const { daemonSettings } = await import('../src/daemon-launch.mjs');
+  const source = join(import.meta.dirname, '../src');
+  const read = new Set();
+  for (const file of await readdir(source)) if (file.endsWith('.mjs')) for (const [, name] of (await readFile(join(source, file), 'utf8')).matchAll(/env\.(POKI_[A-Z0-9_]+)/g)) read.add(name);
+  const shimOnly = new Set(['POKI_MCP_TOKEN', 'POKI_PARENT_PID', 'POKI_MCP_SESSION', 'POKI_MCP_HEARTBEAT_MS', 'POKI_MCP_AUTOSTART', 'POKI_DAEMON_ENV']);
+  assert.deepEqual([...read].filter(name => !shimOnly.has(name) && !daemonSettings.has(name)), []);
+});
+
+test('with POKI_MCP_AUTOSTART=0 a call fails instead of starting a service, and uses one that runs', { timeout: 30000 }, async t => {
+  const f = await fixture(t, { daemon: false, extraEnv: () => ({ POKI_MCP_AUTOSTART: '0' }) });
+  const result = await f.a.callTool({ name: 'poki_mcp_status', arguments: {} });
+  assert.ok(result.isError);
+  assert.match(result.content[0].text, /POKI_MCP_AUTOSTART=0/);
+  await sleep(300);
+  assert.deepEqual(await readyLines(f), []);
+  await f.startDaemon();
+  assert.match((await status(f.a)).implementation, /Poki MCP/);
+});
