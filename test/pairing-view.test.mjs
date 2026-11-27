@@ -113,8 +113,11 @@ test('the view shows the PIN, keeps polling, and lists the new iPhone when it is
   assert.equal(await view.locator('.pin span').count(), 6);
   const polled = server.count('pairing_status');
   await until(() => server.count('pairing_status') > polled + 1);
+  await view.getByText('Advertising as Poki Lab').waitFor();
   server.state.jobState = 'mounting_ddi';
   await view.getByText('Preparing developer services').first().waitFor();
+  // The header follows the job, not the list_devices answer from before it advanced.
+  assert.equal(await view.getByText('Advertising as Poki Lab').count(), 0);
   server.state.jobState = 'ready';
   await view.getByText('Ready', { exact: true }).waitFor();
   await view.locator('.device', { hasText: 'New iPhone' }).waitFor();

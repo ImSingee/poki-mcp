@@ -259,7 +259,9 @@ function renderDevices() {
 
 function render() {
   const host = $('host');
-  const advertising = state.host?.advertising;
+  // The job's own state is newer than the last list_devices: this computer advertises only while a
+  // job waits for the iPhone or its PIN.
+  const advertising = state.job ? ['advertising', 'pin'].includes(state.job.state) : state.host?.advertising;
   host.innerHTML = state.host ? `<span class="dot ${advertising ? 'live' : ''}" aria-hidden="true"></span>${escape(advertising ? `Advertising as ${state.host.name}` : state.host.name)}` : '';
   renderJob();
   renderDevices();
