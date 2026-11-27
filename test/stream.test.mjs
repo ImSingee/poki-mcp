@@ -232,3 +232,15 @@ test('the JPEG track transcodes at most ten pictures a second and keeps only the
   assert.deepEqual([...data.subarray(0, 2)], [0xff, 0xd8]);
   assert.ok(viewer.track.frames.length <= 1);
 });
+
+test('a device takes at most eight viewers', async t => {
+  const native = fakeNative();
+  const screens = new Screens({ ...native, ffmpeg: noFfmpeg });
+  t.after(() => screens.closeAll());
+  const viewers = [];
+  for (let i = 0; i < 8; i++) viewers.push(await screens.open(target, { codecs: ['hevc'] }));
+  await assert.rejects(screens.open(target, { codecs: ['hevc'] }), /already has 8 screen viewers/);
+  viewers[0].close();
+  await screens.open(target, { codecs: ['hevc'] });
+  assert.equal(native.subscriptions.length, 1);
+});

@@ -20,6 +20,7 @@ const RETRY_MS = [1000, 2000, 5000];
 const RETUNE_MS = 5000;
 
 export const CODECS = ['hevc', 'h264', 'jpeg'];
+export const MAX_VIEWERS = 8;
 
 class ScreenHub {
   viewers = new Set(); tracks = new Map(); transcoders = new Map();
@@ -214,6 +215,8 @@ export class Screens {
     const codec = codecs.find(c => served.includes(c));
     if (!codec) throw new Error(`None of the codecs ${codecs.join(', ')} can be served here${served.length === 1 ? ' (ffmpeg with libx264 is not installed, so only HEVC is available)' : ''}.`);
     let hub = this.hubs.get(target.id);
+    // Each viewer holds reads, credit and possibly a WebRTC peer; an unrenewed one goes in 10 s.
+    if (hub && hub.viewers.size >= MAX_VIEWERS) throw new Error(`${target.id} already has ${MAX_VIEWERS} screen viewers. Close a screen panel first.`);
     if (!hub) { hub = new ScreenHub(target, this.deps); this.hubs.set(target.id, hub); }
     const viewer = new Viewer(this, hub, codec);
     hub.viewers.add(viewer); this.viewers.set(viewer.id, viewer);
