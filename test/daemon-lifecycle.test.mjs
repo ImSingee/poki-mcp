@@ -8,7 +8,7 @@ import { once } from 'node:events';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { fixture, value } from './fixture.mjs';
-import { olderRelease, removeIf } from '../src/daemon-launch.mjs';
+import { olderRelease } from '../src/daemon-launch.mjs';
 import { createServer } from 'node:http';
 import { mkdtemp, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -219,16 +219,19 @@ test('a shim that exits after its service died does not start another one to clo
   assert.equal((await readyLines(f)).length, 1, 'no service was started for the close');
 });
 
-test('removeIf removes only the content it was asked about, and puts anything else back', async t => {
-  const dir = await mkdtemp(join(tmpdir(), 'poki-remove-if-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const file = join(dir, 'lock');
-  await writeFile(file, 'theirs');
-  assert.equal(await removeIf(file, content => content === 'mine'), false);
-  assert.equal(await readFile(file, 'utf8'), 'theirs');
-  assert.equal(await removeIf(file, content => content === 'theirs'), true);
-  assert.equal(await readFile(file, 'utf8').catch(() => null), null);
-  assert.equal(await removeIf(file, () => true), false, 'a missing file is not an error');
+test('shims that find the same stale start lock at once still start one service', { timeout: 40000 }, async t => {
+  const f = await fixture(t, { daemon: false });
+  // The lock of a shim that died while starting the service.
+  const dead = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  await once(dead, 'exit');
+  await mkdir(join(f.dir, 'state'), { recursive: true });
+  await writeFile(join(f.dir, 'state/daemon.lock'), JSON.stringify({ pid: dead.pid, nonce: 'dead' }));
+  const clients = [f.a, ...await Promise.all([1, 2, 3, 4, 5].map(() => f.connect()))];
+  await Promise.all(clients.map(status));
+  assert.equal((await readyLines(f)).length, 1, 'exactly one service became ready');
+  const { pid } = await endpointOf(f);
+  await Promise.all(clients.map(status));
+  assert.equal((await endpointOf(f)).pid, pid);
 });
 
 test('a shim whose client leaves while its first call still waits for a service exits cleanly', { timeout: 30000 }, async t => {

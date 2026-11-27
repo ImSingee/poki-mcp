@@ -14,7 +14,7 @@ import { warnIfNativeStale } from './build-info.mjs';
 import { closeLocalHelpers, remoteDevices, warmRemote } from './remote.mjs';
 import { version, codeFingerprint, currentCodeFingerprint, setServiceStart } from './build-info.mjs';
 import { approvalMode } from './human.mjs';
-import { runningDaemon, alive, removeIf } from './daemon-launch.mjs';
+import { runningDaemon, alive } from './daemon-launch.mjs';
 
 // --auto: started by a stdio shim (src/daemon-launch.mjs). It takes a free port unless --port says
 // otherwise, leaves when another daemon already serves this state directory, and exits once it has
@@ -216,8 +216,10 @@ async function stop() {
   await Promise.allSettled([...active].map(server => server.close()));
   await closeLocalHelpers();
   await closed;
-  // Only our own entry: a daemon that replaced this one may have written its own already.
-  await removeIf(endpointFile, content => { try { return JSON.parse(content).pid === process.pid; } catch { return false; } });
+  // Only our own entry. A daemon that replaces this one is started after this one has exited
+  // (daemon-launch.mjs waits for that), so it cannot write its entry between this read and unlink.
+  const entry = await readFile(endpointFile, 'utf8').then(JSON.parse).catch(() => null);
+  if (entry?.pid === process.pid) await unlink(endpointFile).catch(() => {});
   // Whatever still holds the event loop (a helper's socket, a pending update check) must not keep a
   // stopped daemon around.
   setTimeout(() => process.exit(0), 2000).unref();

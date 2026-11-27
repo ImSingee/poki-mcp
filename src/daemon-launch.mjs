@@ -5,7 +5,7 @@
 // start and reap stdio processes freely still share it. The daemon a shim starts runs with --auto:
 // it picks a free port, writes mcp.json like `npm start` does, and exits after it has been idle for
 // POKI_DAEMON_IDLE_EXIT_MS. A daemon started with `npm start` is used as it is and never restarted.
-import { open, readFile, unlink, mkdir, stat, rename, link } from 'node:fs/promises';
+import { open, readFile, unlink, mkdir, stat } from 'node:fs/promises';
 import { openSync, closeSync, readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -40,19 +40,6 @@ export function olderRelease(a, b) {
   return false;
 }
 
-// Removes file only if its content still passes keep === false, without the gap between reading and
-// unlinking in which another process may replace it: the file is moved aside first, and put back
-// when it turns out to be someone else's (unless yet another one has appeared meanwhile).
-export async function removeIf(file, test) {
-  const aside = `${file}.${process.pid}.${randomUUID()}.aside`;
-  try { await rename(file, aside); } catch { return false; }
-  const content = await readFile(aside, 'utf8').catch(() => null);
-  if (content !== null && test(content)) { await unlink(aside).catch(() => {}); return true; }
-  await link(aside, file).catch(() => {});
-  await unlink(aside).catch(() => {});
-  return false;
-}
-
 const authorized = endpoint => ({ Authorization: `Bearer ${endpoint.token}` });
 
 // What the daemon reports about itself; throws when it does not answer.
@@ -70,6 +57,25 @@ async function waitForExit(pid, ms) {
   }
 }
 
+// Breaks a lock whose holder died. Shims that find the same stale lock break it one at a time,
+// through a second lock: the one holding it reads the stale lock again and removes it only if it is
+// still that content. While the stale lock exists no shim can create a new one, so a lock removed
+// this way is never one that is in use.
+async function breakStaleLock(held) {
+  const breaker = `${lockFile}.break`;
+  let handle;
+  try { handle = await open(breaker, 'wx', 0o600); }
+  catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    // Breaking takes milliseconds; an older breaker was left by a shim that died while breaking.
+    const age = Date.now() - ((await stat(breaker).catch(() => null))?.mtimeMs ?? Date.now());
+    if (age > 10000) await unlink(breaker).catch(() => {});
+    return;
+  }
+  try { if (await readFile(lockFile, 'utf8').catch(() => null) === held) await unlink(lockFile).catch(() => {}); }
+  finally { await handle.close(); await unlink(breaker).catch(() => {}); }
+}
+
 // The lock only decides which shim starts the daemon. A holder that died leaves its pid behind,
 // and that lock is broken; a lock whose holder has not written its pid yet is waited for.
 async function takeLock() {
@@ -78,7 +84,8 @@ async function takeLock() {
   try {
     const handle = await open(lockFile, 'wx', 0o600);
     try { await handle.writeFile(content); } finally { await handle.close(); }
-    return { release: () => removeIf(lockFile, now => now === content) };
+    // Only this shim removes its own lock while it lives, so reading and then unlinking is safe here.
+    return { release: async () => { if (await readFile(lockFile, 'utf8').catch(() => null) === content) await unlink(lockFile).catch(() => {}); } };
   } catch (error) { if (error.code !== 'EEXIST') throw error; }
   const held = await readFile(lockFile, 'utf8').catch(() => null);
   if (held === null) return null;
@@ -87,8 +94,7 @@ async function takeLock() {
   const stale = pid === undefined
     ? Date.now() - ((await stat(lockFile).catch(() => null))?.mtimeMs ?? Date.now()) > 10000
     : !alive(pid);
-  // Only the stale lock itself is removed; one another shim took in between is put back.
-  if (stale) await removeIf(lockFile, now => now === held);
+  if (stale) await breakStaleLock(held);
   return null;
 }
 
