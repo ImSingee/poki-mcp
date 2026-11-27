@@ -130,6 +130,11 @@ fn phone(rsd: &RsdHandshake) -> String {
         .to_owned()
 }
 // `None` while the phone has not yet answered the display query.
+/// Whether this phone is already known to have several built-in panels (no query is made).
+pub fn several_known(rsd: &RsdHandshake) -> bool {
+    panels_known(rsd) == Some(true)
+}
+
 fn panels_known(rsd: &RsdHandshake) -> Option<bool> {
     if !super::ROUTES_BY_PANEL || !rsd.services.contains_key(DEVICE_INFO) {
         return Some(false);

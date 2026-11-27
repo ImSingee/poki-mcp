@@ -2,7 +2,9 @@
 use super::connect_device;
 use super::{
     InputMedia, NoDisplayService, NotSent, Request, Result, close_input, execute, execute_connected,
+    video::VideoHub,
 };
+use std::sync::Arc;
 use idevice::{
     remote_pairing::{
         RemotePairingClient, RpPairingFile, RpPairingSocket, connect_tls_psk_tunnel_native,
@@ -75,7 +77,29 @@ struct Session {
     transport: Transport,
     control: Option<Control>,
     connection: Option<Connection>,
+    stream: Streaming,
 }
+
+/// The screen video of this helper's phone. Its subscribers keep the media session open, and
+/// reopen it when it drops (`Session::maintain`).
+#[derive(Default)]
+struct Streaming {
+    hub: Arc<VideoHub>,
+    /// When a failed reopen may be tried again, and how long to wait after the next failure.
+    retry_at: Option<tokio::time::Instant>,
+    backoff: Duration,
+    panels_checked_at: Option<tokio::time::Instant>,
+    restarted_at: Option<tokio::time::Instant>,
+    /// Whether a viewer was subscribed when last looked (`notice_viewers`).
+    watched: bool,
+}
+
+/// While subscribed, the session checks its media this often.
+const STREAM_MAINTENANCE: Duration = Duration::from_millis(500);
+/// A phone with several panels is asked which one is active this often while subscribed.
+const PANEL_CHECK: Duration = Duration::from_secs(2);
+/// An unanswered keyframe request restarts the media session at most this often.
+const MEDIA_RESTART: Duration = Duration::from_secs(5);
 
 impl Session {
     async fn connect(&mut self) -> Result<()> {
@@ -160,20 +184,141 @@ impl Session {
 
     fn input_media_deadline(&self) -> Option<tokio::time::Instant> {
         let media = self.connection.as_ref()?.media.as_ref()?;
+        if media.streaming() {
+            return None;
+        }
         Some(
             (media.last_activity + INPUT_MEDIA_IDLE_TIMEOUT)
                 .min(media.last_input + INPUT_MEDIA_MAX_READ_HOLD),
         )
     }
 
+    /// Ends the input hold. The media session stays open while someone watches the screen.
     async fn release_input(&mut self) -> Result<()> {
+        if self.stream.hub.subscribers() > 0 {
+            return Ok(());
+        }
+        self.close_media().await
+    }
+
+    async fn close_media(&mut self) -> Result<()> {
         if let Some(connection) = &mut self.connection {
             close_input(&mut connection.media).await?;
         }
         Ok(())
     }
 
+    /// Opens the tunnel and the media session the screen video comes from, if not open yet.
+    async fn ensure_media(&mut self) -> Result<()> {
+        if self
+            .connection
+            .as_ref()
+            .and_then(|c| c.media.as_ref())
+            .is_some_and(|m| !m.alive())
+        {
+            let _ = self.close_media().await;
+        }
+        if self.connection.is_none() {
+            self.open().await?;
+        }
+        let connection = self.connection.as_mut().unwrap();
+        if connection.media.is_none() {
+            let media = tokio::time::timeout(
+                Duration::from_secs(25),
+                InputMedia::connect(&mut connection.adapter, &mut connection.rsd, &self.stream.hub),
+            )
+            .await
+            .map_err(|_| "Starting the screen video timed out")??;
+            connection.media = Some(media);
+            self.stream.hub.clear_keyframe_request();
+        }
+        Ok(())
+    }
+
+    /// After the last viewer leaves, the session idles as after an input: it is released
+    /// INPUT_MEDIA_IDLE_TIMEOUT later, not at once for an input long ago.
+    fn notice_viewers(&mut self) {
+        let watched = self.stream.hub.subscribers() > 0;
+        if self.stream.watched
+            && !watched
+            && let Some(media) = self.connection.as_mut().and_then(|c| c.media.as_mut())
+        {
+            let now = tokio::time::Instant::now();
+            media.last_activity = now;
+            media.last_input = media.last_input.max(now);
+        }
+        self.stream.watched = watched;
+    }
+
+    /// When the subscribed stream next needs looking after.
+    fn maintenance_due(&self) -> Option<tokio::time::Instant> {
+        if self.stream.hub.subscribers() == 0 {
+            return None;
+        }
+        let now = tokio::time::Instant::now();
+        Some(match self.stream.retry_at {
+            Some(at) if at > now => at,
+            _ => now + STREAM_MAINTENANCE,
+        })
+    }
+
+    /// While someone watches: reopens a media session that dropped (with backoff), restarts one
+    /// whose keyframe request went unanswered (a new session starts with a key frame), and
+    /// follows a fold or panel switch to the active panel.
+    async fn maintain(&mut self) {
+        if self.stream.hub.subscribers() == 0 {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        let mut restart = self.stream.hub.keyframe_overdue(now)
+            && self
+                .stream
+                .restarted_at
+                .is_none_or(|at| now.duration_since(at) >= MEDIA_RESTART);
+        if let Some(connection) = self.connection.as_mut()
+            && let Some(media) = connection.media.as_ref()
+            && super::display::several_known(&connection.rsd)
+            && self
+                .stream
+                .panels_checked_at
+                .is_none_or(|at| now.duration_since(at) >= PANEL_CHECK)
+        {
+            self.stream.panels_checked_at = Some(now);
+            let shown = media.display_id;
+            if let Ok(display) =
+                super::display::active(&mut connection.adapter, &connection.rsd).await
+                && super::display::route(display.as_ref()).media_display != shown
+            {
+                restart = true;
+            }
+        }
+        if restart {
+            self.stream.restarted_at = Some(now);
+            let _ = self.close_media().await;
+        }
+        let healthy = self
+            .connection
+            .as_ref()
+            .and_then(|c| c.media.as_ref())
+            .is_some_and(InputMedia::alive);
+        if healthy || self.stream.retry_at.is_some_and(|at| at > now) {
+            return;
+        }
+        match self.ensure_media().await {
+            Ok(()) => {
+                self.stream.retry_at = None;
+                self.stream.backoff = Duration::ZERO;
+            }
+            Err(_) => {
+                self.stream.backoff = (self.stream.backoff * 2)
+                    .clamp(Duration::from_secs(1), Duration::from_secs(5));
+                self.stream.retry_at = Some(tokio::time::Instant::now() + self.stream.backoff);
+            }
+        }
+    }
+
     async fn request(&mut self, request: Value) -> Result<Value> {
+        self.notice_viewers();
         if self
             .input_media_deadline()
             .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
@@ -183,6 +328,19 @@ impl Session {
         if request["op"] == "release_input" {
             self.release_input().await?;
             return Ok(json!({"released":true}));
+        }
+        if request["op"] == "media_keyframe" {
+            // Answered by the pump (PLI and FIR, at most once a second). A phone that ignores it
+            // gets a restarted media session from `maintain`.
+            let open = self
+                .connection
+                .as_ref()
+                .and_then(|c| c.media.as_ref())
+                .is_some_and(InputMedia::alive);
+            if open {
+                self.stream.hub.want_keyframe();
+            }
+            return Ok(json!({"requested":open,"subscribers":self.stream.hub.subscribers()}));
         }
         let action = if request["op"] == "connect" || request["op"] == "reconnect" {
             None
@@ -211,7 +369,7 @@ impl Session {
             // Keep the working tunnel until its replacement has actually connected.
             // A failed reconnect must not destroy the only usable cellular session.
             if self.connection.is_none() || request["op"] == "reconnect" {
-                let _ = self.release_input().await;
+                let _ = self.close_media().await;
                 if request["op"] == "reconnect"
                     && matches!(&self.transport, Transport::Remote(config) if config.uses_bonjour())
                 {
@@ -234,6 +392,7 @@ impl Session {
                 }
                 fresh = true;
             }
+            let hub = self.stream.hub.clone();
             let Connection {
                 adapter,
                 rsd,
@@ -251,6 +410,7 @@ impl Session {
                         .map(|p| p as &dyn idevice::provider::IdeviceProvider),
                     action.clone(),
                     media,
+                    &hub,
                 ),
             )
             .await;
@@ -274,7 +434,11 @@ impl Session {
                 Ok(Err(error)) => error,
                 Err(_) => "Remote operation timed out".into(),
             };
-            let _ = close_input(media).await;
+            // A failed request resets the media session, unless someone watches the screen
+            // through it; a dead tunnel below drops it either way.
+            if !media.as_ref().is_some_and(InputMedia::streaming) {
+                let _ = close_input(media).await;
+            }
             // A service or file error does not imply the shared tunnel died.
             // bind_udp checks the adapter task locally without opening a phone service.
             // A phone that vanished without a reset leaves the adapter running, so a socket error also
@@ -429,6 +593,7 @@ fn load(path: &str) -> Result<Session> {
         transport: Transport::Remote(serde_json::from_slice(&std::fs::read(path)?)?),
         control: None,
         connection: None,
+        stream: Streaming::default(),
     })
 }
 
@@ -447,29 +612,45 @@ async fn reply(session: &mut Session, line: &str) -> Value {
 const INPUT_MEDIA_IDLE_TIMEOUT: Duration = Duration::from_secs(1);
 pub(super) const INPUT_MEDIA_MAX_READ_HOLD: Duration = Duration::from_secs(5);
 
+async fn sleep_until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// Runs `future` while the session idles: releases idle input media on time and, while someone
+/// watches the screen, keeps its media session open. The deadlines are taken again whenever a
+/// subscriber comes or goes, so the last one leaving starts the idle release.
 async fn with_media_deadline<T>(
     session: &mut Session,
     future: impl std::future::Future<Output = T>,
 ) -> T {
-    if session
-        .input_media_deadline()
-        .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
-    {
-        let _ = session.release_input().await;
-    }
-    let deadline = session.input_media_deadline();
     tokio::pin!(future);
-    tokio::select! {
-        biased;
-        output = &mut future => output,
-        () = async {
-            match deadline {
-                Some(deadline) => tokio::time::sleep_until(deadline).await,
-                None => std::future::pending::<()>().await,
-            }
-        } => {
+    let mut subscribers = session.stream.hub.watch();
+    loop {
+        session.notice_viewers();
+        if session
+            .input_media_deadline()
+            .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+        {
             let _ = session.release_input().await;
-            future.await
+        }
+        let deadline = session.input_media_deadline();
+        let maintenance = session.maintenance_due();
+        subscribers.borrow_and_update();
+        tokio::select! {
+            biased;
+            output = &mut future => return output,
+            () = sleep_until(deadline) => {
+                let _ = session.release_input().await;
+            }
+            changed = subscribers.changed() => {
+                if changed.is_err() {
+                    return future.await;
+                }
+            }
+            () = sleep_until(maintenance) => session.maintain().await,
         }
     }
 }
@@ -489,7 +670,8 @@ pub async fn serve(path: &str) -> Result<Value> {
         })
         .await?;
     }
-    let _ = session.release_input().await;
+    session.stream.hub.close();
+    let _ = session.close_media().await;
     Ok(json!({"closed":true}))
 }
 
@@ -512,10 +694,49 @@ pub async fn serve_local(udid: &str, socket_path: &str) -> Result<Value> {
             transport: Transport::Local(udid.into()),
             control: None,
             connection: None,
+            stream: Streaming::default(),
         },
         socket_path,
     )
     .await
+}
+
+/// `media_subscribe`: opens the screen video and hands this connection to a task that streams
+/// frames on it (video.rs has the format), so the helper goes on serving other requests. The
+/// connection stays the subscriber's until either side closes it.
+async fn subscribe(
+    session: &mut Session,
+    mut stream: BufReader<tokio::net::UnixStream>,
+) {
+    use tokio::io::AsyncWriteExt;
+    // Counted before the media opens, so nothing releases it while it starts.
+    let subscription = session.stream.hub.subscribe();
+    let opened = session.ensure_media().await;
+    let reply = match &opened {
+        Ok(()) => {
+            let size = session.stream.hub.size();
+            json!({"subscribed":true,"codec":"hevc","width":size.map(|s| s.0),"height":size.map(|s| s.1)})
+        }
+        Err(error) => {
+            let mut reply = json!({"isError":true,"subscribed":false,"error":error.to_string()});
+            if error.is::<NoDisplayService>() {
+                reply["reason"] = "display_service_missing".into();
+            }
+            reply
+        }
+    };
+    let mut bytes = serde_json::to_vec(&reply).unwrap_or_default();
+    bytes.push(b'\n');
+    let written = tokio::time::timeout(Duration::from_secs(5), stream.get_mut().write_all(&bytes))
+        .await
+        .is_ok_and(|r| r.is_ok());
+    if opened.is_err() || !written {
+        return;
+    }
+    tokio::spawn(async move {
+        let mut socket = stream.into_inner();
+        subscription.serve(&mut socket).await;
+    });
 }
 
 async fn serve_session(mut session: Session, socket_path: &str) -> Result<Value> {
@@ -563,6 +784,13 @@ async fn serve_session(mut session: Session, socket_path: &str) -> Result<Value>
                 .write_all(b"{\"disconnected\":true}\n")
                 .await?;
             break;
+        }
+        if serde_json::from_str::<Value>(&line)
+            .ok()
+            .is_some_and(|v| v["op"] == "media_subscribe")
+        {
+            subscribe(&mut session, stream).await;
+            continue;
         }
         let request = serde_json::from_str::<Request>(&line);
         let screenshot_path = match &request {
@@ -633,7 +861,8 @@ async fn serve_session(mut session: Session, socket_path: &str) -> Result<Value>
             }
         }
     }
-    let _ = session.release_input().await;
+    session.stream.hub.close();
+    let _ = session.close_media().await;
     let _ = std::fs::remove_file(socket_path);
     Ok(json!({"closed":true}))
 }
@@ -862,6 +1091,7 @@ mod tests {
                 peer: listener.local_addr().unwrap(),
             }),
             connection: Some(live),
+            stream: Streaming::default(),
         };
         let received = tokio::spawn(async move { phone.read(&mut [0u8; 4096]).await.unwrap_or(0) });
         assert!(session.request(json!({"op":"reconnect"})).await.is_err());
@@ -902,6 +1132,7 @@ mod tests {
                 peer: old.local_addr().unwrap(),
             }),
             connection: Some(unplugged().await),
+            stream: Streaming::default(),
         };
         let received =
             tokio::spawn(async move { old_phone.read(&mut [0u8; 4096]).await.unwrap_or(0) });
@@ -941,6 +1172,7 @@ mod tests {
                     peer: old.local_addr().unwrap(),
                 }),
                 connection: Some(unplugged().await),
+                stream: Streaming::default(),
             };
             let received =
                 tokio::spawn(async move { phone.read(&mut [0u8; 4096]).await.unwrap_or(0) });
@@ -974,6 +1206,7 @@ mod tests {
                 }),
                 control: None,
                 connection: None,
+                stream: Streaming::default(),
             };
             let error = session
                 .request(json!({"op":"connect"}))
@@ -1011,6 +1244,7 @@ mod tests {
             }),
             control: None,
             connection: Some(live),
+            stream: Streaming::default(),
         };
         assert!(session.request(json!({"op":"reconnect"})).await.is_err());
         let kept = session
@@ -1044,6 +1278,7 @@ mod tests {
                 transport: Transport::Local("fixture-phone".into()),
                 control: None,
                 connection: Some(unplugged().await),
+                stream: Streaming::default(),
             };
             let reply = session.request(request.clone()).await;
             PHONE.with(|slot| slot.borrow_mut().take());
@@ -1085,6 +1320,7 @@ mod tests {
                 transport: Transport::Local("fixture-phone".into()),
                 control: None,
                 connection: None,
+                stream: Streaming::default(),
             };
             let reply = session.request(request.clone()).await;
             let reported = match (request["op"].as_str().unwrap(), &reply) {
@@ -1122,6 +1358,7 @@ mod tests {
                 transport: Transport::Local("fixture-phone".into()),
                 control: None,
                 connection: Some(silent),
+                stream: Streaming::default(),
             };
             let reply = session.request(request.clone()).await;
             PHONE.with(|slot| slot.borrow_mut().take());
@@ -1161,6 +1398,7 @@ mod tests {
             transport: Transport::Local("fixture-phone".into()),
             control: None,
             connection: Some(live),
+            stream: Streaming::default(),
         };
         let reply = session.request(json!({"op":"tap","x":100,"y":200})).await;
         PHONE.with(|slot| slot.borrow_mut().take());
@@ -1192,6 +1430,9 @@ mod tests {
             ready_at: now,
             last_input: now,
             last_activity: now,
+            display_id: 1,
+            hub: Default::default(),
+            alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
         let (mut connection, phone) = tunnel();
         // This phone advertises device information and refuses the display query, so the tap also
@@ -1204,6 +1445,7 @@ mod tests {
             transport: Transport::Local("fixture-phone".into()),
             control: None,
             connection: Some(connection),
+            stream: Streaming::default(),
         };
         let reply = session.request(json!({"op":"tap","x":100,"y":200})).await;
         PHONE.with(|slot| slot.borrow_mut().take());
@@ -1235,6 +1477,7 @@ mod tests {
             transport: Transport::Local("fixture-phone".into()),
             control: None,
             connection: Some(live),
+            stream: Streaming::default(),
         };
         let reply = session.request(json!({"op":"tap","x":100,"y":200})).await;
         PHONE.with(|slot| slot.borrow_mut().take());
@@ -1273,6 +1516,9 @@ mod tests {
                 ready_at: now,
                 last_input: now,
                 last_activity: now,
+                display_id: 1,
+                hub: Default::default(),
+                alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             };
             drop(display_phone);
             (media, media_closed)
@@ -1293,6 +1539,7 @@ mod tests {
             transport: Transport::Local("fixture-phone".into()),
             control: None,
             connection: Some(connection),
+            stream: Streaming::default(),
         };
         tokio::time::advance(INPUT_MEDIA_MAX_READ_HOLD - Duration::from_secs(1)).await;
         session
@@ -1355,6 +1602,7 @@ mod tests {
             }),
             control: None,
             connection: Some(remote_live),
+            stream: Streaming::default(),
         };
         assert!(
             remote_session
@@ -1490,6 +1738,9 @@ mod tests {
             ready_at: now,
             last_input: now,
             last_activity: now,
+            display_id: 1,
+            hub: Default::default(),
+            alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
         drop(display_phone);
         let (mut connection, mut wire) = tunnel();
@@ -1590,6 +1841,7 @@ mod tests {
             transport: Transport::Local("fixture-phone".into()),
             control: None,
             connection: Some(connection),
+            stream: Streaming::default(),
         };
         let dir = std::env::temp_dir().join(format!(
             "poki-interrupted-input-{}-{}",
@@ -1683,6 +1935,303 @@ mod tests {
             phones.try_recv().is_err(),
             "interrupted tap rebuilt the tunnel or replayed on a second connection"
         );
+        PHONE.with(|slot| slot.borrow_mut().take());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Input media whose video arrives on the returned sender, as the phone's would. The
+    /// receiver ends (recv returns None) when the media session is closed.
+    async fn watched_media(
+        hub: &Arc<VideoHub>,
+        now: tokio::time::Instant,
+    ) -> (
+        InputMedia,
+        mpsc::UnboundedReceiver<()>,
+        mpsc::UnboundedSender<crate::video::Datagram>,
+        mpsc::UnboundedReceiver<(u16, Vec<u8>)>,
+    ) {
+        let (display, display_phone) = tokio::io::duplex(1 << 16);
+        let (media_open, media_closed) = mpsc::unbounded_channel::<()>();
+        let (incoming_tx, incoming) = mpsc::unbounded_channel();
+        let (sent, sent_rx) = mpsc::unbounded_channel();
+        let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let pump = crate::video::pump(
+            crate::video::Source::Test { incoming, sent },
+            hub.clone(),
+            crate::video::Feedback {
+                our_ssrc: 0x1234,
+                sender_port: 50001,
+            },
+            alive.clone(),
+        );
+        let mut receivers = tokio::task::JoinSet::new();
+        receivers.spawn(async move {
+            let _open = media_open;
+            pump.await;
+            std::future::pending::<()>().await;
+        });
+        let media = InputMedia {
+            client: DisplayServiceClient::from_stream(Box::new(display))
+                .await
+                .unwrap(),
+            receivers,
+            ready_at: now,
+            last_input: now,
+            last_activity: now,
+            display_id: 1,
+            hub: hub.clone(),
+            alive,
+        };
+        drop(display_phone);
+        (media, media_closed, incoming_tx, sent_rx)
+    }
+
+    fn datagrams(units: &[Vec<Vec<u8>>]) -> Vec<crate::video::Datagram> {
+        units
+            .iter()
+            .flatten()
+            .map(|data| crate::video::Datagram {
+                source_port: 50001,
+                data: data.clone(),
+            })
+            .collect()
+    }
+
+    // Reads, a failed read, an explicit release and a long idle keep a watched screen's media
+    // session; the last viewer leaving releases it INPUT_MEDIA_IDLE_TIMEOUT later.
+    #[tokio::test(start_paused = true)]
+    async fn a_watched_screen_keeps_its_media_until_a_second_after_the_last_viewer_leaves() {
+        let (sender, _phones) = mpsc::unbounded_channel();
+        PHONE.with(|slot| *slot.borrow_mut() = Some(sender));
+        let hub: Arc<VideoHub> = Default::default();
+        let start = tokio::time::Instant::now();
+        let (media, mut media_closed, _video, _rtcp) = watched_media(&hub, start).await;
+        let (mut connection, phone) = tunnel();
+        connection.media = Some(media);
+        let rsd_port = connection.rsd_port;
+        let ax_port =
+            connection.rsd.services["com.apple.accessibility.axAuditDaemon.remoteAXService"].port;
+        tokio::spawn(answer(phone, vec![rsd_port, ax_port], None));
+        let mut session = Session {
+            transport: Transport::Local("fixture-phone".into()),
+            control: None,
+            connection: Some(connection),
+            stream: Streaming {
+                hub: hub.clone(),
+                ..Default::default()
+            },
+        };
+        let viewer = hub.subscribe();
+        tokio::time::advance(INPUT_MEDIA_MAX_READ_HOLD * 2).await;
+        assert!(
+            session
+                .request(json!({"op":"ax_tree","wait_ms":200}))
+                .await
+                .is_err()
+        );
+        session.request(json!({"op":"release_input"})).await.unwrap();
+        with_media_deadline(&mut session, tokio::time::sleep(Duration::from_secs(30))).await;
+        assert!(
+            session.connection.as_ref().unwrap().media.is_some(),
+            "a watched screen's media session was released"
+        );
+        assert!(media_closed.try_recv().is_err());
+        drop(viewer);
+        let left = tokio::time::Instant::now();
+        let ((), closed_after) = tokio::join!(
+            with_media_deadline(&mut session, tokio::time::sleep(Duration::from_secs(3))),
+            async {
+                assert!(media_closed.recv().await.is_none());
+                left.elapsed()
+            }
+        );
+        assert!(
+            closed_after >= INPUT_MEDIA_IDLE_TIMEOUT
+                && closed_after < INPUT_MEDIA_IDLE_TIMEOUT + Duration::from_millis(600),
+            "released {closed_after:?} after the last viewer left"
+        );
+        assert!(session.connection.as_ref().unwrap().media.is_none());
+        PHONE.with(|slot| slot.borrow_mut().take());
+    }
+
+    // While the screen is watched, a tap long after the last input goes straight to the touch
+    // service on the open session: no new media session, so no warmup.
+    #[tokio::test(start_paused = true)]
+    async fn a_tap_while_streaming_reuses_the_open_media_session() {
+        let (sender, mut phones) = mpsc::unbounded_channel();
+        PHONE.with(|slot| *slot.borrow_mut() = Some(sender));
+        let hub: Arc<VideoHub> = Default::default();
+        let start = tokio::time::Instant::now();
+        let (media, _closed, _video, _rtcp) = watched_media(&hub, start).await;
+        let (mut connection, phone) = tunnel();
+        connection.media = Some(media);
+        let touch = connection.rsd.services[crate::Hid::rsd_service_name().as_ref()].port;
+        let phone = tokio::spawn(async move { answer(phone, vec![touch], Some(b"send\0")).await });
+        let mut session = Session {
+            transport: Transport::Local("fixture-phone".into()),
+            control: None,
+            connection: Some(connection),
+            stream: Streaming {
+                hub: hub.clone(),
+                ..Default::default()
+            },
+        };
+        let _viewer = hub.subscribe();
+        with_media_deadline(&mut session, tokio::time::sleep(Duration::from_secs(10))).await;
+        let before = tokio::time::Instant::now();
+        let reply = session.request(json!({"op":"tap","x":100,"y":200})).await;
+        PHONE.with(|slot| slot.borrow_mut().take());
+        assert!(
+            phone.await.unwrap(),
+            "the tap did not reach the phone over the open session; reply: {reply:?}"
+        );
+        assert!(
+            before.elapsed() < Duration::from_millis(500),
+            "the tap waited {:?}",
+            before.elapsed()
+        );
+        assert!(phones.try_recv().is_err(), "the tap built a new tunnel");
+    }
+
+    // media_subscribe over the helper's socket: the reply names the size of the latest key
+    // frame, the frames start at that key frame, the helper keeps serving other requests while
+    // the subscriber streams, and media_keyframe sends PLI and FIR from the offer's SSRC.
+    #[tokio::test]
+    async fn a_subscriber_receives_frames_from_a_key_frame_while_requests_go_on() {
+        use crate::video::tests::{packetize, sample};
+        let (sender, _phones) = mpsc::unbounded_channel();
+        PHONE.with(|slot| *slot.borrow_mut() = Some(sender));
+        let hub: Arc<VideoHub> = Default::default();
+        let (media, _closed, video, mut rtcp) =
+            watched_media(&hub, tokio::time::Instant::now()).await;
+        let units = packetize(&sample(), 0xabcd, 10);
+        // The phone's sender report shows where RTCP goes. The viewer joins at frame 2: the
+        // cached chain begins at frame 0.
+        let mut report = vec![0x80, 200, 0, 6];
+        report.extend_from_slice(&0xabcdu32.to_be_bytes());
+        report.extend_from_slice(&[0; 20]);
+        video
+            .send(crate::video::Datagram {
+                source_port: 50007,
+                data: report,
+            })
+            .unwrap();
+        for datagram in datagrams(&units[..3]) {
+            video.send(datagram).unwrap();
+        }
+        while hub.size().is_none() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let (connection, _phone) = tunnel();
+        let mut connection = connection;
+        connection.media = Some(media);
+        let session = Session {
+            transport: Transport::Local("fixture-phone".into()),
+            control: None,
+            connection: Some(connection),
+            stream: Streaming {
+                hub: hub.clone(),
+                ..Default::default()
+            },
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "poki-subscribe-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket_path = dir.join("session.sock");
+        let socket_str = socket_path.to_str().unwrap().to_owned();
+        let client = async {
+        while !socket_path.exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let open = |request: &'static str| {
+            let socket_path = socket_path.clone();
+            async move {
+                let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut greeting = String::new();
+                reader.read_line(&mut greeting).await.unwrap();
+                reader
+                    .get_mut()
+                    .write_all(format!("{request}\n").as_bytes())
+                    .await
+                    .unwrap();
+                let mut reply = String::new();
+                reader.read_line(&mut reply).await.unwrap();
+                (reader, serde_json::from_str::<Value>(&reply).unwrap())
+            }
+        };
+        let (mut subscriber, reply) = open(r#"{"op":"media_subscribe"}"#).await;
+        assert_eq!(reply["subscribed"], true, "{reply}");
+        assert_eq!((reply["width"].as_u64(), reply["height"].as_u64()), (Some(180), Some(390)));
+        for datagram in datagrams(&units[3..6]) {
+            video.send(datagram).unwrap();
+        }
+        let mut frames = Vec::new();
+        while frames.len() < 6 {
+            let mut length = [0u8; 4];
+            subscriber.read_exact(&mut length).await.unwrap();
+            let mut frame = vec![0u8; u32::from_be_bytes(length) as usize];
+            subscriber.read_exact(&mut frame).await.unwrap();
+            frames.push(frame);
+        }
+        let flags: Vec<u8> = frames.iter().map(|f| f[0]).collect();
+        let key = crate::video::FLAG_KEY | crate::video::FLAG_CONFIG;
+        assert_eq!(flags[0], key | crate::video::FLAG_RESET);
+        assert_eq!(&flags[1..], &[0, 0, 0, key, 0]);
+        let seqs: Vec<u64> = frames
+            .iter()
+            .map(|f| u64::from_be_bytes(f[1..9].try_into().unwrap()))
+            .collect();
+        assert!(seqs.windows(2).all(|w| w[1] == w[0] + 1), "{seqs:?}");
+        // Other requests are served while the subscriber streams.
+        let (_, keyframe) = open(r#"{"op":"media_keyframe"}"#).await;
+        assert_eq!(keyframe["requested"], true, "{keyframe}");
+        assert_eq!(keyframe["subscribers"], 1, "{keyframe}");
+        // Receiver reports go out every second while watched; the keyframe request is the one
+        // with payload-specific feedback (PT 206).
+        let (port, request) = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let (port, packet) = rtcp.recv().await.unwrap();
+                let mut offset = 0;
+                while offset + 4 <= packet.len() {
+                    if packet[offset + 1] == 206 {
+                        return (port, packet);
+                    }
+                    offset += (u16::from_be_bytes([packet[offset + 2], packet[offset + 3]]) as usize + 1) * 4;
+                }
+            }
+        })
+        .await
+        .expect("no keyframe request was sent");
+        assert_eq!(port, 50007, "RTCP went to {port}, not the phone's RTCP port");
+        // RR, SDES, PLI and FIR, from the SSRC this host declared.
+        assert_eq!(&request[4..8], &0x1234u32.to_be_bytes());
+        let mut offset = 0;
+        let mut feedback = Vec::new();
+        while offset + 4 <= request.len() {
+            let (format, kind) = (request[offset] & 0x1f, request[offset + 1]);
+            if kind == 206 {
+                feedback.push(format);
+                assert_eq!(&request[offset + 4..offset + 8], &0x1234u32.to_be_bytes());
+            }
+            offset += (u16::from_be_bytes([request[offset + 2], request[offset + 3]]) as usize + 1) * 4;
+        }
+        assert_eq!(feedback, [1, 4]);
+        drop(subscriber);
+        while hub.subscribers() != 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let (_, closed) = open(r#"{"op":"disconnect"}"#).await;
+        assert_eq!(closed["disconnected"], true);
+        };
+        let (served, ()) = tokio::join!(Box::pin(serve_session(session, &socket_str)), client);
+        assert_eq!(served.unwrap()["closed"], true);
         PHONE.with(|slot| slot.borrow_mut().take());
         let _ = std::fs::remove_dir_all(&dir);
     }

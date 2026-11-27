@@ -28,7 +28,15 @@ pub struct ScreenMediaStream {
     pub audio_udp: UdpSocketHandle,
     /// Video RTP receiver socket — the HEVC stream.
     pub video_udp: UdpSocketHandle,
+    /// The SSRC this host declared in the video offer. RTCP feedback (a keyframe request) must be
+    /// sent from this SSRC.
+    pub our_ssrc: u32,
+    /// The port the phone sends video from, where RTCP goes until the phone's own RTCP names one.
+    pub video_sender_port: u16,
 }
+
+/// The phone's video sender port given in the start parameters.
+const VIDEO_SENDER_PORT: u16 = 50001;
 
 /// The phone offers no displayservice, which input needs. A developer disk image provides it.
 #[derive(Debug)]
@@ -123,8 +131,8 @@ pub async fn start_screen_media_stream(
 
     // Start the video stream on the same session.
     let call_id = uuid::Uuid::new_v4().to_string().to_uppercase();
-    // SSRC declared in the offer (field 5.1); must match the RTCP sender SSRC if
-    // sending feedback. This tool doesn't send RTCP, so any value works.
+    // SSRC declared in the offer (field 5.1); it must match the RTCP sender SSRC of the keyframe
+    // requests video.rs sends, so it is returned with the stream.
     let our_ssrc = uuid::Uuid::new_v4().as_u128() as u32;
     let offer = build_screen_video_offer(&call_id, &call_info, our_ssrc)
         .map_err(|e| format!("video offer build failed: {e:?}"))?;
@@ -132,7 +140,7 @@ pub async fn start_screen_media_stream(
         &receiver_ip,
         receiver_port,
         &sender_ip,
-        50001,
+        VIDEO_SENDER_PORT,
         offer,
         CLIENT_SUPPORTED_FEATURES,
         display_id,
@@ -148,5 +156,7 @@ pub async fn start_screen_media_stream(
         client,
         audio_udp,
         video_udp,
+        our_ssrc,
+        video_sender_port: VIDEO_SENDER_PORT,
     })
 }
