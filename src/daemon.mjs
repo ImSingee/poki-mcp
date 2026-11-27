@@ -7,7 +7,7 @@ import { NodeStreamableHTTPServerTransport, localhostHostValidation, localhostOr
 import { createServer, definitions } from './tools.mjs';
 import { withCallLog } from './call-log.mjs';
 import { Coordination } from './coordination.mjs';
-import { Devices } from './device.mjs';
+import { Session } from './device.mjs';
 import { stateDir, endpointFile } from './config.mjs';
 import { startUpdateChecks } from './update-check.mjs';
 import { warnIfNativeStale } from './build-info.mjs';
@@ -140,7 +140,7 @@ async function handle(req, res) {
   lastSeen.set(session, performance.now());
   const clientPid = Number(req.headers['x-poki-mcp-client-pid']);
   if (Number.isInteger(clientPid) && clientPid > 0) clientPids.set(session, clientPid);
-  if (!sessions.has(session)) sessions.set(session, new Devices(coordinator));
+  if (!sessions.has(session)) sessions.set(session, new Session(coordinator));
   const devices = sessions.get(session);
   devices.peers = () => sessions.values();
   devices.label ??= session;
@@ -160,7 +160,7 @@ async function handle(req, res) {
   }
   const server = createServer((name, args, extra) => {
     if (devices.cancelledRequests?.delete(extra?.requestId)) throw new DOMException('Request cancelled', 'AbortError');
-    return withCallLog(session, name, () => devices.call(name, args, extra?.signal, extra?.requestId));
+    return withCallLog(session, name, () => devices.call(name, args, extra?.signal, extra?.requestId, extra?.order));
   });
   const transport = new NodeStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   active.add(server);

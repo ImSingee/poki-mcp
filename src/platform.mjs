@@ -162,7 +162,6 @@ async function startSimulator(ctx, args) {
     matches = models.filter(model => model.id === args.model || model.name.toLowerCase() === args.model.toLowerCase());
     if (matches.length !== 1) throw new Error(`Expected one simulator model; found ${matches.length}. Use list_devices include_all_simulators=true.`);
     checkWork();
-    if (ctx.coordinator.owned(ctx)) throw new Error('Release the current device lease before creating another simulator.');
     ctx.access({ id: `simulator-model:${matches[0].id}` });
     const id = await simctl(['create', `Poki MCP ${matches[0].name}`, matches[0].id, runtime.identifier]);
     matches = [{ id, state: 'Shutdown' }];
@@ -187,10 +186,9 @@ async function startSimulator(ctx, args) {
   await simctl(['spawn', target.id, 'defaults', 'write', 'com.apple.Accessibility', 'ApplicationAccessibilityEnabled', '-bool', 'true']);
   await simctl(['spawn', target.id, 'defaults', 'write', 'com.apple.Accessibility', 'AutomationEnabled', '-bool', 'true']);
   await waitForSimulatorAccessibility(target);
-  ctx.selected = target.id;
   ctx.frame = undefined;
   ctx.elements = [];
-  return { ...(await inventorySimulators()).find(d => d.id === target.id), created, selected: true, accessibility_ready: true };
+  return { ...(await inventorySimulators()).find(d => d.id === target.id), created, accessibility_ready: true, next: `Pass device: ${JSON.stringify(target.id)} to act on this simulator.` };
 }
 
 async function apps(target, includeSystem = false) {

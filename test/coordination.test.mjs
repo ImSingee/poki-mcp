@@ -32,7 +32,7 @@ test('AX miss uses OCR from the same captured observation',async t=>{
 
 
 test('two MCP sessions arbitrate aliases, batches and release across HTTP responses', async t => {
- const f=await fixture(t), b=await f.connect(), callB=(name,args={})=>b.callTool({name,arguments:args});
+ const f=await fixture(t), b=await f.connect(), callB=(name,args={})=>b.call(name,args);
  await f.call('list_devices');
  const lease=value(await f.call('acquire_device',{device:'Fixture Phone',ttl_seconds:10}));assert.ok(lease.lease_id);
  const listed=value(await callB('list_devices'));assert.equal(listed.devices[0].occupied,true);assert.equal(listed.devices[0].owned_by_session,false);
@@ -54,14 +54,14 @@ test('cancel bypasses the queue, retains a batch prefix, invalidates queued call
  const result=await batch;assert.equal(result.isError,true);assert.ok(result.content.some(c=>c.text?.includes('"sent": true')));assert.ok(result.content.some(c=>c.text?.includes('"stop_reason": "cancelled"')));
  assert.equal((await queued).isError,true);
  assert.equal((await f.events()).filter(e=>e.op==='key').length,1);assert.equal((await f.events()).filter(e=>e.op==='tap').length,0);
- assert.ok(value(await b.callTool({name:'acquire_device',arguments:{device:'fixture-phone'}})).lease_id);
+ assert.ok(value(await b.call('acquire_device',{device:'fixture-phone'})).lease_id);
 });
 
 test('lease expiry stops accepted work and stdio exit releases a renewed lease',async t=>{
  const f=await fixture(t),b=await f.connect();
  const lease=value(await f.call('acquire_device',{device:'fixture-phone',ttl_seconds:1}));assert.ok(lease.lease_id);
  const result=await f.call('wait',{seconds:30});assert.equal(result.isError,true);assert.match(result.content[0].text,/expired/);assert.equal(result._meta.stop_reason,'expired');
- const next=value(await b.callTool({name:'acquire_device',arguments:{device:'fixture-phone',ttl_seconds:60}}));assert.ok(next.lease_id);
+ const next=value(await b.call('acquire_device',{device:'fixture-phone',ttl_seconds:60}));assert.ok(next.lease_id);
  await b.close();
  // Closing stdio sends a session cleanup request; the client transport waits for exit.
  assert.ok(value(await f.call('acquire_device',{device:'fixture-phone'})).lease_id);
@@ -70,7 +70,7 @@ test('lease expiry stops accepted work and stdio exit releases a renewed lease',
 test('SDK cancellation reaches an owned external process without a device lease',async t=>{
  const f=await fixture(t);await f.set({block:'ax_tree'});
  const controller=new AbortController();
- const pending=f.a.callTool({name:'list_elements',arguments:{}},{signal:controller.signal});
+ const pending=f.a.call('list_elements',{},{signal:controller.signal});
  const rejected=assert.rejects(pending);
  await f.until(log=>log.includes('"op":"ax_tree"'));controller.abort();await rejected;
  const result=await f.call('wait',{seconds:0});assert.ok(!result.isError);
@@ -91,7 +91,7 @@ test('observations bind image and structure, share prompt OCR, and invalidate re
  assert.ok(observed._meta.timing.stages.every(stage => Number.isFinite(stage.elapsed_ms) && stage.elapsed_ms >= 0));
  assert.ok(!JSON.stringify(observed._meta.timing).includes('fixture-phone'));
  t.diagnostic('observation timing (ms): '+JSON.stringify(observed._meta.timing));
- const b=await f.connect();assert.ok(!(await b.callTool({name:'tap',arguments:{x:10,y:10}})).isError);
+ const b=await f.connect();assert.ok(!(await b.call('tap',{x:10,y:10})).isError);
  assert.equal((await f.call('tap',{ref:first.elements[0].ref})).isError,true);
  const second=value(await f.call('list_elements'));
  await sharp({create:{width:100,height:200,channels:3,background:'black'}}).png().toFile(f.image);
@@ -128,11 +128,11 @@ test('list_devices names the host check when usbmuxd answers with no device',asy
  assert.equal(value(await f.call('list_devices')).notice,undefined);
 });
 
-test('an occupied simulator cannot be booted through explicit, selected or batch paths',async t=>{
+test('an occupied simulator cannot be booted through explicit, implicit or batch paths',async t=>{
  const f=await fixture(t);await f.set({simulatorOnly:true});
  assert.ok(value(await f.call('acquire_device',{device:'fixture-sim'})).lease_id);
  const b=await f.connect();
- for(const [name,args] of [['start_simulator',{simulator:'Fixture Simulator'}],['select_device',{device:'fixture-sim'}],['take_screenshot',{device:'Fixture Simulator'}],['batch_commands',{commands:[{tool:'start_simulator',arguments:{simulator:'fixture-sim'}}]}]])assert.equal((await b.callTool({name,arguments:args})).isError,true,name);
+ for(const [name,args] of [['start_simulator',{simulator:'Fixture Simulator'}],['take_screenshot',{device:'Fixture Simulator'}],['batch_commands',{device:'fixture-sim',commands:[{tool:'start_simulator',arguments:{}}]}]])assert.equal((await b.callTool({name,arguments:args})).isError,true,name);
  assert.equal((await f.events()).filter(e=>e.args?.some(a=>['boot','spawn','bootstatus','create'].includes(a))).length,0);
 });
 
@@ -144,7 +144,7 @@ test('cancel during recording recovery preserves dispatched input and finishes c
  const stop=value(await f.call('cancel_device',{lease_id:lease.lease_id}));
  const response=await input, result=value(response);assert.equal(result.sent,true);assert.equal(result.text_verified,true);assert.equal(result.submit_sent,true);assert.equal(result.recording.resumed,false);
  assert.equal(response._meta.cleanup.recordings[0].recording,false);assert.equal(stop.reason,'cancelled');
- assert.ok(value(await b.callTool({name:'acquire_device',arguments:{device:'fixture-phone'}})).lease_id);
+ assert.ok(value(await b.call('acquire_device',{device:'fixture-phone'})).lease_id);
  assert.equal((await f.events()).filter(e=>e.args?.includes('screencapture')).length,2);
 });
 
@@ -152,12 +152,12 @@ test('cancel during recording recovery preserves dispatched input and finishes c
 test('request cancellation leaves another device and another session recording intact',async t=>{
  const f=await fixture(t),b=await f.connect();await f.set({twoPhones:true});
  await f.call('start_recording',{device:'fixture-phone'});
- await b.callTool({name:'start_recording',arguments:{device:'fixture-phone-2'}});
+ await b.call('start_recording',{device:'fixture-phone-2'});
  await f.set({twoPhones:true,block:'ax_tree'});
- const controller=new AbortController();const pending=f.a.callTool({name:'list_elements',arguments:{device:'fixture-phone-2'}},{signal:controller.signal});const rejected=assert.rejects(pending);
+ const controller=new AbortController();const pending=f.a.call('list_elements',{device:'fixture-phone-2'},{signal:controller.signal});const rejected=assert.rejects(pending);
  await f.until(log=>log.includes('"op":"ax_tree"'));controller.abort();await rejected;
  assert.equal(value(await f.call('stop_recording',{device:'fixture-phone'})).recording,false);
- assert.equal(value(await b.callTool({name:'stop_recording',arguments:{device:'fixture-phone-2'}})).recording,false);
+ assert.equal(value(await b.call('stop_recording',{device:'fixture-phone-2'})).recording,false);
 });
 
 
@@ -197,12 +197,12 @@ test('renewal and rejected management calls preserve SDK cancellation identity',
   ['cancel_device',{lease_id:'wrong-owner'},true],
  ]){
   await f.set({block:'ax_tree'});const before=(await f.events()).filter(e=>e.op==='ax_tree').length;
-  const controller=new AbortController();const pending=f.a.callTool({name:'list_elements',arguments:{}},{signal:controller.signal});const rejected=assert.rejects(pending);
+  const controller=new AbortController();const pending=f.a.call('list_elements',{},{signal:controller.signal});const rejected=assert.rejects(pending);
   await f.until(log=>log.split('"op":"ax_tree"').length-1>before);
   const native=(await f.events()).filter(e=>e.tool==='poki-native').at(-1);
   const managed=await f.call(name,args);assert.equal(Boolean(managed.isError),shouldFail);
   controller.abort();await rejected;
-  const available=await f.a.callTool({name:'wait',arguments:{seconds:0}},{timeout:1500});assert.ok(!available.isError);
+  const available=await f.a.call('wait',{seconds:0},{timeout:1500});assert.ok(!available.isError);
   assert.throws(()=>process.kill(native.pid,0),{code:'ESRCH'});
  }
 });
@@ -374,7 +374,7 @@ test('launch reconnects a stalled foreground observation without relaunching the
  // ESP-80 keeps the current local helper running by design; the abandoned read and the first helper that ran it must still exit.
  for(const process of processes.filter(p=>p.pid!==current))assert.throws(()=>globalThis.process.kill(process.pid,0),{code:'ESRCH'});
  await f.set({axHangs:10});const start=events.length,controller=new AbortController();
- const pending=f.a.callTool({name:'launch_app',arguments:{bundle_id:'com.apple.Preferences'}},{signal:controller.signal});
+ const pending=f.a.call('launch_app',{bundle_id:'com.apple.Preferences'},{signal:controller.signal});
  const rejected=assert.rejects(pending);
  await f.until(log=>log.trim().split('\n').map(JSON.parse).slice(start).some(e=>e.op==='ax_tree'));
  controller.abort();await rejected;
@@ -913,43 +913,39 @@ test('a tap after another input waits until the app can take touches',async t=>{
 const twoSimulators={simulatorOnly:true,simulatorBooted:true,secondSimulator:true,labels:{'fixture-sim':'On first','fixture-sim-2':'On second'}};
 const replyOf=block=>value({content:[block]});
 
-test('a device named in a batch step holds for that step, whatever is selected',async t=>{
+test('a batch runs every step on its top-level device',async t=>{
  const f=await fixture(t);await f.set(twoSimulators);
- const named={tool:'get_device_info',arguments:{device:'fixture-sim-2'}};
- const fresh=await f.call('batch_commands',{commands:[named]});
- assert.notEqual(fresh.isError,true,JSON.stringify(fresh.content));
- assert.equal(replyOf(fresh.content[1]).id,'fixture-sim-2');
- await f.call('select_device',{device:'fixture-sim'});
- const mixed=await f.call('batch_commands',{commands:[named,{tool:'get_device_info'}]});
- assert.deepEqual([mixed.content[1],mixed.content[3]].map(block=>replyOf(block).id),['fixture-sim-2','fixture-sim']);
- await f.call('batch_commands',{commands:[{tool:'tap',arguments:{x:10,y:10,device:'fixture-sim-2'}}]});
+ for(const device of ['fixture-sim-2','fixture-sim']){
+  const info=await f.call('batch_commands',{device,commands:[{tool:'get_device_info'},{tool:'get_device_info'}]});
+  assert.notEqual(info.isError,true,JSON.stringify(info.content));
+  assert.deepEqual([info.content[1],info.content[3]].map(block=>replyOf(block).id),[device,device]);
+ }
+ await f.call('batch_commands',{device:'fixture-sim-2',commands:[{tool:'tap',arguments:{x:10,y:10}}]});
  assert.deepEqual((await f.events()).filter(e=>e.op==='hid').map(e=>e.device),['fixture-sim-2']);
 });
 
-test('the screen a batch ends with belongs to the device its last step used',async t=>{
+test('the screen a batch ends with belongs to its device',async t=>{
  const f=await fixture(t);await f.set({...twoSimulators,toggle:true});
- await f.call('select_device',{device:'fixture-sim'});
- const tapOn=device=>({tool:'tap',arguments:{x:10,y:10,...(device?{device}:{})}});
- const second=tapOn('fixture-sim-2'),selected=tapOn();
- for(const [commands,shown] of [[[second],'On second'],[[selected,second],'On second'],[[second,selected],'On first']])
-  assert.deepEqual(summaryOf(await f.call('batch_commands',{commands})).screen.text,[`Button: ${shown}`]);
+ const tap={tool:'tap',arguments:{x:10,y:10}};
+ for(const [device,shown] of [['fixture-sim-2','On second'],['fixture-sim','On first'],['fixture-sim-2','On second']])
+  assert.deepEqual(summaryOf(await f.call('batch_commands',{device,commands:[tap]})).screen.text,[`Button: ${shown}`]);
  await f.set({...twoSimulators,labels:{'fixture-sim':'允许粘贴','fixture-sim-2':'On second'}});
- assert.equal(summaryOf(await f.call('batch_commands',{commands:[second]})).stop_reason,null);
+ assert.equal(summaryOf(await f.call('batch_commands',{device:'fixture-sim-2',commands:[tap]})).stop_reason,null);
  await f.set({...twoSimulators,labels:{'fixture-sim':'On first','fixture-sim-2':'允许粘贴'}});
- const summary=summaryOf(await f.call('batch_commands',{commands:[second]}));
+ const summary=summaryOf(await f.call('batch_commands',{device:'fixture-sim-2',commands:[tap]}));
  assert.equal(summary.stop_reason,null);assert.deepEqual(summary.screen.prompt,{kind:'paste'});
 });
 
 test('a target read on one device is never tapped on another',async t=>{
  const f=await fixture(t);await f.set(twoSimulators);
- await f.call('select_device',{device:'fixture-sim'});
  const launch={tool:'launch_app',arguments:{bundle_id:'local.fixture'}};
- const missed=await f.call('batch_commands',{commands:[launch,{tool:'tap_text',arguments:{text:'On first',device:'fixture-sim-2'}}]});
+ assert.notEqual((await f.call('batch_commands',{device:'fixture-sim',commands:[launch]})).isError,true);
+ const missed=await f.call('batch_commands',{device:'fixture-sim-2',commands:[launch,{tool:'tap_text',arguments:{text:'On first'}}]});
  assert.equal(missed.isError,true);
  const summary=summaryOf(missed);
  assert.equal(summary.failed_step.step,2);assert.match(summary.failed_step.error,/No visible element matches "On first"/);
  assert.equal(touches(await f.events()),0);
- const found=await f.call('batch_commands',{commands:[launch,{tool:'tap_text',arguments:{text:'On second',device:'fixture-sim-2'}}]});
+ const found=await f.call('batch_commands',{device:'fixture-sim-2',commands:[launch,{tool:'tap_text',arguments:{text:'On second'}}]});
  assert.equal(found.isError,undefined);
  assert.deepEqual((await f.events()).filter(e=>e.op==='hid').map(e=>e.device),['fixture-sim-2']);
 });

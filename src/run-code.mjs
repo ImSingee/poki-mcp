@@ -102,7 +102,7 @@ async function drive(ctx, code, input, maxCalls) {
       if (calls.length >= maxCalls) { summary = { ...base(), stop_reason: 'max_tool_calls', next: `The script made more than ${maxCalls} tool calls. Narrow the task or raise max_tool_calls (up to 60).` }; break; }
       const name = stepTool(message.name);
       const toolArgs = JSON.parse(message.argsJson);
-      const problem = invalidStep({ tool: name, arguments: toolArgs });
+      const problem = invalidStep({ tool: name, arguments: toolArgs }, { step: false });
       if (problem) { failed(message.id, { tool: name, elapsed_ms: 0, isError: true, error: problem }, problem); continue; }
       const started = performance.now();
       let result, dispatchError;

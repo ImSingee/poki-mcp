@@ -10,10 +10,10 @@ import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import { root, stateDir, idevice, noUsbDevice } from './config.mjs';
-import { definitions } from './tools.mjs';
+import { definitions, stepSchema, sessionTools } from './tools.mjs';
 import { platformTool, inventorySimulators, simulatorModels, readSettings, closePlatform } from './platform.mjs';
 import { interaction, promptWarning, readScreen, describeScreen, screenChanged, whatMoved, justReadMs, confirmAfterMs, launchWithinMs, launchPollMs } from './interaction.mjs';
-import { askHuman } from './human.mjs';
+import { askHuman, approvalMode } from './human.mjs';
 import { simulatorRequest } from './simulator.mjs';
 import { prepareRecordingInput, resumeRecordings } from './recording.mjs';
 import { updateNotice } from './update-check.mjs';
@@ -78,10 +78,18 @@ export function hidPoint(x, y, width, height) {
 
 const names = (device, query) => device.id === query || device.name.toLocaleLowerCase() === query.toLocaleLowerCase();
 
-export class Devices {
-  selected; requested; frame; size; seen; structureViewport; batchViewportVerified = false; elements = []; elementsAt = 0; lastInputAt = -Infinity; lastInputCompletedAt; inBatch = false; inputGroupDepth = 0;
-  scales = new Map(); multiplePanels = new Map(); readCosts = new Map(); physicalNames = new Map(); backgroundDevices = new Map(); physicalInputs = new Map(); nextRef = 0;
-  constructor(coordinator = new Coordination()) { this.coordinator = coordinator; }
+// What one session knows about one device: the last frame, elements and refs, screen size, the
+// computer-use refs, read costs, and the input it left pressed. One per (session, device), so calls
+// to two devices can run at once without sharing any of it. Cross-session invalidation goes through
+// coordinator.revision(id).
+export class DeviceContext {
+  frame; size; seen; structureViewport; batchViewportVerified = false; elements = []; elementsAt = 0; lastInputAt = -Infinity; lastInputCompletedAt; inBatch = false; inputGroupDepth = 0;
+  scales = new Map(); multiplePanels = new Map(); readCosts = new Map(); physicalInputs = new Map(); nextRef = 0;
+  // id is undefined only for the context that creates a new simulator, which has no device yet.
+  constructor(session = new Session(), id) {
+    this.session = session; this.coordinator = session.coordinator; this.id = id;
+    if (id !== undefined) session.contexts.set(id, this);
+  }
   beginInputGroup() { this.inputGroupDepth++; }
   async endInputGroup() {
     this.inputGroupDepth = Math.max(0, this.inputGroupDepth - 1);
@@ -102,99 +110,36 @@ export class Devices {
   async cleanup(onlyDevices) {
     const result = await closePlatform(this, onlyDevices);
     await this.releaseInputs(onlyDevices);
-    if (onlyDevices) for (const id of onlyDevices) this.backgroundDevices.delete(id);
-    else this.backgroundDevices.clear();
     if (!onlyDevices || onlyDevices.has(this.frame?.device) || onlyDevices.has(this.structureViewport?.device)) { this.frame = undefined; this.elements = []; this.structureViewport = undefined; }
     return result;
   }
-  close() { return this.coordinator.end(this, 'session_closed'); }
-  async call(name, args = {}, requestSignal, requestId) {
-    if (managementTools.has(name)) {
-      const parsed = definitions.find(d => d[0] === name)[2].parse(args);
-      if (name === 'renew_device') return text(this.coordinator.renew(this, parsed.lease_id, parsed.ttl_seconds ?? 120));
-      if (name !== 'acquire_device') {
-        if (name === 'release_device' || parsed.lease_id) this.coordinator.require(this, parsed.lease_id);
-        return text(await this.coordinator.end(this, name === 'release_device' ? 'released' : 'cancelled'));
-      }
-      return this.coordinator.call(this, name, parsed, requestSignal, requestId);
-    }
-    return this.coordinator.call(this, name, args, requestSignal, requestId);
+  close() { return this.session.close(); }
+  // A tool call to this device through its session, with this device filled in where the tool takes one.
+  call(name, args = {}, requestSignal, requestId) {
+    const takes = definitions.find(d => d[0] === name)?.[2].shape;
+    const routed = name === 'run_code' ? { devices: [this.id], ...args } : takes?.device && args.device === undefined ? { device: this.id, ...args } : args;
+    return this.session.call(name, routed, requestSignal, requestId);
   }
-  ownBackground(id, type) { if (!this.backgroundDevices.has(id)) this.backgroundDevices.set(id, new Set()); this.backgroundDevices.get(id).add(type); }
-  unownBackground(id, type) { const owned = this.backgroundDevices.get(id); owned?.delete(type); if (!owned?.size) this.backgroundDevices.delete(id); }
-  access(target) { this.coordinator.access(this, target); }
+  ownBackground(id, type) { this.session.ownBackground(id, type); }
+  unownBackground(id, type) { this.session.unownBackground(id, type); }
+  access(target) { this.coordinator.access(this.session, target); }
   changed(target) { this.coordinator.changed(target.id); this.elements = []; this.elementsAt = 0; this.frame = undefined; this.seen = undefined; this.structureViewport = undefined; }
-  async inventory(all = false) {
-    const { stdout } = await this.run('python3', [join(root, 'native/devices.py')], 8000);
-    const physical = new Map();
-    for (const device of JSON.parse(stdout)) {
-      if (!device.id || (physical.has(device.id) && device.connection !== 'USB')) continue;
-      physical.set(device.id, { ...device, kind: 'physical', name: this.physicalNames.get(device.id) ?? device.id });
-    }
-    for (const remote of await remoteDevices()) physical.set(remote.id, remote);
-    const simulators = await inventorySimulators().catch(() => []);
-    return [...physical.values(), ...simulators.filter(d => all || d.state === 'Booted' || usedSimulators.has(d.id))];
-  }
-  async describeDevices(all) {
-    const devices = await this.inventory(all);
-    return Promise.all(devices.map(async device => {
-      const occupancy = this.coordinator.status(device.id, this);
-      if (device.kind === 'simulator' || occupancy.occupied && !occupancy.owned_by_session) return { ...device, ...occupancy, selected: device.id === this.selected };
-      try {
-        this.access(device);
-        if (device.remote) {
-          const info = await nativeRequest(device, { op: 'device_info' });
-          return { ...device, remote: undefined, name: info.properties.DeviceName ?? device.name, model: info.properties.ProductType, osVersion: info.properties.ProductVersion, selected: device.id === this.selected, ...occupancy, readiness: 'remote services connected' };
-        }
-        const values = await Promise.all(['DeviceName','ProductType','ProductVersion'].map(async key => {
-          const response = await this.run(idevice, ['--udid',device.id,'lockdown','get',key],8000);
-          if (!response.stdout) throw new Error(response.stderr || `No ${key} response`);
-          return JSON.parse(response.stdout);
-        }));
-        this.physicalNames.set(device.id,values[0]);
-        return { ...device,name:values[0],model:values[1],osVersion:values[2],selected:device.id===this.selected,...occupancy,readiness:'paired device discovered; developer-service availability is checked when used' };
-      } catch(error) {
-        return { ...device,remote:undefined,selected:device.id===this.selected,blocked:error.message,action:device.remote ? 'Keep the iPhone unlocked and check its configured address. For Bonjour, keep both devices on the same LAN; for Tailscale, keep both connected and return the iPhone to Wi-Fi to establish a new session.' : 'Keep the device connected and unlocked, trust this Mac, and enable Developer Mode / UI Automation.' };
-      }
-    }));
-  }
+  inventory(all = false) { return this.session.inventory(all); }
   async target(boot = true) {
     checkWork();
     if (this.resolved) { this.access(this.resolved); return this.resolved; }
-    const list = await this.inventory(true);
-    // A configured default spares every call a device argument when a simulator is also booted.
-    const query = this.requested ?? this.selected ?? (process.env.POKI_MCP_DEVICE || undefined);
-    let matches = query ? list.filter(d => names(d, query)) : list.filter(d => d.kind === 'physical' || d.state === 'Booted');
-    if (query && !matches.length) {
-      for (const d of list.filter(d => d.kind === 'physical')) {
-        const occupancy = this.coordinator.status(d.id, this);
-        if (occupancy.occupied && !occupancy.owned_by_session) continue;
-        this.access(d);
-        const value = await this.run(idevice, ['--udid', d.id, 'lockdown', 'get', 'DeviceName']);
-        try { d.name = JSON.parse(value.stdout); this.physicalNames.set(d.id, d.name); } catch { continue; }
-      }
-      matches = list.filter(d => d.name.toLocaleLowerCase() === query.toLocaleLowerCase());
-    }
-    if (!matches.length) throw new Error(query ? 'Device is not connected or the selected device disconnected. Use list_devices and select_device.' : 'No device is connected. Connect and trust an iPhone, or start a simulator.');
-    if (matches.length !== 1) throw new Error(`Multiple devices match. Use select_device or specify device: ${matches.map(d => `${d.name} (${d.id})`).join(', ')}.`);
-    const target = matches[0];
+    if (this.id === undefined) throw new Error('This call names no device.');
+    const target = (await this.inventory(true)).find(device => device.id === this.id);
+    if (!target) throw new Error(`Device ${this.id} is not connected. Use list_devices to see the devices available now.`);
     this.access(target); this.resolved = target;
-    if (!this.selected) this.selected = target.id;
     if (target.kind === 'simulator') {
       usedSimulators.add(target.id);
       if (boot && target.state !== 'Booted') {
-        const selected = this.selected;
         await platformTool(this, 'start_simulator', { simulator: target.id });
-        this.selected = selected;
         target.state = 'Booted';
       }
     }
     return target;
-  }
-  // The id a device argument names, matched as target() matches it but without asking a phone for its name.
-  async resolveDevice(query) {
-    const matches = (await this.inventory(true).catch(() => [])).filter(d => names(d, query));
-    return matches.length === 1 ? matches[0].id : undefined;
   }
   async device() { return (await this.target()).id; }
   async native(args, expected, timeout = 45000) {
@@ -499,60 +444,52 @@ export class Devices {
     }
     return result;
   }
+  // Runs one tool on this device. The call was routed here by its device argument (or it is a step of
+  // a batch on this device), so device itself is no longer an argument.
   async dispatch(name, original = {}) {
-    const def = definitions.find(d => d[0] === name);
-    if (!def) throw new Error(`Unknown tool: ${name}`);
-    const args = def[2].parse(original);
+    if (sessionTools.has(name)) return this.session.dispatchSession(name, original);
+    const schema = stepSchema(name);
+    if (!schema) throw new Error(`Unknown tool: ${name}`);
+    const { device: _device, ...rest } = original;
+    const args = schema.parse(name === 'start_simulator' && this.id !== undefined ? {} : rest);
+    if (name === 'start_simulator' && this.id !== undefined) args.simulator = this.id;
     // Invalidate a previous call's AX-only viewport BEFORE dispatching any
     // tool. In particular CUA look/do and batch_commands bypass the default
     // input branch; without this they could reuse portrait size after rotation.
     // The default input branch may renew it only after its own fresh AX read.
     const previousViewport = this.structureViewport;
     this.structureViewport = undefined;
-    const previous = this.requested, previousResolved = this.resolved;
+    const previousResolved = this.resolved;
     // Steps of one batch share a lookup, which runs a Python process and simctl each time.
-    const sharesTarget = this.inBatch && args.device === undefined;
+    const sharesTarget = this.inBatch;
     if (!sharesTarget) this.resolved = undefined;
-    this.requested = args.device ?? previous;
     try {
       checkWork();
       if (name !== 'poki_mcp_status' && name !== 'stop_recording') await requireCurrentCode();
       if (approvedTools.has(name)) await this.target();
       // Says on the result who let it run, so an agent can tell a gated call from an ordinary one.
-      const approval = !approvedTools.has(name) ? undefined : process.env.POKI_MCP_APPROVAL_MODE === 'allow' ? { mode: 'operator-preapproved', approved_by: 'operator' } : { mode: 'ask-human', approved_by: 'human' };
+      const mode = approvedTools.has(name) ? approvalMode() : undefined;
+      const approval = mode === undefined ? undefined : { allow: { mode: 'operator-preapproved', approved_by: 'operator' }, host: { mode: 'host', approved_by: 'mcp-client' }, ask: { mode: 'ask-human', approved_by: 'human' } }[mode];
       if (approval?.mode === 'ask-human') {
         const detail = args.path ?? args.project_path ?? args.bundle_id ?? args.url ?? (name === 'set_clipboard' ? `${Buffer.byteLength(args.text)} 字节的文本` : '');
         const action = { install_app: '安装应用', uninstall_app: '卸载应用', build_and_run: '构建并运行应用', open_url: '打开链接', download_app_container: '下载应用数据', get_clipboard: '读取剪贴板', set_clipboard: '写入剪贴板' }[name];
-        const result = await askHuman(`是否允许${action}？\n设备：${args.device ?? this.selected ?? '当前选中的设备'}\n${detail}`, 120);
+        const target = await this.target();
+        const result = await askHuman(`是否允许${action}？\n设备：${target.name ?? target.id}\n${detail}`, 120);
         if (!result.completed) return { isError: true, ...text({ ...result, executed: false }), _meta: { stop_reason: result.status === 'timeout' ? 'timeout' : 'cancelled' } };
       }
       if (platformTools.has(name)) {
         const { _meta, ...result } = { ...await platformTool(this, name, args), ...(approval ? { approval } : {}) };
-        if (name === 'start_simulator') usedSimulators.add(this.selected);
+        if (name === 'start_simulator' && result.id) usedSimulators.add(result.id);
         return { ...text(result), ...(result.isError ? { isError: true } : {}), ...(_meta || result.stop_reason ? { _meta: { ..._meta, ...(result.stop_reason ? { stop_reason: result.stop_reason } : {}) } } : {}) };
       }
       switch (name) {
-        case 'acquire_device': return text(await this.coordinator.acquire(this, await this.target(false), args.ttl_seconds ?? 120));
-        case 'poki_mcp_status': return text({ update: await updateNotice(), implementation: `Poki MCP ${version}`, ...await buildInfo(), registered_device_tools: 53, observation_tools: 1, management_tools: 4, transport_tools: 2, total_tools: definitions.length, devices: (await this.inventory()).length, selected: this.selected ?? null, approval_mode: process.env.POKI_MCP_APPROVAL_MODE === 'allow' ? 'operator-preapproved' : 'ask-human', approval_covers: [...approvedTools], approval_scope: 'Only the tools in approval_covers ask for approval. Taps, typing and other input inside apps, including a delete confirmed with a tap, are not gated.' });
-        case 'list_devices': {
-          const devices = await this.describeDevices(args.include_all_simulators);
-          return text({ devices, ...(devices.some(d => d.kind === 'physical') ? {} : { notice: noUsbDevice }), ...(args.include_all_simulators ? { simulator_models: await simulatorModels() } : {}) });
-        }
+        case 'acquire_device': return text(await this.coordinator.acquire(this.session, await this.target(false), args.ttl_seconds ?? 120));
         case 'disconnect_device':
         case 'reconnect_device': {
           const target = await this.target();
           if (!target.remote) throw new Error('This device is not configured for RemotePairing.');
           this.changed(target);
           return text(await nativeRequest(target, { op: name === 'disconnect_device' ? 'disconnect' : 'reconnect' }));
-        }
-        case 'select_device': {
-          this.requested = args.device;
-          const target = await this.target();
-          // CUA's numbered screen elements belong to the device that was just observed.
-          // Switching phones must invalidate those refs before another input can use them.
-          if (this.selected !== target.id) { this.cua = undefined; this.size = undefined; }
-          this.selected = target.id; this.frame = undefined; this.elements = [];
-          return text({ selected: target.id, name: target.name });
         }
         case 'get_device_info': {
           const target = await this.target(), frame = await this.capture();
@@ -561,7 +498,7 @@ export class Devices {
           else if (target.kind === 'physical') for (const key of ['DeviceName', 'ProductType', 'ProductVersion']) {
             const result = await this.native(['lockdown', 'get', key]); info[key] = JSON.parse(result.stdout);
           }
-          if (target.kind === 'physical') { info.name=info.DeviceName; info.model=info.ProductType; info.osVersion=info.ProductVersion; this.physicalNames.set(target.id,info.name); }
+          if (target.kind === 'physical') { info.name=info.DeviceName; info.model=info.ProductType; info.osVersion=info.ProductVersion; this.session.physicalNames.set(target.id,info.name); }
           info.engine=target.kind==='simulator'?'CoreSimulator':'CoreDevice'; info.mirror_status='screen capture available';
           if (args.include_settings && target.remote) throw new Error('Device settings inspection is unavailable over RemotePairing. Remove this device from remote-devices.json and reconnect over USB or local Wi-Fi.');
           if (args.include_settings) info.settings = await readSettings(target);
@@ -640,7 +577,6 @@ export class Devices {
         }
         case 'look': return await cua.look(this, args);
         case 'do': return await cua.act(this, args);
-        case 'run_code': return await runCode(this, args);
         default: {
           const verify = args.verify !== false;
           // A batch step that asks for verification (verify: true) is compared even when checksStep would skip it.
@@ -685,6 +621,192 @@ export class Devices {
           return { ...text(result), ...(unchanged || result.screen_change ? { _meta: { ...(unchanged ? { stop_reason: 'no_change' } : {}), ...(result.screen_change ? { verdict: result.screen_change } : {}) } } : {}) };
         }
       }
-    } finally { this.requested=previous; if (!sharesTarget) this.resolved=previousResolved; }
+    } finally { if (!sharesTarget) this.resolved=previousResolved; }
+  }
+}
+
+const sessionLevel = sessionTools;
+const orderWaitMs = 500;
+const blockedAction = device => device.remote ? 'Keep the iPhone unlocked and check its configured address. For Bonjour, keep both devices on the same LAN; for Tailscale, keep both connected and return the iPhone to Wi-Fi to establish a new session.' : 'Keep the device connected and unlocked, trust this Mac, and enable Developer Mode / UI Automation.';
+
+// One MCP session: who owns leases, background work (recordings, simulated locations) and accepted
+// calls, and the per-device state it keeps (one DeviceContext per device it used). Every tool call
+// names its device; the session routes it to that device's context and queue (coordination.mjs).
+export class Session {
+  contexts = new Map(); backgroundDevices = new Map(); physicalNames = new Map();
+  // queues: the last accepted call per device, which the next call to it waits for. routing: the
+  // last call still being routed, so calls are placed on their queues in the order they arrived.
+  queues = new Map(); routing = Promise.resolve(); endings = new Set();
+  constructor(coordinator = new Coordination()) { this.coordinator = coordinator; }
+  context(id) { return this.contexts.get(id) ?? new DeviceContext(this, id); }
+  ownBackground(id, type) { if (!this.backgroundDevices.has(id)) this.backgroundDevices.set(id, new Set()); this.backgroundDevices.get(id).add(type); }
+  unownBackground(id, type) { const owned = this.backgroundDevices.get(id); owned?.delete(type); if (!owned?.size) this.backgroundDevices.delete(id); }
+  access(target) { this.coordinator.access(this, target); }
+  async run(file, args, timeout = 45000) {
+    const result = await execute(file, args, { timeout });
+    return { stdout: result.stdout.trimEnd(), stderr: result.stderr.trimEnd() };
+  }
+  // Recordings, locations and pressed input end on the given devices, or on all of them.
+  async cleanup(onlyDevices) {
+    const recordings = [], locations = [];
+    for (const [id, context] of this.contexts) {
+      if (onlyDevices && !onlyDevices.has(id)) continue;
+      const result = await context.cleanup(onlyDevices);
+      recordings.push(...result.recordings); locations.push(...result.locations);
+    }
+    if (onlyDevices) for (const id of onlyDevices) this.backgroundDevices.delete(id);
+    else this.backgroundDevices.clear();
+    return { recordings, locations };
+  }
+  close() { return this.coordinator.end(this, 'session_closed'); }
+  async call(name, args = {}, requestSignal, requestId, order) {
+    if (managementTools.has(name) && name !== 'acquire_device') {
+      const parsed = definitions.find(d => d[0] === name)[2].parse(args);
+      if (name === 'renew_device') return text(this.coordinator.renew(this, parsed.lease_id, parsed.ttl_seconds ?? 120));
+      if (name === 'release_device') return text(await this.coordinator.end(this, 'released', [this.coordinator.require(this, parsed.lease_id).device]));
+      // cancel_device: on the lease's device, on the named device, or everywhere.
+      const lease = parsed.lease_id === undefined ? undefined : this.coordinator.require(this, parsed.lease_id);
+      const named = parsed.device === undefined ? undefined : await this.resolveDevice(parsed.device);
+      if (lease && named && lease.device !== named) throw new Error(`lease_id belongs to ${lease.device}, not ${named}.`);
+      const scope = lease?.device ?? named;
+      return text(await this.coordinator.end(this, 'cancelled', scope === undefined ? undefined : [scope]));
+    }
+    return this.coordinator.call(this, name, args, requestSignal, requestId, order);
+  }
+  // Resolves once the calls before `order` in its stream have been placed on their queues, or after
+  // orderWaitMs when one of them never arrives (cancelled before it was sent).
+  inOrder(order) {
+    if (!order || typeof order.stream !== 'string' || !Number.isInteger(order.seq)) return Promise.resolve();
+    const streams = this.streams ??= new Map();
+    const entry = streams.get(order.stream) ?? { placed: order.seq - 1, waiters: [] };
+    streams.set(order.stream, entry);
+    if (order.seq <= entry.placed + 1) return Promise.resolve();
+    return new Promise(resolve => {
+      const waiter = { seq: order.seq, resolve };
+      entry.waiters.push(waiter);
+      setTimeout(() => { entry.placed = Math.max(entry.placed, order.seq - 1); this.wakeStream(entry); }, orderWaitMs).unref();
+    });
+  }
+  placed(order) {
+    const entry = order && this.streams?.get(order.stream);
+    if (!entry) return;
+    entry.placed = Math.max(entry.placed, order.seq);
+    this.wakeStream(entry);
+  }
+  wakeStream(entry) {
+    entry.waiters.sort((a, b) => a.seq - b.seq);
+    while (entry.waiters.length && entry.waiters[0].seq <= entry.placed + 1) entry.waiters.shift().resolve();
+  }
+  async inventory(all = false) {
+    const { stdout } = await this.run('python3', [join(root, 'native/devices.py')], 8000);
+    const physical = new Map();
+    for (const device of JSON.parse(stdout)) {
+      if (!device.id || (physical.has(device.id) && device.connection !== 'USB')) continue;
+      physical.set(device.id, { ...device, kind: 'physical', name: this.physicalNames.get(device.id) ?? device.id });
+    }
+    for (const remote of await remoteDevices()) physical.set(remote.id, remote);
+    const simulators = await inventorySimulators().catch(() => []);
+    return [...physical.values(), ...simulators.filter(d => all || d.state === 'Booted' || usedSimulators.has(d.id))];
+  }
+  async describeDevices(all) {
+    const devices = await this.inventory(all);
+    return Promise.all(devices.map(async device => {
+      const occupancy = this.coordinator.status(device.id, this);
+      if (device.kind === 'simulator' || occupancy.occupied && !occupancy.owned_by_session) return { ...device, ...occupancy };
+      try {
+        this.access(device);
+        if (device.remote) {
+          const info = await nativeRequest(device, { op: 'device_info' });
+          return { ...device, remote: undefined, name: info.properties.DeviceName ?? device.name, model: info.properties.ProductType, osVersion: info.properties.ProductVersion, ...occupancy, readiness: 'remote services connected' };
+        }
+        const values = await Promise.all(['DeviceName', 'ProductType', 'ProductVersion'].map(async key => {
+          const response = await this.run(idevice, ['--udid', device.id, 'lockdown', 'get', key], 8000);
+          if (!response.stdout) throw new Error(response.stderr || `No ${key} response`);
+          return JSON.parse(response.stdout);
+        }));
+        this.physicalNames.set(device.id, values[0]);
+        return { ...device, name: values[0], model: values[1], osVersion: values[2], ...occupancy, readiness: 'paired device discovered; developer-service availability is checked when used' };
+      } catch (error) {
+        return { ...device, remote: undefined, blocked: error.message, action: blockedAction(device) };
+      }
+    }));
+  }
+  // The id a device argument names: an id, or the exact name of one device. A phone is known by its id
+  // until it has been asked for its name, so an unmatched name asks the phones that are free.
+  async resolveDevice(query) {
+    if (this.contexts.has(query)) return query;
+    const list = await this.inventory(true);
+    let matches = list.filter(d => names(d, query));
+    if (!matches.length) {
+      for (const d of list.filter(d => d.kind === 'physical' && !d.remote)) {
+        const occupancy = this.coordinator.status(d.id, this);
+        if (occupancy.occupied && !occupancy.owned_by_session) continue;
+        const value = await this.run(idevice, ['--udid', d.id, 'lockdown', 'get', 'DeviceName']).catch(() => undefined);
+        try { d.name = JSON.parse(value.stdout); this.physicalNames.set(d.id, d.name); } catch { continue; }
+      }
+      matches = list.filter(d => d.name.toLocaleLowerCase() === query.toLocaleLowerCase());
+    }
+    if (!matches.length) throw new Error(`No connected device is named ${JSON.stringify(query)}. Use list_devices and pass one of its ids as device.`);
+    if (matches.length !== 1) throw new Error(`Several devices match ${JSON.stringify(query)}: ${matches.map(d => `${d.name} (${d.id})`).join(', ')}. Pass the id as device.`);
+    return matches[0].id;
+  }
+  // Which devices a call acts on and how to run it. Called in arrival order (Coordination.call).
+  async route(name, args) {
+    const definition = definitions.find(d => d[0] === name);
+    if (!definition) throw new Error(`Unknown tool: ${name}`);
+    args = definition[2].parse(args);
+    if (sessionLevel.has(name)) return { keys: [], run: () => this.dispatchSession(name, args) };
+    if (name === 'run_code') {
+      const named = args.devices;
+      if (!Array.isArray(named) || !named.length) throw new Error('run_code needs devices: the ids from list_devices the script may use.');
+      const ids = await Promise.all(named.map(query => this.resolveDevice(String(query))));
+      return { keys: [...new Set(ids)], run: () => runCode(this.scriptContext(named, ids), args) };
+    }
+    if (name === 'start_simulator' && args.simulator === undefined && args.device === undefined) {
+      if (!args.model) throw new Error('Give simulator (name or UDID) or model.');
+      // A new simulator has no id yet; creations run one at a time.
+      return { keys: ['simulator:create'], run: () => new DeviceContext(this).dispatch(name, args) };
+    }
+    const query = name === 'start_simulator' ? args.simulator ?? args.device : args.device;
+    if (typeof query !== 'string' || !query) throw new Error(`${name} needs device: an id from list_devices.`);
+    const id = await this.resolveDevice(query);
+    return { keys: [id], run: () => this.context(id).dispatch(name, args) };
+  }
+  // run_code's calls each name a device, which must be one of the devices it named (and holds).
+  scriptContext(named, ids) {
+    const allowed = new Map(named.map((query, index) => [String(query), ids[index]]));
+    for (const id of ids) allowed.set(id, id);
+    const contexts = [...new Set(ids)].map(id => this.context(id));
+    return {
+      dispatch: (tool, toolArgs = {}) => {
+        if (sessionLevel.has(tool)) return this.dispatchSession(tool, toolArgs);
+        if (tool === 'start_simulator' && toolArgs.model !== undefined) throw new Error('run_code cannot create a simulator: create it first with start_simulator and name it in devices.');
+        const query = tool === 'start_simulator' ? toolArgs.simulator ?? toolArgs.device : toolArgs.device;
+        if (typeof query !== 'string' || !query) throw new Error(`${tool} needs device: one of ${named.join(', ')}.`);
+        const id = allowed.get(query);
+        if (!id) throw new Error(`This script may only use the devices it names in devices (${named.join(', ')}); ${query} is not one of them.`);
+        return this.context(id).dispatch(tool, toolArgs);
+      },
+      beginInputGroup: () => { for (const context of contexts) context.beginInputGroup(); },
+      endInputGroup: () => Promise.all(contexts.map(context => context.endInputGroup())),
+    };
+  }
+  async dispatchSession(name, original = {}) {
+    const args = definitions.find(d => d[0] === name)[2].parse(original);
+    checkWork();
+    if (name === 'poki_mcp_status') {
+      const mode = approvalMode();
+      const deviceTools = definitions.filter(([tool]) => !sessionLevel.has(tool) && !managementTools.has(tool)).length;
+      return text({ update: await updateNotice(), implementation: `Poki MCP ${version}`, ...await buildInfo(), registered_device_tools: deviceTools, management_tools: managementTools.size, total_tools: definitions.length, devices: (await this.inventory()).length,
+        approval_mode: { allow: 'operator-preapproved', host: 'host', ask: 'ask-human' }[mode], approval_covers: [...approvedTools],
+        approval_scope: mode === 'host'
+          ? 'Poki shows no dialog. The MCP client decides whether the tools in approval_covers run: they carry destructiveHint/openWorldHint annotations, and a client that runs tools without asking (LobeHub\'s default, for example) runs them unconfirmed. Taps, typing and other input inside apps are not gated.'
+          : 'Only the tools in approval_covers ask for approval. Taps, typing and other input inside apps, including a delete confirmed with a tap, are not gated.' });
+    }
+    await requireCurrentCode();
+    const devices = await this.describeDevices(args.include_all_simulators);
+    // A sole device is the one to name. Several devices, or none, leave the choice to the caller.
+    const sole = devices.length === 1 ? { default: devices[0].id, default_note: `The only device listed. Pass device: ${JSON.stringify(devices[0].id)} on every call.` } : {};
+    return text({ devices, ...sole, ...(devices.some(d => d.kind === 'physical') ? {} : { notice: noUsbDevice }), ...(args.include_all_simulators ? { simulator_models: await simulatorModels() } : {}) });
   }
 }

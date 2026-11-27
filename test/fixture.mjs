@@ -8,6 +8,16 @@ import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import sharp from 'sharp';
 import { root } from '../src/config.mjs';
+import { definitions } from '../src/tools.mjs';
+
+// Every device tool takes device. Tests that are not about choosing a device call through
+// withDevice, which names the fixture's device (the simulator in a simulator-only state, otherwise
+// the phone) wherever a call leaves it out. Tests about device arguments use a client's own callTool.
+const takesDevice = new Set(definitions.filter(([, , schema]) => schema.shape?.device).map(([name]) => name));
+export function withDevice(args, name, device) {
+  if (name === 'run_code') return args.devices === undefined ? { devices: [device], ...args } : args;
+  return takesDevice.has(name) && args.device === undefined ? { device, ...args } : args;
+}
 
 const fixtureProgram = `#!/usr/bin/env node
 const listSlid=s=>Boolean(s.list)&&!s.list.slideReads&&!s.list.alwaysHits;
@@ -35,7 +45,7 @@ if(tool==='poki-native'&&args[0]==='--local-server') {
  const server=createServer(socket=>{
   socket.write(JSON.stringify({pid:process.pid})+'\\n');
   createInterface({input:socket}).once('line',line=>{
-   const child=execFile(process.execPath,[process.argv[1],'--fixture-request'],(error,stdout,stderr)=>{
+   const child=execFile(process.execPath,[process.argv[1],'--fixture-request',args[1]],(error,stdout,stderr)=>{
     running.delete(child);
     if(!socket.destroyed)socket.end((error?JSON.stringify({transport_error:true,error:stderr||'Fixture native service failed'}):stdout.trim())+'\\n');
    });
@@ -82,7 +92,7 @@ else if(tool==='simulator') {
  else throw Error('Unexpected simulator request '+req.op);
 }
 else if(tool==='poki-native') {
- let input='';for await(const chunk of process.stdin)input+=chunk;const req=JSON.parse(input);log({op:req.op,request:req});
+ let input='';for await(const chunk of process.stdin)input+=chunk;const req=JSON.parse(input);const device=args[0]==='--fixture-request'?args[1]:args[args.indexOf('--udid')+1];log({op:req.op,request:req,device});
  if(req.op==='release_input')console.log(JSON.stringify({released:true}));
  else if(req.op==='panels')console.log(JSON.stringify({multiple:Boolean(state.secondPanel)}));
  else if(req.op==='screenshot'){copyFileSync(process.env.FIXTURE_IMAGE,req.path);console.log(JSON.stringify({saved:true}));}
@@ -96,6 +106,8 @@ else if(tool==='poki-native') {
  else {
   if(state.inputStopsRecording){const events=readFileSync(process.env.FIXTURE_LOG,'utf8').trim().split('\\n').map(JSON.parse);const receiver=events.filter(e=>e.args?.includes('screencapture')).at(-1);if(receiver){try{process.kill(receiver.pid,'SIGTERM');}catch(error){if(error.code!=='ESRCH')throw error;}}}
   if(state.inputError)process.exit(1);
+  // A slow touch, logged with its device and times, so tests can see which taps overlapped.
+  if(state.tapDelayMs&&req.op==='tap'){log({op:'tap_start',device,x:req.x,at:Date.now()});await new Promise(done=>setTimeout(done,state.tapDelayMs));log({op:'tap_end',device,at:Date.now()});}
   if(state.inputReply){console.log(JSON.stringify(state.inputReply));process.exit(0);}
   if(state.afterInput){Object.assign(state,state.afterInput,{afterInput:undefined});writeState(JSON.stringify(state));}
   if(state.phone&&req.op==='tap'){phoneTap(state,req.y);writeState(JSON.stringify(state));}
@@ -132,19 +144,21 @@ export async function fixture(t, { approvalMode = 'ask', staleNative = false, to
  for(const tool of ['python3','xcrun','idevice','ffmpeg','ffprobe','osascript','zenity','pymobiledevice3'])await writeFile(join(dir,'bin',tool),fixtureProgram,{mode:0o755});
  for(const tool of ['poki-native','ocr','simulator'])await writeFile(join(dir,'build',tool),fixtureProgram,{mode:0o755});
  if(staleNative){await mkdir(join(dir,'native/bridge/src'),{recursive:true});await writeFile(join(dir,'native/bridge/src/main.rs'),'fn main() {}');await utimes(join(dir,'build/poki-native'),1,1);}
- const env={...process.env,POKI_DAEMON_IDLE_EXIT_MS:'120000',POKI_NO_UPDATE_CHECK:'1',POKI_MCP_TOOLS:toolsProfile,POKI_MCP_APPROVAL_MODE:approvalMode,HOME:dir,PATH:join(dir,'bin')+':'+process.env.PATH,POKI_MCP_STATE_DIR:join(dir,'state'),IDEVICE_TOOLS:join(dir,'bin/idevice'),FIXTURE_STATE:state,FIXTURE_LOG:log,FIXTURE_IMAGE:image,...extraEnv?.(dir)};
+ const env={...process.env,POKI_DAEMON_IDLE_EXIT_MS:'120000',POKI_NO_UPDATE_CHECK:'1',POKI_MCP_TOOLS:toolsProfile,POKI_MCP_APPROVAL_MODE:approvalMode??'',HOME:dir,PATH:join(dir,'bin')+':'+process.env.PATH,POKI_MCP_STATE_DIR:join(dir,'state'),IDEVICE_TOOLS:join(dir,'bin/idevice'),FIXTURE_STATE:state,FIXTURE_LOG:log,FIXTURE_IMAGE:image,...extraEnv?.(dir)};
  let stderr='';
  const daemons=[];
  const startDaemon=async(port=0)=>{const child=spawn(process.execPath,[join(dir,'src/daemon.mjs'),'--port',String(port)],{env,stdio:['ignore','pipe',staleNative?'pipe':'inherit']});child.stderr?.on('data',chunk=>{stderr+=chunk;});const exited=once(child,'exit'),lines=createInterface({input:child.stdout});await once(lines,'line');const running={pid:child.pid,stop:async(signal='SIGTERM')=>{child.kill(signal);await exited;lines.close();}};daemons.push(running);return running;};
  await beforeStart?.(dir);
  const daemon=startFirst?await startDaemon():undefined;
+ let current={},chosen;
  const clients=[];
  // A shim starts its own daemon (--auto, detached) when none runs; it is found through mcp.json.
  const autoDaemons=new Set();
  const noteAutoDaemon=async()=>{const entry=await readFile(join(dir,'state/mcp.json'),'utf8').then(JSON.parse).catch(()=>null);if(entry?.pid&&!daemons.some(d=>d.pid===entry.pid))autoDaemons.add(entry.pid);};
  const stopAutoDaemons=async()=>{await noteAutoDaemon();for(const line of (await readFile(join(dir,'state/daemon.log'),'utf8').catch(()=>'')).split('\n')){try{const event=JSON.parse(line);if(event.event==='ready')autoDaemons.add(event.pid);}catch{}}for(const pid of autoDaemons){try{process.kill(pid,'SIGKILL');}catch{}}};
  t.after(async()=>{await Promise.allSettled(clients.map(c=>c.close()));await Promise.all(daemons.map(d=>d.stop()));await stopAutoDaemons();await rm(dir,{recursive:true,force:true});});
- const connect=async(profile=toolsProfile)=>{const c=new Client({name:'fixture-client',version:'1'});await c.connect(new StdioClientTransport({command:process.execPath,args:[join(dir,'src/stdio.mjs')],env:{...env,POKI_MCP_TOOLS:profile}}));clients.push(c);return c;};
+ const connect=async(profile=toolsProfile)=>{const c=new Client({name:'fixture-client',version:'1'});await c.connect(new StdioClientTransport({command:process.execPath,args:[join(dir,'src/stdio.mjs')],env:{...env,POKI_MCP_TOOLS:profile}}));clients.push(c);c.call=(name,args={},options)=>c.callTool({name,arguments:withDevice(args,name,device())},options);return c;};
+ const device=()=>chosen??(current.simulatorOnly?'fixture-sim':'fixture-phone');
  const a=await connect();
  // Read the append-only log directly so a write between reads cannot be missed.
  const until=async predicate=>{
@@ -155,5 +169,5 @@ export async function fixture(t, { approvalMode = 'ask', staleNative = false, to
    await new Promise(resolve=>setTimeout(resolve,25));
   }
  };
- return {a,connect,dir,env,until,image,daemon,startDaemon,noteAutoDaemon,get stderr(){return stderr;},set:async data=>{const temporary=`${state}.${process.pid}.tmp`;await writeFile(temporary,JSON.stringify(data));await rename(temporary,state);},events:async()=> (await readFile(log,'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse),call:(name,args={})=>a.callTool({name,arguments:args})};
+ return {a,connect,dir,env,until,image,daemon,startDaemon,noteAutoDaemon,get stderr(){return stderr;},set:async data=>{current=data;const temporary=`${state}.${process.pid}.tmp`;await writeFile(temporary,JSON.stringify(data));await rename(temporary,state);},events:async()=> (await readFile(log,'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse),call:(name,args={})=>a.call(name,args),get device(){return device();},set device(value){chosen=value;}};
 }

@@ -12,6 +12,10 @@ import { approvalMode } from './human.mjs';
 
 let endpoint;
 const session = process.env.POKI_MCP_SESSION ?? randomUUID();
+// Calls travel to the daemon as separate HTTP requests, which may arrive out of order. Each carries
+// its place in this shim's order, and the daemon queues them on their devices in that order.
+const stream = randomUUID();
+let sequence = 0;
 const send = (path, init) => {
   const headers = new Headers(init?.headers);
   headers.set('Authorization', `Bearer ${endpoint.token}`);
@@ -67,13 +71,13 @@ const remoteClient = () => remote ??= (async () => {
   return client;
 })().catch(error => { remote = undefined; throw error; });
 const server = createServer(async (name, args, extra) => {
-  const id = randomUUID();
+  const id = randomUUID(), order = { stream, seq: ++sequence };
   const cancel = () => { if (endpoint) void control('/request/cancel', { 'x-poki-request': id }).catch(() => {}); };
   extra.signal.addEventListener('abort', cancel, { once: true });
   try {
     extra.signal.throwIfAborted();
     const client = await remoteClient();
-    return await client.callTool({ name, arguments: args, _meta: { 'poki/request_id': id } }, { timeout: 3700000, signal: extra.signal });
+    return await client.callTool({ name, arguments: args, _meta: { 'poki/request_id': id, 'poki/order': order } }, { timeout: 3700000, signal: extra.signal });
   } finally { extra.signal.removeEventListener('abort', cancel); }
 });
 const transport = new StdioServerTransport();

@@ -89,7 +89,7 @@ export async function taskServices(directory, { route = false, appSearch = false
       fixture.events.push({ type: name, foreground: fixture.foreground });
       await beforeDeviceCall?.(name, args);
       let result;
-      if (name === 'poki_mcp_status') result = { connected: 1, selected: 'synthetic-device' };
+      if (name === 'poki_mcp_status') result = { connected: 1 };
       else if (name === 'list_devices') result = { devices };
       else if (name === 'list_apps') result = { apps: [{ name: 'Channel fixture', bundle_id: 'org.example.channel-fixture', path: '/large/private/path', metadata: 'x'.repeat(2000) }, ...Array.from({ length: 400 }, (_, index) => ({ name: `Unused fixture app ${index}`, bundle_id: `org.example.unused-${index}`, metadata: 'x'.repeat(200) }))] };
       else if (name === 'get_foreground_app') {

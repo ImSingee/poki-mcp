@@ -1,15 +1,12 @@
-// Opt-in scheduling for a daemon shared by several MCP clients (POKI_INPUT_LOCK=1).
+// Scheduling for a daemon shared by several sessions and devices.
 //
-// Without it, Coordination runs every tool call from every session one after another. With it,
-// each session keeps its own order, read-only tools run beside other sessions' work (capped by
-// POKI_MAX_CONCURRENT_READS), and tools that change the screen take a lock on their device,
-// because one phone has one screen. A call that cannot get the lock within
-// POKI_INPUT_LOCK_WAIT_MS fails with an error that names the holder.
+// One phone has one screen, so a tool that changes it holds that device's lock for the whole call.
+// Different devices run side by side. Read-only tools take no device lock and run beside another
+// session's input, capped by POKI_MAX_CONCURRENT_READS. A call that cannot get its lock within
+// POKI_INPUT_LOCK_WAIT_MS fails with an error that names the holder. run_code holds every device
+// it names, all at once, so two scripts that name the same devices cannot each wait for the other.
 //
 // The lock lives in this process. Two daemons driving one phone are not supported.
-
-const ANY = '*';
-export const ANY_DEVICE = ANY;
 
 function positiveInteger(value, fallback, name) {
   if (value === undefined || value === '') return fallback;
@@ -19,44 +16,34 @@ function positiveInteger(value, fallback, name) {
 }
 
 export function inputLockFromEnv(env = process.env) {
-  if (env.POKI_INPUT_LOCK !== '1') return undefined;
   return new InputLock({
     waitMs: positiveInteger(env.POKI_INPUT_LOCK_WAIT_MS, 30000, 'POKI_INPUT_LOCK_WAIT_MS'),
     maxReads: Math.max(1, positiveInteger(env.POKI_MAX_CONCURRENT_READS, 4, 'POKI_MAX_CONCURRENT_READS')),
   });
 }
 
-// The id of the device a call will act on: each step's device or simulator argument as the session
-// resolves it, or the session's selected device for a step that names none. ANY, which excludes
-// every device, when the call creates a simulator, reaches more than one device, or names one the
-// session cannot resolve yet.
-export async function deviceKey(ctx, args) {
-  const steps = Array.isArray(args?.commands) ? args.commands.map(step => step?.arguments ?? {}) : [args ?? {}];
-  const ids = new Set(await Promise.all(steps.map(step => {
-    if (step.model) return ANY;
-    const device = step.device ?? step.simulator;
-    return typeof device === 'string' && device && device !== ctx.selected ? ctx.resolveDevice?.(device) : ctx.selected;
-  })));
-  const [id, ...others] = ids;
-  return others.length === 0 && id ? id : ANY;
-}
-
-class InputLock {
+export class InputLock {
   holders = new Map(); waiters = new Set(); reads = 0; readWaiters = [];
   constructor({ waitMs = 30000, maxReads = 4 } = {}) { this.waitMs = waitMs; this.maxReads = maxReads; }
 
-  free(key) { return key === ANY ? this.holders.size === 0 : !this.holders.has(key) && !this.holders.has(ANY); }
+  free(keys) { return keys.every(key => !this.holders.has(key)); }
 
-  // Resolves to a release function. Rejects with the holder named after waitMs, or when signal aborts.
-  acquire(key, holder, signal) {
+  // Takes every key at once. Resolves to a release function; rejects with the holder named after
+  // waitMs, or when signal aborts. No keys (a call that names no device) takes nothing.
+  acquire(keys, holder, signal) {
+    keys = [...new Set(keys)].sort();
     if (signal?.aborted) return Promise.reject(signal.reason);
-    const take = () => { const entry = { ...holder, since: performance.now() }; this.holders.set(key, entry); return () => { if (this.holders.get(key) === entry) this.holders.delete(key); this.wake(); }; };
-    if (this.free(key) && this.waiters.size === 0) return Promise.resolve(take());
+    const take = () => {
+      const entry = { ...holder, since: performance.now() };
+      for (const key of keys) this.holders.set(key, entry);
+      return () => { for (const key of keys) if (this.holders.get(key) === entry) this.holders.delete(key); this.wake(); };
+    };
+    if (this.free(keys) && ![...this.waiters].some(waiter => waiter.keys.some(key => keys.includes(key)))) return Promise.resolve(take());
     return new Promise((resolve, reject) => {
-      const waiter = { key, ready: () => { finish(); resolve(take()); } };
+      const waiter = { keys, ready: () => { finish(); resolve(take()); } };
       const finish = () => { clearTimeout(timer); this.waiters.delete(waiter); signal?.removeEventListener('abort', aborted); };
       const aborted = () => { finish(); reject(signal.reason); this.wake(); };
-      const timer = setTimeout(() => { finish(); reject(this.busy(key)); this.wake(); }, this.waitMs);
+      const timer = setTimeout(() => { finish(); reject(this.busy(keys)); this.wake(); }, this.waitMs);
       timer.unref?.();
       signal?.addEventListener('abort', aborted, { once: true });
       this.waiters.add(waiter);
@@ -64,22 +51,21 @@ class InputLock {
     });
   }
 
-  // First come, first served among waiters whose device is free; a waiter for a busy device does
+  // First come, first served among waiters whose devices are free; a waiter for a busy device does
   // not hold up a waiter for another device.
   wake() {
     const claimed = new Set();
     for (const waiter of [...this.waiters]) {
-      const blockedByEarlier = claimed.has(ANY) || claimed.has(waiter.key) || (waiter.key === ANY && claimed.size > 0);
-      if (!blockedByEarlier && this.free(waiter.key)) waiter.ready();
-      else claimed.add(waiter.key);
+      if (!waiter.keys.some(key => claimed.has(key)) && this.free(waiter.keys)) waiter.ready();
+      else for (const key of waiter.keys) claimed.add(key);
     }
   }
 
-  busy(key) {
-    const holder = this.holders.get(key) ?? this.holders.get(ANY) ?? [...this.holders.values()][0];
-    const device = key === ANY ? 'The device' : `Device ${key}`;
+  busy(keys) {
+    const key = keys.find(key => this.holders.has(key)) ?? keys[0];
+    const holder = this.holders.get(key);
     const who = holder ? ` Session ${holder.session ?? 'unknown'} is running ${holder.tool} (held ${Math.round(performance.now() - holder.since)} ms).` : '';
-    return Object.assign(new Error(`${device} is busy with input from another session.${who} Waited ${this.waitMs} ms; retry when it finishes.`), { name: 'InputLockTimeout' });
+    return Object.assign(new Error(`Device ${key} is busy with input from another call.${who} Waited ${this.waitMs} ms; retry when it finishes.`), { name: 'InputLockTimeout' });
   }
 
   readSlot(signal) {

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import sharp from 'sharp';
-import { Devices } from '../src/device.mjs';
+import { DeviceContext, Session } from '../src/device.mjs';
 import { wdaContext } from '../src/cua-wda.mjs';
 import { Coordination } from '../src/coordination.mjs';
 
@@ -49,7 +49,8 @@ async function fakeWda(t) {
   return { state, server, url: `http://127.0.0.1:${server.address().port}` };
 }
 
-class AnyPhone extends Devices {
+class AnyPhone extends DeviceContext {
+  constructor(coordinator) { super(new Session(coordinator), 'phone-1'); }
   async inventory() { return [{ id: 'phone-1', kind: 'physical', name: 'Test Phone', state: 'Booted' }]; }
   liveScreen() { return undefined; }
   async bridge() { throw new Error('the bridge is not used with the WebDriverAgent backend'); }

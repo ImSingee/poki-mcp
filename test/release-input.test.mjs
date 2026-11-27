@@ -40,8 +40,8 @@ test('remote input operations reuse the input session within a group and release
   const beforeCode = (await f.events()).length;
   const scripted = await f.call('run_code', {
     code: `
-      await tools.tap({ x: 10, y: 10, verify: false });
-      await tools.tap({ x: 20, y: 20, verify: false });
+      await tools.tap({ device: 'fixture-phone', x: 10, y: 10, verify: false });
+      await tools.tap({ device: 'fixture-phone', x: 20, y: 20, verify: false });
       return { ok: true };
     `,
   });

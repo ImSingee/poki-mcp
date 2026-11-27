@@ -10,7 +10,7 @@ const runCode = (f, code, extra = {}) => f.call('run_code', { code, ...extra });
 test('run_code runs several steps in one call and returns a value derived from a tool receipt', async t => {
   const f = await fixture(t);
   const result = await runCode(f, `
-    const seen = await tools.list_elements();
+    const seen = await tools.list_elements({ device: 'fixture-phone' });
     let total = 0;
     for (const element of seen.elements) total += 1;
     return { label: seen.elements[0].label, count: total };
@@ -30,7 +30,7 @@ test('run_code returns an action with the screen it produced, as a direct call d
   const f = await fixture(t);
   await f.set({ label: 'Row 1', afterInput: { label: 'Row 9' } });
   const result = await runCode(f, `
-    const moved = await tools.scroll({ direction: 'down' });
+    const moved = await tools.scroll({ device: 'fixture-phone', direction: 'down' });
     return { verified: moved.screen_change_verified, changed: moved.screen_changed, shows: moved.screen.text.includes('Button: Row 9') };
   `);
   assert.ok(!result.isError, JSON.stringify(result));
@@ -86,7 +86,7 @@ test('run_code passes no host function or exception to the script', async t => {
     // A replaced String makes console hand the bridge a function, so postMessage would throw.
     `async () => { const S = String; String = () => (() => {}); try { console.log('x'); } catch (error) { try { return { escaped: S(error.constructor.constructor('return process')().pid) }; } catch {} } return { blocked: true }; }`,
     // JSON.stringify replaced to return a function for the tool arguments.
-    `async () => { const S = String, J = JSON.stringify; JSON.stringify = () => (() => {}); try { await tools.list_elements(); } catch (error) { try { const pid = error.constructor.constructor('return process')().pid; JSON.stringify = J; return { escaped: S(pid) }; } catch {} } JSON.stringify = J; return { blocked: true }; }`,
+    `async () => { const S = String, J = JSON.stringify; JSON.stringify = () => (() => {}); try { await tools.list_elements({ device: 'fixture-phone' }); } catch (error) { try { const pid = error.constructor.constructor('return process')().pid; JSON.stringify = J; return { escaped: S(pid) }; } catch {} } JSON.stringify = J; return { blocked: true }; }`,
     // A thenable result: whoever awaits it hands it their resolve and reject functions.
     `() => ({ then(resolve) { try { resolve({ escaped: String(resolve.constructor('return process')().pid) }); } catch (error) { resolve({ blocked: String(error) }); } } })`,
     // A thrown object whose message getter probes its caller.
@@ -130,7 +130,7 @@ test('run_code keeps a bounded amount of log output', async t => {
 // A return value JSON cannot carry ends as a script error that keeps the call list, not a parse failure.
 test('run_code reports a return value that is not JSON as a script error and keeps its calls', async t => {
   const f = await fixture(t);
-  const result = await runCode(f, `await tools.wait({ seconds: 0 }); return () => 1;`);
+  const result = await runCode(f, `await tools.wait({ device: 'fixture-phone', seconds: 0 }); return () => 1;`);
   assert.equal(result.isError, true);
   const summary = summaryOf(result);
   assert.match(summary.script_error, /not JSON/);
@@ -143,8 +143,8 @@ test('run_code stops when an action reports sent=false, and no later step runs e
   const f = await fixture(t);
   await f.set({ inputReply: { isError: true, outcome: 'not_sent', stop_reason: 'error', sent: false, screen_change_verified: false, reason: 'display_service_missing', error: 'Cannot establish input media session: no display service: ServiceNotFound', instruction: 'Nothing reached the iPhone.' } });
   const result = await runCode(f, `
-    try { await tools.tap({ x: 10, y: 10 }); }
-    catch (error) { await tools.tap({ x: 20, y: 20 }); }
+    try { await tools.tap({ device: 'fixture-phone', x: 10, y: 10 }); }
+    catch (error) { await tools.tap({ device: 'fixture-phone', x: 20, y: 20 }); }
     return 'the script continued';
   `);
   assert.equal(result.isError, true);
@@ -162,7 +162,7 @@ test('run_code times out, cancels the in-flight device call, and the daemon serv
   const f = await fixture(t), other = await f.connect();
   await f.set({ block: 'ax_tree' });
   // get_foreground_app reaches the native read directly, so the read is in flight well before the deadline.
-  const blocked = runCode(f, `await tools.get_foreground_app(); return 'read the screen';`, { timeout_seconds: 5 });
+  const blocked = runCode(f, `await tools.get_foreground_app({ device: 'fixture-phone' }); return 'read the screen';`, { timeout_seconds: 5 });
   await f.until(log => log.includes('"op":"ax_tree"'));
   const result = await blocked;
   assert.equal(result.isError, true);
@@ -171,7 +171,7 @@ test('run_code times out, cancels the in-flight device call, and the daemon serv
   assert.deepEqual(summary.calls.map(call => [call.tool, call.interrupted]), [['get_foreground_app', true]], 'the report names the call the timeout cut off');
   assert.equal((await f.events()).filter(event => event.op === 'ax_tree').length, 1, 'the blocked read must not be retried');
   await f.set({});
-  assert.equal(value(await other.callTool({ name: 'wait', arguments: { seconds: 0 } })).waited, 0, 'the device must be free for the next session');
+  assert.equal(value(await other.call('wait', { seconds: 0 })).waited, 0, 'the device must be free for the next session');
   const spin = await runCode(f, `while (true) {}`, { timeout_seconds: 1 });
   assert.equal(spin.isError, true);
   assert.equal(summaryOf(spin).stop_reason, 'timeout');
@@ -181,9 +181,25 @@ test('run_code times out, cancels the in-flight device call, and the daemon serv
 // The 60-call ceiling bounds a loop that would otherwise call tools forever.
 test('run_code stops a runaway loop at its tool-call ceiling', async t => {
   const f = await fixture(t);
-  const result = await runCode(f, `for (;;) { await tools.list_elements(); }`, { max_tool_calls: 3 });
+  const result = await runCode(f, `for (;;) { await tools.list_elements({ device: 'fixture-phone' }); }`, { max_tool_calls: 3 });
   assert.equal(result.isError, true);
   const summary = summaryOf(result);
   assert.equal(summary.stop_reason, 'max_tool_calls');
   assert.equal(summary.completed_calls, 3);
+});
+
+test('run_code names its devices: a call to any other device is refused, and so is a script that names none', { timeout: 30000 }, async t => {
+  const f = await fixture(t);
+  await f.set({ twoPhones: true, label: 'Ready' });
+  const result = await runCode(f, `
+    await tools.wait({ device: 'fixture-phone', seconds: 0 });
+    try { await tools.tap({ device: 'fixture-phone-2', x: 10, y: 10 }); } catch (error) { return { refused: error.message }; }
+    return { refused: false };
+  `, { devices: ['fixture-phone'] });
+  assert.notEqual(result.isError, true, JSON.stringify(result));
+  assert.match(summaryOf(result).result.refused, /only use the devices it names in devices \(fixture-phone\); fixture-phone-2/);
+  assert.equal((await f.events()).filter(event => event.op === 'tap').length, 0);
+  const unnamed = await f.a.callTool({ name: 'run_code', arguments: { code: 'return 1' } });
+  assert.equal(unnamed.isError, true);
+  assert.match(unnamed.content[0].text, /devices/);
 });

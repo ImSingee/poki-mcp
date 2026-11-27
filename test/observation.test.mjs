@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { rm, writeFile } from 'node:fs/promises';
-import { Devices } from '../src/device.mjs';
+import { DeviceContext } from '../src/device.mjs';
 import { join } from 'node:path';
 import { fixture, value } from './fixture.mjs';
 
@@ -121,7 +121,7 @@ test('launch_app gives the app a moment to come to the front and says how long i
 });
 
 test('the Home Screen is named com.apple.springboard, and later reads of it say so too', async () => {
- const devices=new Devices(),id='fixture-phone';
+ const devices=new DeviceContext(undefined,'fixture-phone'),id='fixture-phone';
  devices.target=async()=>({id,kind:'physical',name:'Phone'});devices.size={device:id,width:100,height:200};
  devices.bridge=async request=>request.op==='ax'?{foreground:{object_id:'o1',name:' ',bundle_id:null,pid:34},elements:[{label:'Phone',role:'Icon',frame:{x:10,y:10,width:40,height:40}}]}:{pid:34,running:true,executable:'/System/Library/CoreServices/SpringBoard.app/SpringBoard',bundle_id:null,name:null};
  const front=JSON.parse((await devices.dispatch('get_foreground_app',{})).content[0].text);
