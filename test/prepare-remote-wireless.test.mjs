@@ -84,3 +84,13 @@ writeFileSync(${JSON.stringify(marker)}, 'started');
   }
   await assert.rejects(stat(marker), { code: 'ENOENT' });
 });
+
+test('wireless pairing saves a link-local peer with its interface zone', async t => {
+  const { stateDir, native } = await wirelessFixture(t, [
+    { event: 'paired', device: { udid: 'phone-27', name: 'Bryan iPhone', model: 'iPhone17,1' }, peer: 'fe80::10%en0' },
+  ]);
+  await exec(process.execPath, [join(root, 'bin/prepare-remote.mjs'), '--wireless'], {
+    env: { ...process.env, POKI_MCP_STATE_DIR: stateDir, POKI_NATIVE: native },
+  });
+  assert.equal(JSON.parse(await readFile(join(stateDir, 'remote/phone-27/config.json'), 'utf8')).host, 'fe80::10%en0');
+});

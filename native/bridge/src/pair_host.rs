@@ -1,4 +1,4 @@
-use super::Result;
+use super::{Result, remote::interface_name};
 use idevice::remote_pairing::{
     PAIRABLE_HOST_SERVICE_TYPE, PairableHost, PairableHostInfo, RpPairingFile, RpPairingSocket,
 };
@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use std::{
     fs,
     io::Write,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     time::Duration,
@@ -56,13 +56,24 @@ fn load_host_info(state_dir: &Path, name: &str) -> Result<PairableHostInfo> {
     Ok(info)
 }
 
-fn pairing_peer_ip(ip: IpAddr) -> IpAddr {
-    match ip {
-        IpAddr::V6(address) => address
-            .to_ipv4_mapped()
-            .map(IpAddr::V4)
-            .unwrap_or(IpAddr::V6(address)),
-        ipv4 => ipv4,
+/// The address the phone paired from, in a form `prepare-remote` can save as the remote host.
+/// An IPv4-mapped peer becomes plain IPv4. A scoped IPv6 peer (link-local) keeps its interface as
+/// `address%interface`: without the zone, a later connection cannot pick the outgoing interface.
+fn pairing_peer(peer: SocketAddr) -> String {
+    match peer {
+        SocketAddr::V4(v4) => v4.ip().to_string(),
+        SocketAddr::V6(v6) => {
+            if let Some(v4) = v6.ip().to_ipv4_mapped() {
+                return v4.to_string();
+            }
+            match v6.scope_id() {
+                0 => v6.ip().to_string(),
+                scope => {
+                    let zone = interface_name(scope).unwrap_or_else(|| scope.to_string());
+                    format!("{}%{zone}", v6.ip())
+                }
+            }
+        }
     }
 }
 
@@ -127,8 +138,8 @@ async fn pair_host_once(state_dir: &str, output: &str, name: &str, port: u16) ->
     let output_path = PathBuf::from(output);
     let accepted = async {
         let (stream, peer) = listener.accept().await?;
-        let peer_ip = pairing_peer_ip(peer.ip());
-        emit(json!({"event":"connected","peer":peer_ip.to_string()}));
+        let peer = pairing_peer(peer);
+        emit(json!({"event":"connected","peer":peer}));
         let socket = RpPairingSocket::new_device(stream);
         let mut host = PairableHost::new(socket, host_info);
         let peer_device = host
@@ -137,7 +148,7 @@ async fn pair_host_once(state_dir: &str, output: &str, name: &str, port: u16) ->
             })
             .await?;
         write_private(&output_path, &pairing_file_bytes(&pairing_file, name)?)?;
-        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((peer_device, peer_ip.to_string()))
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((peer_device, peer))
     }
     .await;
 
@@ -164,7 +175,7 @@ pub async fn pair_host(state_dir: &str, output: &str, name: &str, port: u16) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv6Addr;
+    use std::net::{Ipv6Addr, SocketAddrV6};
 
     #[test]
     fn host_identity_is_only_the_alt_irk_and_stays_stable_across_names() {
@@ -192,13 +203,54 @@ mod tests {
     fn ipv4_mapped_pairing_peers_are_normalized_for_the_remote_config() {
         let mapped: Ipv6Addr = "192.0.2.10".parse::<Ipv4Addr>().unwrap().to_ipv6_mapped();
         assert_eq!(
-            pairing_peer_ip(std::net::IpAddr::V6(mapped)),
-            std::net::IpAddr::V4("192.0.2.10".parse().unwrap())
+            pairing_peer(SocketAddr::V6(SocketAddrV6::new(mapped, 62078, 0, 0))),
+            "192.0.2.10"
+        );
+        assert_eq!(
+            pairing_peer("192.0.2.11:62078".parse().unwrap()),
+            "192.0.2.11"
         );
         let native_v6: Ipv6Addr = "2001:db8::10".parse().unwrap();
         assert_eq!(
-            pairing_peer_ip(std::net::IpAddr::V6(native_v6)),
-            std::net::IpAddr::V6(native_v6)
+            pairing_peer(SocketAddr::V6(SocketAddrV6::new(native_v6, 62078, 0, 0))),
+            "2001:db8::10"
+        );
+    }
+
+    #[test]
+    fn link_local_pairing_peers_keep_their_interface_for_later_connections() {
+        let link_local: Ipv6Addr = "fe80::10".parse().unwrap();
+        // The loopback interface exists on every host; its index differs between Linux and macOS.
+        let loopback = ["lo0", "lo"]
+            .iter()
+            .find_map(|name| {
+                let name = std::ffi::CString::new(*name).unwrap();
+                let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
+                (index != 0).then_some((index, name.into_string().unwrap()))
+            })
+            .expect("no loopback interface");
+        let peer = pairing_peer(SocketAddr::V6(SocketAddrV6::new(
+            link_local, 62078, 0, loopback.0,
+        )));
+        assert_eq!(peer, format!("fe80::10%{}", loopback.1));
+        // A saved host must resolve to the same scoped address the phone paired from.
+        let resolved: Vec<SocketAddr> =
+            std::net::ToSocketAddrs::to_socket_addrs(&(peer.as_str(), 49152))
+                .unwrap()
+                .collect();
+        assert!(
+            resolved
+                .iter()
+                .any(|address| matches!(address, SocketAddr::V6(v6)
+                if *v6.ip() == link_local && v6.scope_id() == loopback.0)),
+            "{peer} resolved to {resolved:?}"
+        );
+        // An interface that vanished still keeps its numeric zone rather than dropping it.
+        assert_eq!(
+            pairing_peer(SocketAddr::V6(SocketAddrV6::new(
+                link_local, 62078, 0, 999_999
+            ))),
+            "fe80::10%999999"
         );
     }
 

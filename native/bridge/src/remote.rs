@@ -344,14 +344,23 @@ fn endpoint(address: SocketAddr) -> String {
     let SocketAddr::V6(v6) = address else {
         return address.to_string();
     };
-    let mut name = [0 as libc::c_char; libc::IF_NAMESIZE];
-    if v6.scope_id() == 0
-        || unsafe { libc::if_indextoname(v6.scope_id(), name.as_mut_ptr()) }.is_null()
-    {
-        return address.to_string();
+    match (v6.scope_id() != 0).then(|| interface_name(v6.scope_id())).flatten() {
+        Some(interface) => format!("[{}%{interface}]:{}", v6.ip(), v6.port()),
+        None => address.to_string(),
     }
-    let interface = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }.to_string_lossy();
-    format!("[{}%{interface}]:{}", v6.ip(), v6.port())
+}
+
+/// The name of the interface with this index, such as `en0` or `wlan0`.
+pub(crate) fn interface_name(index: u32) -> Option<String> {
+    let mut name = [0 as libc::c_char; libc::IF_NAMESIZE];
+    if unsafe { libc::if_indextoname(index, name.as_mut_ptr()) }.is_null() {
+        return None;
+    }
+    Some(
+        unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 fn socket_failure(error: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
