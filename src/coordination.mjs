@@ -123,7 +123,7 @@ export class Coordination {
         let result;
         try {
           try { result = await route.run(); }
-          catch (error) { result = { isError: true, content: [{ type: 'text', text: error.message }], _meta: { stop_reason: error.name === 'TimeoutError' || combined.aborted ? stoppingReason(error) : 'error' } }; }
+          catch (error) { result = { isError: true, content: [{ type: 'text', text: error.message }], _meta: { stop_reason: error.name === 'TimeoutError' || combined.aborted ? stoppingReason(error) : 'error', ...(error.code === 'stale_code' ? { stale_code: error.serviceStart } : {}) } }; }
           result._meta = { ...result._meta, timing: { relation: 'nested phases include their children; do not sum parents and children', stages: op.timings } };
           return result;
         } finally { if (combined.aborted) { const cleanup = await work.run(undefined, () => session.cleanup(op.devices)); if (result) result._meta = { ...result._meta, cleanup }; } }

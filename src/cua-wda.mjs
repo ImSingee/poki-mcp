@@ -107,7 +107,7 @@ export function wdaContext(ctx, url = process.env.POKI_WDA_URL) {
     async target() {
       try {
         const device = await ctx.target();
-        if (device.kind !== 'physical') throw new Error('POKI_CUA_BACKEND=wda drives a physical iPhone; select it with select_device.');
+        if (device.kind !== 'physical') throw new Error('POKI_CUA_BACKEND=wda drives a physical iPhone; pass its id as device.');
         return device;
       } catch (error) {
         if (!/^No device is connected/.test(error.message)) throw error;

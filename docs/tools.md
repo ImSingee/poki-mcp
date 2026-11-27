@@ -5,9 +5,20 @@
 - **Screen & UI Inspection**: Capture screenshots (`take_screenshot`, `save_screenshot`) and inspect UI hierarchies via Accessibility or Vision OCR (`list_elements`).
 - **Touch & Keyboard Input**: Send taps, swipes, hardware keys, and Unicode text across simulators and paired physical devices.
 - **App & Device Lifecycle**: Manage applications, open URLs, inspect containers, record video, and run diagnostic checks.
-- **Local Daemon Architecture**: Runs a local service (`127.0.0.1:47825` by default) with serialized device execution, per-client session isolation, and interactive local approval gates for sensitive actions. Loopback only unless `POKI_BIND_HOST` names another address, and `POKI_HOST_ALLOW` then lists the `Host` names it answers to; those listeners serve HTTPS with `POKI_TLS_CERT` and `POKI_TLS_KEY`, or plain HTTP only with `POKI_ALLOW_PLAINTEXT_BIND=1`. `127.0.0.1` is always served over plain HTTP, because local clients read that endpoint from `mcp.json`.
+- **Local Daemon Architecture**: Runs one local service per state directory, started by the first MCP client call or by `npm start` (`127.0.0.1:47825` by default), with per-device execution order, per-client session isolation, and approval gates for sensitive actions. Loopback only unless `POKI_BIND_HOST` names another address, and `POKI_HOST_ALLOW` then lists the `Host` names it answers to; those listeners serve HTTPS with `POKI_TLS_CERT` and `POKI_TLS_KEY`, or plain HTTP only with `POKI_ALLOW_PLAINTEXT_BIND=1`. `127.0.0.1` is always served over plain HTTP, because local clients read that endpoint from `mcp.json`.
 
-Tool names and input validation schemas live in [`src/data/tools.json`](../src/data/tools.json) with remote connection maintenance definitions in [`src/tools.mjs`](../src/tools.mjs). MCP serves them through `tools/list`. `poki_mcp_status` returns the selected device, available device count, approval mode, and separate counts for device, observation, management, and total tools.
+Tool names and input validation schemas live in [`src/data/tools.json`](../src/data/tools.json) with remote connection maintenance definitions in [`src/tools.mjs`](../src/tools.mjs). MCP serves them through `tools/list`. `poki_mcp_status` returns the available device count, approval mode, and separate counts for device, management, and total tools.
+
+## Breaking changes in 0.2.0
+
+- `device` is required on every tool that acts on a device, including `look`, `do`, `wait`, `disconnect_device`, `reconnect_device` and `acquire_device`. Pass an id from `list_devices` or an exact device name.
+- `select_device`, the session's selected device, `POKI_MCP_DEVICE`, and the `selected` field of `poki_mcp_status` and `list_devices` are removed. When exactly one device is listed, `list_devices` returns it as `default`, with a `default_note`.
+- `batch_commands` takes one required top-level `device`. Its steps run on that device, and a step that names `device` is rejected.
+- `run_code` takes required `devices`, 1 to 8 ids or names. Every `tools.<name>(...)` call in the script names its `device`, which must be one of them.
+- `POKI_INPUT_LOCK` is removed. Per-device coordination is always on, and there is no global queue. See [One daemon, several clients](#one-daemon-several-clients).
+- `POKI_MCP_APPROVAL_MODE=host` is new. It is the default on a Linux host with neither `DISPLAY` nor `WAYLAND_DISPLAY`. See [Approval & Clipboard Behavior](#approval--clipboard-behavior).
+
+The stdio server now starts the shared daemon itself, so `npm start` is optional. See [Install](install.md#1-build-from-source).
 
 ## MCP tool profiles
 
@@ -15,7 +26,7 @@ The default `tools/list` response contains the tools for phone tasks. Tool names
 
 | Use | Default tools |
 | --- | --- |
-| Service and devices | `poki_mcp_status`, `list_devices`, `select_device` |
+| Service and devices | `poki_mcp_status`, `list_devices` |
 | Read the screen | `list_elements`, `take_screenshot`, `get_foreground_app` |
 | Apps and URLs | `list_apps`, `launch_app`, `terminate_app`, `open_url` |
 | Touch and input | `tap`, `tap_text`, `long_press`, `double_tap`, `drag`, `pinch`, `fill`, `type_text`, `scroll`, `scroll_to`, `swipe`, `press_key`, `go_back`, `hide_keyboard`, `press_button`, `get_clipboard` |
@@ -47,17 +58,19 @@ The client needs to reconnect after a configuration change. Each stdio client ha
 
 Direct HTTP clients receive the daemon's profile. Starting the daemon with `POKI_MCP_TOOLS=all npm start` enables the complete catalog for those clients.
 
-### Calls and device selection
+### Calls and devices
 
 Profiles affect discovery only. Every tool remains callable by name through `tools/call`, including tools absent from `tools/list`. The same applies to steps inside `batch_commands`. Argument validation, approvals, cancellation, and device arbitration still apply.
 
-Consecutive device calls do not require `acquire_device`. With one available device, calls select it automatically. With multiple devices, `list_devices` and `select_device` identify the target. An explicit lease remains available for sessions that need exclusive access across several calls. Another session's lease can still block access.
+Every tool that acts on a device takes a required `device`: an id from `list_devices` or an exact device name. Call `list_devices` once and pass that id on every call. When exactly one device is listed, `list_devices` also names it in `default`. `start_simulator` returns the id of the simulator it boots or creates, and any call that names a listed simulator that is shut down boots it.
+
+Consecutive device calls do not require `acquire_device`. An explicit lease remains available for sessions that need exclusive access across several calls. Another session's lease can still block access.
 
 Poki Agent starts its own stdio process with `POKI_MCP_TOOLS=all`. Its existing tool allowlist determines which tools reach its model.
 
 ### Computer-use profile: look and do
 
-`POKI_TOOL_PROFILE=cua` lists only `look`, `do`, `list_apps`, `list_devices`, `select_device` and `poki_mcp_status`, with short server instructions. It works the way desktop computer-use tools do: `do` runs a list of actions in order (tap by element number or point, type, key, swipe, scroll_to, long_press, drag, pinch, button, launch, wait), waits a short fixed time after the last one, and reads the screen once; `look` reads it without acting. Each answer lists the screen's elements with numbers for the next call, marks the ones that are new since the previous read, names what disappeared, and attaches a screenshot. There is no verdict: the model decides what happened from the elements and the picture.
+`POKI_TOOL_PROFILE=cua` lists only `look`, `do`, `list_apps`, `list_devices` and `poki_mcp_status`, with short server instructions. `look` and `do` take a required `device`, like every device tool. It works the way desktop computer-use tools do: `do` runs a list of actions in order (tap by element number or point, type, key, swipe, scroll_to, long_press, drag, pinch, button, launch, wait), waits a short fixed time after the last one, and reads the screen once; `look` reads it without acting. Each answer lists the screen's elements with numbers for the next call, marks the ones that are new since the previous read, names what disappeared, and attaches a screenshot. There is no verdict: the model decides what happened from the elements and the picture.
 
 - Each action is reported as `sent`, `not_sent` or `unknown`. Nothing after a failed action is sent, and an `unknown` action is never sent again. Element numbers that are not in the latest read are refused before anything is sent.
 - `look` and `do` work on a physical iPhone through the native bridge, on a booted simulator, and on a phone running WebDriverAgent (see below). A physical iPhone needs the bridge built from this version by `./bin/setup`, because typing uses its `type_keys` and `pasteboard` operations.
@@ -68,14 +81,23 @@ Poki Agent starts its own stdio process with `POKI_MCP_TOOLS=all`. Its existing 
 - `POKI_CUA_BACKEND=wda` with `POKI_WDA_URL=http://<phone>:8100` reads and acts through a
   WebDriverAgent runner deliberately launched for network access from the host instead of the bridge.
   That WDA must use a reachable, non-loopback `USE_IP`. `look` and `do` answer the same way on either backend.
-  WDA drives the session's selected iPhone, so device leases apply to it as they do to the bridge; a host that
+  WDA drives the iPhone named by `device`, so device leases apply to it as they do to the bridge; a host that
   sees no iPhone at all coordinates it under its WDA address instead.
 
 The complete catalog (`POKI_MCP_TOOLS=all`) includes `look` and `do` too.
 
 ### One daemon, several clients
 
-`POKI_INPUT_LOCK=1` gives each MCP session its own queue instead of one queue for every session. Read-only tools run beside other sessions' work, capped by `POKI_MAX_CONCURRENT_READS` (default 4), and tools that change the screen take a lock on their device. The lock belongs to the device a call resolves to, so a session that names a phone and one that gives its UDID wait for each other. A call whose device is not known yet, such as a phone's name before this session has listed or used that phone, or a batch that reaches more than one device, locks every device. A call that cannot get the lock within `POKI_INPUT_LOCK_WAIT_MS` (default 30000 ms) fails with an error that names the session and tool holding it. The lock lives in one daemon; two daemons driving one phone are not supported.
+Every stdio process (`src/stdio.mjs`) uses the one daemon of its state directory, and starts it when none is running (see [Install](install.md#1-build-from-source)). Sessions, leases, recordings and device locks live in that daemon. They outlast stdio processes that come and go, and several clients coordinate through it.
+
+Calls are coordinated per device:
+
+- Each (session, device) pair keeps its calls in the order they were sent. Calls to different devices, from one session or several, run at the same time.
+- A tool that changes the screen holds that device's input lock for the whole call. The lock belongs to the device a call resolves to, so a session that names a phone and one that gives its id wait for each other. `run_code` holds the locks of the devices in its `devices`, and only those, while it runs.
+- Read-only tools take a read slot instead, capped by `POKI_MAX_CONCURRENT_READS` (default 4), and run beside another session's input.
+- A call that cannot get its device's lock within `POKI_INPUT_LOCK_WAIT_MS` (default 30000 ms) fails with an error that names the session and tool holding it.
+
+The lock lives in one daemon; two daemons driving one phone are not supported.
 
 `POKI_MCP_CALL_LOG=<path>` appends one JSON line per finished tool call: the tool, how long it took, its verdict when it has one, and whether it failed. Arguments, text and images are never written, and the session appears only as a hash.
 
@@ -93,7 +115,7 @@ Three tools handle most interactions:
 - `fill` focuses an input field, replaces its text, and verifies the new value.
 - `tap_text` looks for five seconds. If the target is not found, it aborts without tapping and returns what is currently on screen. A screen accessibility cannot read gets a few more seconds for screen text recognition to answer, because that read has already started; nothing new begins after the five seconds.
 
-Installing apps, opening URLs, and reading the clipboard trigger a macOS approval dialog on your Mac. See [Approval & Clipboard Behavior](#approval--clipboard-behavior).
+Installing apps, opening URLs, and reading the clipboard need approval: a dialog on the Poki host in `ask` mode, or your MCP client's own confirmation in `host` mode. See [Approval & Clipboard Behavior](#approval--clipboard-behavior).
 
 ## Optional action verification
 
@@ -112,26 +134,25 @@ Accessibility can miss changes that affect only pixels, such as Calculator's dis
 | Group | Tool | What it does |
 | --- | --- | --- |
 | Devices | `list_devices` | Find attached iOS devices and booted or previously used simulators. |
-| Devices | `start_simulator` | Boot an existing simulator by id or name, or create one from an available model. |
-| Devices | `shut_down_simulator` | Shut down the selected simulator. |
+| Devices | `start_simulator` | Boot an existing simulator by id or name, or create one from an available model, and return its id. |
+| Devices | `shut_down_simulator` | Shut down the simulator named by `device`. |
 | Devices | `reconnect_device` | Attempt a replacement RemotePairing tunnel while preserving a working tunnel if replacement fails. Does not replay input. |
-| Devices | `disconnect_device` | Close the selected RemotePairing helper and tunnel. |
-| Devices | `select_device` | Select one connected device by id or unambiguous name for this MCP session. |
+| Devices | `disconnect_device` | Close the device's RemotePairing helper and tunnel. |
 | Devices | `get_device_info` | Read device identity, capture dimensions in logical points, and optionally platform settings. |
-| Devices | `poki_mcp_status` | Report tool counts, connected-device count, selected device, and approval mode. |
-| Coordination | `acquire_device` | Exclusively occupy one device across tool calls in this MCP session. |
-| Coordination | `renew_device` | Extend this session’s active device lease by 1–600 seconds (default 120). |
-| Coordination | `release_device` | Release this session’s device lease after cancelling accepted work and awaiting recording/location cleanup. |
-| Coordination | `cancel_device` | Stop all previously accepted work and background recording/location in this MCP session, including calls without a lease. |
+| Devices | `poki_mcp_status` | Report tool counts, connected-device count, and approval mode. |
+| Coordination | `acquire_device` | Exclusively occupy one device across tool calls in this MCP session. A session may hold leases on several devices, one each. |
+| Coordination | `renew_device` | Extend one of this session’s device leases by 1–600 seconds (default 120). |
+| Coordination | `release_device` | Release one of this session’s device leases after cancelling this session's accepted work on that device and awaiting its recording/location cleanup. |
+| Coordination | `cancel_device` | Stop previously accepted work and background recording/location in this MCP session, including calls without a lease: on one device when `device` or `lease_id` is given, otherwise on all of them. |
 | Screen | `observe_device` | Capture one image with its structured observation, non-reused element references and prompt check. |
 | Screen | `take_screenshot` | Capture the current display and return a JPEG image with screen dimensions and a prompt warning check. |
 | Screen | `save_screenshot` | Save a full-resolution screenshot to an absolute PNG or JPEG path or directory. |
-| Screen | `start_recording` | Start recording the selected device display to an H.264 movie. |
-| Screen | `stop_recording` | Finalize the session recording and inspect the saved movie before returning its path and media details. |
+| Screen | `start_recording` | Start recording the device display to an H.264 movie. |
+| Screen | `stop_recording` | Finalize this session's recording of the device and inspect the saved movie before returning its path and media details. |
 | Screen | `get_foreground_app` | Read the current foreground application from accessibility services. |
 | Screen | `list_elements` | Read accessibility elements, or OCR when auto mode cannot use accessibility. Auto mode adds screenshot text that accessibility leaves out across a third of the screen. |
 | Screen | `wait_for` | Poll visible text until it appears, or disappears when gone=true. |
-| Screen | `wait` | Pause for seconds without interacting with a device. |
+| Screen | `wait` | Pause for seconds without interacting with the device. It runs in order with this session's other calls to that device. |
 | Touch | `tap` | Tap at x/y in screen points or at the center of a current element ref. |
 | Touch | `tap_text` | Find one visible element matching text, waiting for it to appear and hold still (five seconds on a screen accessibility can read, longer when only screen text recognition can find it), trying OCR when needed, and tap it. |
 | Touch | `double_tap` | Send two taps at x/y in logical screen points or at a current element ref. |
@@ -148,32 +169,32 @@ Accessibility can miss changes that affect only pixels, such as Calculator's dis
 | Text and keys | `press_key` | Send a named keyboard key with optional modifiers and count (default one). |
 | Text and keys | `hide_keyboard` | Detect a visible keyboard, send its toggle event, and verify dismissal. |
 | Text and keys | `get_clipboard` | Read clipboard contents supported by the platform. |
-| Text and keys | `set_clipboard` | Replace the selected device clipboard with text. |
+| Text and keys | `set_clipboard` | Replace the device clipboard with text. |
 | System | `press_button` | Send a hardware-style button event such as Home, lock, volume, mute, or Siri. |
 | System | `system_gesture` | Send the requested system navigation gesture. |
 | System | `go_back` | Tap a uniquely identified back control when available, otherwise swipe from the left edge. |
 | System | `rotate` | Request a display orientation and invalidate cached coordinates. |
-| System | `set_appearance` | Request light or dark appearance through the selected platform adapter. |
+| System | `set_appearance` | Request light or dark appearance on the device. |
 | System | `set_accessibility` | Change supported text-size or accessibility display settings. |
-| System | `set_location` | Start a simulated latitude/longitude for the selected device. |
-| System | `clear_location` | Stop the location simulation owned by this service for the selected device. |
+| System | `set_location` | Start a simulated latitude/longitude for the device. |
+| System | `clear_location` | Stop the location simulation owned by this service for the device. |
 | System | `handle_alert` | Choose a visible alert button by text or accept/dismiss action, looking for five seconds; recognition already running on an unreadable screen may finish after that. |
-| System | `request_human_action` | Show a macOS dialog asking the user to complete a step on the device. |
+| System | `request_human_action` | Show a dialog on the Poki host (macOS, or zenity on Linux) asking the user to complete a step on the device. Refused in `host` approval mode. |
 | Apps | `list_apps` | List installed applications, excluding system apps unless include_system=true. |
 | Apps | `launch_app` | Launch an application by bundle_id or unambiguous name. |
-| Apps | `terminate_app` | Stop an application identified by bundle_id on the selected device. |
+| Apps | `terminate_app` | Stop an application identified by bundle_id on the device. |
 | Apps | `install_app` | Install an application from a local path. |
 | Apps | `uninstall_app` | Remove an installed application identified by bundle_id. |
 | Apps | `open_settings` | Open a supported Settings page or an application settings page. |
-| Apps | `open_url` | Ask the selected device to open a URL. |
+| Apps | `open_url` | Ask the device to open a URL. |
 | Apps | `build_and_run` | Build an Xcode project or workspace from project_path, install the result, and launch it. |
 | Apps | `download_app_container` | Copy an accessible application container to a local destination, or the service state directory by default. |
 | Apps | `list_crashes` | List available reports, optionally filtering by process name or bundle identifier and kind. |
 | Apps | `get_crash` | Read a report by path from list_crashes, or find the newest report for process. |
-| Batches | `batch_commands` | Do a whole known task in one call: launch the app, tap, fill, scroll, go back and answer alerts, each {tool, arguments}. |
-| Batches | `run_code` | Run an async JavaScript function on an isolated worker, calling device tools with `await tools.<name>(args)`, so the code loops, filters and decides each next step from the results in one call instead of a model round trip per step. |
+| Batches | `batch_commands` | Do a whole known task on one device in one call: launch the app, tap, fill, scroll, go back and answer alerts, each {tool, arguments}. |
+| Batches | `run_code` | Run an async JavaScript function on an isolated worker, calling device tools on the devices named in `devices` with `await tools.<name>(args)`, so the code loops, filters and decides each next step from the results in one call instead of a model round trip per step. |
 
-`run_code` is in the complete catalog, not the default `tools/list`, so it is reached by name or after `POKI_MCP_TOOLS=all`. The sandbox exposes only `tools`, `input` and `console`: no require, file system, network, process or timers. A tool error throws and the code can catch it; an action receipt with `sent=false` or an unknown outcome stops the script and returns the steps already run, as `batch_commands` does; cancellation and timeout also stop it and cancel the device call in progress. The result lists every tool call with its name, elapsed time and receipt. Default limits are 120 seconds and 60 tool calls, set with `timeout_seconds` and `max_tool_calls`. Use it for predictable multi-step work such as scrolling until something appears and then reading it; use a single tool for a one-step action, and return to the model when the next step needs visual judgement.
+`run_code` is in the complete catalog, not the default `tools/list`, so it is reached by name or after `POKI_MCP_TOOLS=all`. `devices` lists the 1 to 8 devices the script may use. Every `tools.<name>(...)` call names its `device`, which must be one of them, and the script holds the input lock of exactly those devices while it runs. The sandbox exposes only `tools`, `input` and `console`: no require, file system, network, process or timers. A tool error throws and the code can catch it; an action receipt with `sent=false` or an unknown outcome stops the script and returns the steps already run, as `batch_commands` does; cancellation and timeout also stop it and cancel the device call in progress. The result lists every tool call with its name, elapsed time and receipt. Default limits are 120 seconds and 60 tool calls, set with `timeout_seconds` and `max_tool_calls`. Use it for predictable multi-step work such as scrolling until something appears and then reading it; use a single tool for a one-step action, and return to the model when the next step needs visual judgement.
 
 ## Agent skills
 
@@ -199,18 +220,18 @@ Accessibility can miss changes that affect only pixels, such as Calculator's dis
 
 ## Device ownership and stopping work
 
-Consecutive calls do not require a lease. For exclusive ownership across several calls, call `acquire_device` with an explicit device ID or unambiguous name. Acquisition resolves the device without booting it and returns `lease_id`, `device`, `state` and `expires_at`. Each session can hold one device lease. While holding it, release before switching to another device. Acquisition is serialized with ordinary operations; renewal, release and cancellation bypass that queue.
+Consecutive calls do not require a lease. For exclusive ownership across several calls, call `acquire_device` with an explicit device ID or unambiguous name. Acquisition resolves the device without booting it and returns `lease_id`, `device`, `state` and `expires_at`. A session may hold leases on several devices at once, one per device. Acquisition is serialized with ordinary operations; renewal, release and cancellation bypass that queue.
 
-- `acquire_device({device, ttl_seconds?})`: default TTL 120 seconds, allowed integer range 1–600 seconds. Another session cannot acquire, observe or operate this device during the lease. Selection, aliases, automatic selection, batch steps and existing simulator startup all pass through the same device check. Creating a new simulator reserves its creation operation before running it; an existing lease must be released first.
-- `renew_device({lease_id, ttl_seconds?})`: extend the matching session's active lease from the current time. Long operations do not renew automatically. Renew before expiry, including while a long tool is running.
-- `release_device({lease_id})`: invalidate accepted work, stop recording and simulated location owned by this session, await cleanup, then make the device available. A lease stays `releasing` until cleanup finishes.
-- `cancel_device({lease_id?})`: stop **all previously accepted work in this MCP session**, including queued calls made without a lease, and stop its background recording/location. If supplied, `lease_id` must match this session's active lease. Other sessions are unaffected. New work may be submitted after cleanup finishes; an old queued operation never resumes as an unleased operation.
+- `acquire_device({device, ttl_seconds?})`: default TTL 120 seconds, allowed integer range 1–600 seconds. Another session cannot acquire, observe or operate this device during the lease. Device names, ids, batch steps and existing simulator startup all pass through the same device check. New simulators are created one at a time.
+- `renew_device({lease_id, ttl_seconds?})`: extend the matching lease of this session from the current time. Long operations do not renew automatically. Renew before expiry, including while a long tool is running.
+- `release_device({lease_id})`: invalidate this session's accepted work on that lease's device, stop the recording and simulated location this session owns there, await cleanup, then make the device available. Work on the session's other devices carries on. A lease stays `releasing` until cleanup finishes. A lease that expires stops only its own device's work in the same way.
+- `cancel_device({device?, lease_id?})`: stop previously accepted work in this MCP session, including queued calls made without a lease, and stop its background recording/location. With `device`, only that device's work stops. With `lease_id`, which must match an active lease of this session, only that lease's device's work stops; given together, both must name the same device. With neither, **all of the session's work** stops. Other sessions are unaffected. New work may be submitted after cleanup finishes; an old queued operation never resumes as an unleased operation.
 
-The stop result identifies its scope, reason and cleanup outcomes. Cancellation stops owned local processes and waits; it cannot undo input already dispatched to the device. Inspect the screen before retrying an unknown outcome. The stdio bridge forwards SDK request cancellation to the corresponding daemon operation, including waits, device helpers and the local approval dialog. A normal HTTP response closing is not a session cancellation. Normal stdio EOF or termination requests session cleanup; a crashed client holding an explicit lease is bounded by its TTL. A client without a lease has no persistent ownership guarantee after an abnormal exit; use an explicit lease for recordings and multi-call tasks.
+The stop result identifies its scope, reason and cleanup outcomes. Cancellation stops owned local processes and waits; it cannot undo input already dispatched to the device. Inspect the screen before retrying an unknown outcome. The stdio bridge forwards SDK request cancellation to the corresponding daemon operation, including waits, device helpers and the local approval dialog. A normal HTTP response closing is not a session cancellation. Normal stdio EOF or termination requests session cleanup. The stdio process sends its pid, so the daemon drops the session of a process that died without closing it once that session has no work left; a crashed client holding an explicit lease is bounded by its TTL. A client without a lease has no persistent ownership guarantee after an abnormal exit; use an explicit lease for recordings and multi-call tasks.
 
 `list_devices` still reports discovery and occupancy (`occupied`, `owned_by_session`, `state`, `expires_at`) without exposing another session's task. Occupied physical devices are not queried for additional name/model information by other sessions. If an alias has not been discovered, use the displayed device ID. An unleased recording or location must be stopped by its owner before a different session can acquire that device.
 
-This arbitration exists only in **one shared Poki daemon**. Different daemon instances and different `POKI_MCP_STATE_DIR` values are independent. It does not lock out other control software or a person touching the screen. Run one daemon for the clients that need to coordinate; do not start multiple daemons against the same endpoint directory. No persistent task database or recovery across daemon restarts is provided.
+This arbitration exists only in **one shared Poki daemon**. Different daemon instances and different `POKI_MCP_STATE_DIR` values are independent. It does not lock out other control software or a person touching the screen. Clients with the same state directory share one daemon automatically; do not start multiple daemons against the same endpoint directory. No persistent task database or recovery across daemon restarts is provided.
 
 ## Observations, deadlines and receipts
 
@@ -220,7 +241,7 @@ This arbitration exists only in **one shared Poki daemon**. Different daemon ins
 
 Input receipts retain `sent`, `text_verified`, `submit_sent` and other confirmed facts when recording recovery fails. The separate `recording` object reports recovery failure. Unconfirmed delivery remains `outcome: "unknown"`; it is never automatically replayed. Automatic recovery is suspended while native input intentionally interrupts the media stream. Normal reconnection after an explicit input is counted as `input_reconnects` and does not consume the automatic retry budget, so healthy multi-step recording is not limited to three inputs. Only background recovery from unexpected stream disconnects consumes `automatic_retries`, at most three per recording lifetime. Each reconnect still has a five-second first-frame deadline. `reconnects` is the total of these two counters. A failed reconnect leaves an explicit error; stop/start a recording to begin a new automatic budget. Stop, release, cancellation and session cleanup disable retries and await owned recording processes, and cleanup reports finalization errors separately.
 
-Batch results retain the executed prefix and each step's `elapsed_ms`, then report `stop_reason`. A step's `device` applies to that step alone; steps without one use the session selection, and the screen read after the last step comes from the device that step used. Human handoff, cancellation, expiry, timeout and unknown input outcomes always stop subsequent steps even with `stop_on_error=false`. A successful action's receipt remains present if stopping occurs later. A detected human-only prompt in `handle_alert`, `take_screenshot`, `observe_device` or the screen read after the last step sets the same `needs_human_action` stop reason; observation tools retain their captured image and structure. With the default `stop_on_error`, every step is checked before any runs, so a mistyped step costs nothing. The last block carries `screen`, and after a stop also `failed_step`, `remaining_steps` and `next`, so the following call can fix one step and send only what is left.
+Batch results retain the executed prefix and each step's `elapsed_ms`, then report `stop_reason`. `batch_commands` takes one required top-level `device`, and every step runs on it. A step that names `device` is rejected before any step runs; send steps for another device in their own `batch_commands` call. Inside a batch, `start_simulator` boots the batch's device and takes no `simulator` or `model`. Human handoff, cancellation, expiry, timeout and unknown input outcomes always stop subsequent steps even with `stop_on_error=false`. A successful action's receipt remains present if stopping occurs later. A detected human-only prompt in `handle_alert`, `take_screenshot`, `observe_device` or the screen read after the last step sets the same `needs_human_action` stop reason; observation tools retain their captured image and structure. With the default `stop_on_error`, every step is checked before any runs, so a mistyped step costs nothing. The last block carries `screen`, and after a stop also `failed_step`, `remaining_steps` and `next`, so the following call can fix one step and send only what is left.
 
 Tool responses include `_meta.timing.stages` with queue, capture, AX, OCR, input, recording recovery and external-process durations where exercised. Each stage has an ID and parent ID. Parent durations include their children, so do not add parents and children. External-process time includes helper startup, connection and work inside the helper; those internal costs are not separately measured. Timing metadata contains no input text, device identifiers or image content, and it does not measure model reasoning or client round-trip time. No end-to-end speed multiplier is claimed.
 
@@ -233,8 +254,24 @@ Tool responses include `_meta.timing.stages` with queue, capture, AX, OCR, input
 
 ## Approval & Clipboard Behavior
 
-- **Local approval dialog**: Installing or uninstalling apps, building and running projects, opening URLs, downloading app containers, and reading or writing the clipboard trigger a local macOS approval dialog by default.
-- Setting `POKI_MCP_APPROVAL_MODE=allow` bypasses this local daemon prompt for preapproved workflows, but it **never** auto-completes iOS/macOS system authorization dialogs or makes `request_human_action` succeed automatically.
+Seven tools are gated: `install_app`, `uninstall_app`, `build_and_run`, `open_url`, `download_app_container`, `get_clipboard` and `set_clipboard`. `POKI_MCP_APPROVAL_MODE` decides who approves them:
+
+| Mode | Who approves |
+| --- | --- |
+| `ask` (alias `ask-human`) | Poki shows a dialog on its own machine (osascript on macOS, zenity on Linux) and waits. A declined or unanswered dialog runs nothing. |
+| `host` | Poki shows no dialog. The MCP client decides, from the tool annotations and its own tool permissions. |
+| `allow` | Nobody is asked. The operator accepted that. |
+
+- **Default**: `host` on a Linux host whose environment has neither `DISPLAY` nor `WAYLAND_DISPLAY`, and `ask` everywhere else. An explicit value always wins. An unknown value is an error, and the daemon does not start.
+- **The daemon's environment decides**, not the client's. A daemon started automatically by a client keeps that client's environment. A stdio process whose own environment would choose a different mode prints a warning on stderr, and the daemon's mode applies.
+- **Annotations**: in every mode, `tools/list` marks the gated tools so that a client can ask before running them: `destructiveHint: true` on `install_app`, `uninstall_app`, `build_and_run`, `open_url` and `set_clipboard`; `openWorldHint: true` on `open_url`, `download_app_container`, `get_clipboard` and `set_clipboard`.
+- **Results**: a gated call reports who let it run, for example `"approval": {"mode": "host", "approved_by": "mcp-client"}` in host mode. `poki_mcp_status.approval_mode` reports `ask-human`, `host` or `operator-preapproved`, and `approval_covers` lists the gated tools.
+- **`request_human_action`** is refused in `host` mode with an error that tells the model to ask the user in the conversation.
+- `allow` and `host` **never** auto-complete iOS/macOS system authorization dialogs or make `request_human_action` succeed automatically.
+- Approval covers only these tools. Taps, typing and other input inside apps, including a delete confirmed with a tap, are not gated.
+
+> **Host mode relies on the client.** A client that runs tools without asking runs the gated tools unconfirmed. LobeHub's MCP tool permission defaults to `auto`. With Poki as a stdio MCP server on a Linux machine without a display, reached through LobeHub's `lh connect`, the mode is `host` by default, so these seven tools run with **no confirmation at all** unless you set them to require approval in the LobeHub connector's tool settings. To have Poki ask instead, run it where a dialog can appear and set `POKI_MCP_APPROVAL_MODE=ask`.
+
 - **Unicode paste & clipboard restoration**:
   - Unicode text entry may use the device clipboard. On physical devices, Poki MCP attempts to save and restore a complete clipboard snapshot; if full restoration is not possible, the response explicitly reports restoration as unavailable.
   - The snapshot is held only in memory for the duration of that single operation and cannot be restored by a subsequent tool call after a human handoff.

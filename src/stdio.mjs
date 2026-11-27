@@ -77,7 +77,14 @@ const server = createServer(async (name, args, extra) => {
   try {
     extra.signal.throwIfAborted();
     const client = await remoteClient();
-    return await client.callTool({ name, arguments: args, _meta: { 'poki/request_id': id, 'poki/order': order } }, { timeout: 3700000, signal: extra.signal });
+    const send = () => client.callTool({ name, arguments: args, _meta: { 'poki/request_id': id, 'poki/order': order } }, { timeout: 3700000, signal: extra.signal });
+    const result = await send();
+    // A service this kind of shim started, refusing the call before it touched a device because its
+    // files changed (an update): replace it, as a new shim would, and send the call once more.
+    if (!(result.isError && result._meta?.stale_code === 'auto')) return result;
+    try { await connectDaemon(); }
+    catch (error) { return { isError: true, content: [{ type: 'text', text: error.message }] }; }
+    return send();
   } finally { extra.signal.removeEventListener('abort', cancel); }
 });
 const transport = new StdioServerTransport();

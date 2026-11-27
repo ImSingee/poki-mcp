@@ -47,7 +47,7 @@ async function askHumanLinux(message, seconds) {
         await execute('zenity', ['--question', '--title=Poki MCP', `--text=${message}`, '--ok-label=确认', '--cancel-label=取消', `--timeout=${Math.ceil(seconds)}`], { timeout: (seconds + 10) * 1000 });
         return { status: 'done', completed: true, message: 'The user confirmed the dialog. Inspect the device before continuing.' };
     } catch (error) {
-        if (error.code === 'ENOENT') throw new Error('No approval dialog is available on this Linux host because zenity is not installed. Install zenity, or set POKI_MCP_APPROVAL_MODE=allow only if unapproved sensitive actions are acceptable here.');
+        if (error.code === 'ENOENT') throw new Error('No approval dialog is available on this Linux host because zenity is not installed. Install zenity, or set POKI_MCP_APPROVAL_MODE=host to let the MCP client approve them, or allow only if unapproved sensitive actions are acceptable here.');
         const status = error.code === 5 ? 'timeout' : 'cancelled';
         return { status, completed: false, message: 'The user did not confirm completion.' };
     }

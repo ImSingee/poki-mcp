@@ -48,18 +48,14 @@ node bin/prepare-device.mjs
 
 它会通过 pymobiledevice3 安装开发者磁盘镜像；如果镜像已安装，它只会报告这一情况，不做任何事。
 
-启动服务器并保持运行：
-
-```sh
-npm start
-```
-
 在同一目录下，把 MCP 服务器注册到你的客户端：
 
 ```sh
 claude mcp add --scope user poki-mcp -- node "$PWD/src/stdio.mjs"   # Claude Code
 codex mcp add poki-mcp -- node "$PWD/src/stdio.mjs"                 # Codex
 ```
+
+第一次调用工具时，Poki 守护进程会在后台自动启动；空闲 10 分钟后它会退出，下一次调用会再次启动它。只有需要长期运行或通过网络提供服务时才运行 `npm start`，见 [LINUX.md](LINUX.md#running-the-daemon-as-a-user-service)。
 
 状态数据存放在 `$XDG_STATE_HOME/PokiMCP`（默认 `~/.local/state/PokiMCP`），除非设置了 `POKI_MCP_STATE_DIR`。
 
@@ -70,7 +66,9 @@ node bin/call.mjs list_devices   # 找到你的设备 UUID
 node bin/call.mjs list_elements '{"device":"<device UUID>"}'
 ```
 
-> **注意：** Poki 操控的是你的真实 iPhone。你让它发消息或付款，它真会执行。屏幕内容会被发送到你配置的模型服务。敏感工具会先征求批准——在 Linux 上批准对话框走 `zenity`；没有 zenity 时，敏感工具会显式报错，而不是悄无声息地放行。
+每个设备工具都需要 `device`，即 `list_devices` 返回的 id。0.2.0 版本改变了工具接口，见 [0.2.0 中的不兼容变更](docs/tools.md#breaking-changes-in-020)。
+
+> **注意：** Poki 操控的是你的真实 iPhone。你让它发消息或付款，它真会执行。屏幕内容会被发送到你配置的模型服务。敏感工具（安装应用、打开链接、剪贴板）需要批准。有显示环境时，Poki 通过 `zenity` 对话框询问。在没有显示环境的 Linux 主机上，它以 `host` 模式运行：不弹对话框，由你的 MCP 客户端决定。LobeHub 默认不经询问就运行 MCP 工具（`auto`），所以请在它的连接器设置里把这些工具设为需要批准。见[批准说明](docs/tools.md#approval--clipboard-behavior)。
 
 **Poki Agent。** 独立终端智能体在 Linux 上同样可用（`npm ci --prefix agent`，然后 `poki login`），见[运行 Poki Agent](agent/README.md)。唯一的例外是 iMessage 通道：它需要 BlueBubbles 服务器，而后者本身需要一台 Mac。Telegram 通道则没有问题。
 

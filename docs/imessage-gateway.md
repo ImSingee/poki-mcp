@@ -55,7 +55,7 @@ node bin/poki-imessage.mjs --check
 
 This loads the password privately, authenticates and reads only the configured conversation. It sends no reply and starts no phone task. A successful check confirms the gateway connection and scoped read, not phone automation or message delivery.
 
-Once you have prepared Poki's MCP service, the selected device and model access, start the channel explicitly:
+Once you have prepared Poki's MCP service, the phone and model access, start the channel explicitly:
 
 ```sh
 node bin/poki-imessage.mjs

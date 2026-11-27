@@ -13,14 +13,13 @@ npm ci --prefix agent
 
 Run these commands from the repository root. `bin/setup` checks the required macOS tools, fetches the pinned idevice dependency, builds its command-line tools, installs the MCP dependencies and builds the native bridges. Running `npm run build:native` alone does not prepare idevice in a new checkout.
 
-Start an MCP server in a separate terminal. Choose its state directory explicitly when you need an isolated instance.
+Poki Agent starts its own MCP stdio process, which starts the shared Poki daemon when none is running. To use an isolated instance, choose its state directory explicitly in the terminal that starts Poki Agent:
 
 ```sh
 export POKI_MCP_STATE_DIR="$PWD/agent/.runtime/mcp"
-node src/daemon.mjs --port 0
 ```
 
-Set the same `POKI_MCP_STATE_DIR` in the terminal that starts Poki Agent. The poki task command selects a single connected physical phone automatically. Use --device when multiple phones are connected or when targeting a simulator.
+To keep a daemon running instead, start it in a separate terminal with the same `POKI_MCP_STATE_DIR`: `node src/daemon.mjs --port 0`. Without `--device`, the poki task command uses the device that `list_devices` names as `default`, which it does only when exactly one device is listed, a previously used simulator included. Use `--device` when more than one device is listed or to target a particular one.
 
 ## Configure OpenAI access
 

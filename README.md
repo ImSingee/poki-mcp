@@ -69,18 +69,17 @@ node bin/prepare-device.mjs
 This installs the DeveloperDiskImage through pymobiledevice3. If the
 image is already installed, it reports that and does nothing.
 
-Start the server and keep it running:
-
-```sh
-npm start
-```
-
 Register the MCP server with your client, from the same directory:
 
 ```sh
 claude mcp add --scope user poki-mcp -- node "$PWD/src/stdio.mjs"   # Claude Code
 codex mcp add poki-mcp -- node "$PWD/src/stdio.mjs"                 # Codex
 ```
+
+The first tool call starts the Poki daemon in the background. It exits
+after 10 idle minutes, and the next call starts it again. Run
+`npm start` only for a long-lived or networked service; see
+[LINUX.md](LINUX.md#running-the-daemon-as-a-user-service).
 
 State lives in `$XDG_STATE_HOME/PokiMCP` (default
 `~/.local/state/PokiMCP`) unless `POKI_MCP_STATE_DIR` is set.
@@ -92,11 +91,19 @@ node bin/call.mjs list_devices   # Find your device UUID
 node bin/call.mjs list_elements '{"device":"<device UUID>"}'
 ```
 
+Every device tool needs `device`, an id from `list_devices`. Version
+0.2.0 changed the tool interface; see
+[Breaking changes in 0.2.0](docs/tools.md#breaking-changes-in-020).
+
 > **Note:** Poki controls your real iPhone. If you ask it to send
 > messages or make payments, it will. Screen contents are sent to your
-> configured model service. Sensitive tools ask for approval first —
-> on Linux the approval dialog uses `zenity`; without it, sensitive
-> tools raise an explicit error instead of silently proceeding.
+> configured model service. Sensitive tools (installing apps, opening
+> URLs, the clipboard) need approval. With a display, Poki asks through
+> a `zenity` dialog. On a Linux host without a display it runs in
+> `host` mode: it shows no dialog, and your MCP client decides.
+> LobeHub runs MCP tools without asking by default (`auto`), so set
+> these tools to require approval in its connector settings. See
+> [approval](docs/tools.md#approval--clipboard-behavior).
 
 **Poki Agent.** The standalone terminal agent works on Linux the same
 way (`npm ci --prefix agent`, then `poki login`); see

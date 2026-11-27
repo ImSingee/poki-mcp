@@ -12,7 +12,7 @@ import { stateDir, endpointFile } from './config.mjs';
 import { startUpdateChecks } from './update-check.mjs';
 import { warnIfNativeStale } from './build-info.mjs';
 import { closeLocalHelpers, remoteDevices, warmRemote } from './remote.mjs';
-import { version, codeFingerprint, currentCodeFingerprint } from './build-info.mjs';
+import { version, codeFingerprint, currentCodeFingerprint, setServiceStart } from './build-info.mjs';
 import { approvalMode } from './human.mjs';
 import { runningDaemon, alive } from './daemon-launch.mjs';
 
@@ -20,6 +20,7 @@ import { runningDaemon, alive } from './daemon-launch.mjs';
 // otherwise, leaves when another daemon already serves this state directory, and exits once it has
 // been idle for POKI_DAEMON_IDLE_EXIT_MS. Started with npm start, it keeps running until stopped.
 const auto = process.argv.includes('--auto');
+if (auto) setServiceStart('auto');
 const portIndex = process.argv.indexOf('--port');
 const port = portIndex < 0 ? (auto ? 0 : 47825) : Number(process.argv[portIndex + 1]);
 if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Invalid port');

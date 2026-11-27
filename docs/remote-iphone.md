@@ -31,7 +31,7 @@ For LAN-only use, see [LAN addresses that change with DHCP](#lan-addresses-that-
    This verifies a RemotePairing record over the existing trusted USB connection.
 
    In both modes the pairing key remains in the private state directory. Ordinary operations never trigger a new pairing flow.
-4. Start Poki with the same state directory. Call `take_screenshot` with the selected device ID while Wi-Fi is connected. Confirm the actual screen before disconnecting USB or leaving the LAN.
+4. Use Poki with the same state directory. Call `take_screenshot` with this device's ID as `device` while Wi-Fi is connected. Confirm the actual screen before disconnecting USB or leaving the LAN.
 5. For a cellular/Tailscale route, disconnect Wi-Fi from Control Center, leaving the Wi-Fi setting enabled, Tailscale connected, and the phone unlocked. Verify the phone is using cellular data.
 
 The configured device uses RemotePairing even when a USB connection is present, so testing does not silently fall back to USB.
@@ -69,7 +69,7 @@ the Bonjour name again. A working tunnel remains usable if that replacement fail
 
 Existing numeric-IP configurations remain unchanged. To opt in, rerun setup
 with the name while the trusted phone is connected over USB, after calling
-`disconnect_device` to end the selected device's old helper. Existing valid
+`disconnect_device` with that device's ID to end its old helper. Existing valid
 pairing records are reused. The name must still be advertised and reachable:
 this does not discover renamed hosts, follow changed service ports, scan all
 phones automatically, or make Bonjour work across different networks. Keep an
@@ -118,7 +118,7 @@ Device-management paths such as app installation, process termination, Settings 
 
 ## Return to USB or local Wi-Fi
 
-Call `disconnect_device` for the selected iPhone. In this installation's `remote-devices.json`, remove only that device's entry. Use the same `POKI_MCP_STATE_DIR` as the daemon, or the default `~/Library/Application Support/PokiMCP` when it is unset. Restart the daemon and connect the phone over USB or local Wi-Fi. Merely plugging in USB does not override a remote entry. Keep the private pairing files if you intend to re-enable RemotePairing.
+Call `disconnect_device` with that iPhone's ID as `device`. In this installation's `remote-devices.json`, remove only that device's entry. Use the same `POKI_MCP_STATE_DIR` as the daemon, or the default `~/Library/Application Support/PokiMCP` when it is unset. Restart the daemon (restart a `npm start` service; stop an automatic daemon, whose pid is in `mcp.json`, and the next call starts a new one) and connect the phone over USB or local Wi-Fi. Merely plugging in USB does not override a remote entry. Keep the private pairing files if you intend to re-enable RemotePairing.
 
 If the first connection reports that the saved pairing record did not verify, rename `remote/DEVICE_ID/pairing.plist` within the same private state directory, then run `bin/prepare-remote.mjs` again to create a new record. Use the wireless mode on iOS 27+ or the USB mode on older systems. Do not share the old or new pairing file.
 

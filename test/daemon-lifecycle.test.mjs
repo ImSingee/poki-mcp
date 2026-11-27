@@ -8,6 +8,7 @@ import { once } from 'node:events';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { fixture, value } from './fixture.mjs';
+import { olderRelease } from '../src/daemon-launch.mjs';
 
 const endpointOf = f => readFile(join(f.dir, 'state/mcp.json'), 'utf8').then(JSON.parse).catch(() => null);
 const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
@@ -162,4 +163,26 @@ test('a token the running service rejects is reported quickly, without the token
   assert.match(result.content[0].text, /rejected the token/);
   assert.ok(!result.content[0].text.includes(entry.token));
   assert.ok(performance.now() - started < 10000);
+});
+
+test('a daemon from an earlier release counts as older; a later one does not', () => {
+  assert.equal(olderRelease('0.1.1', '0.2.0'), true);
+  assert.equal(olderRelease('0.2.0', '0.10.0'), true);
+  assert.equal(olderRelease('0.2.0', '0.2.0'), false);
+  assert.equal(olderRelease('0.3.0', '0.2.0'), false);
+  assert.equal(olderRelease('dev', '0.2.0'), true);
+});
+
+test('a connected client whose automatic service turns out to run older code gets the call through a new one', { timeout: 40000 }, async t => {
+  const f = await fixture(t, { daemon: false });
+  await f.set({ label: 'Ready' });
+  assert.notEqual((await f.call('list_elements')).isError, true);
+  const old = await endpointOf(f);
+  await touchCode(f);
+  // The same client, still connected to the old service.
+  const result = await f.call('list_elements');
+  assert.notEqual(result.isError, true, result.content[0].text);
+  const current = await endpointOf(f);
+  assert.notEqual(current.pid, old.pid);
+  await until(() => !alive(old.pid), 10000, 'the old service to stop');
 });

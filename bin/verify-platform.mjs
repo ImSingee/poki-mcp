@@ -35,7 +35,6 @@ try {
   const devices=await call('list_devices',{include_all_simulators:true});
   assert.ok(devices.devices.some(d=>d.id===device&&d.kind==='simulator'&&d.name==='Poki MCP QA'));
   await call('start_simulator',{simulator:device});
-  await call('select_device');
   const before=await call('get_device_info',{include_settings:true});
   const clipboard=await call('get_clipboard');
   // iOS 27 simulators leave the pasteboard empty after simctl pbcopy. On any other OS the same error is a failure.

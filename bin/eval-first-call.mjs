@@ -137,7 +137,7 @@ const tasks = {
 const fastEntries = new Set(['execute_plan', 'batch_commands']);
 const discovery = new Set(['ToolSearch', 'tool_search', 'list_mcp_resources', 'list_mcp_resource_templates', 'Skill', 'shell']);
 // Anything else is a UI action, so "the first UI action" means the same thing in every group.
-const setup = new Set(['list_devices', 'select_device', 'start_simulator', 'get_device_info', 'poki_mcp_status', 'launch_app', 'terminate_app', 'list_apps', 'list_elements', 'observe_device', 'take_screenshot', 'get_foreground_app', 'acquire_device', 'renew_device', 'release_device', 'cancel_device', 'wait', 'wait_for']);
+const setup = new Set(['list_devices', 'start_simulator', 'get_device_info', 'poki_mcp_status', 'launch_app', 'terminate_app', 'list_apps', 'list_elements', 'observe_device', 'take_screenshot', 'get_foreground_app', 'acquire_device', 'renew_device', 'release_device', 'cancel_device', 'wait', 'wait_for']);
 const looks = new Set(['list_elements', 'observe_device', 'take_screenshot', 'get_foreground_app', 'wait_for']);
 const shortName = name => name.replace(/^mcp__poki-mcp__/, '');
 const overlapRounds = calls => {

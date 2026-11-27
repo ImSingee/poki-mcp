@@ -30,9 +30,16 @@ export const codeFingerprint = fingerprint(startupCode);
 // The code on disk now, which a running daemon must match (see daemon-launch.mjs).
 export const currentCodeFingerprint = async () => fingerprint(await codeMarker());
 
+// How this process was started: 'auto' when a stdio shim started it (daemon.mjs --auto), which a
+// shim replaces by itself; 'manual' for npm start, which only its operator restarts.
+let serviceStart = 'manual';
+export function setServiceStart(value) { serviceStart = value; }
+// Thrown before a tool touches a device, so the call can be sent again to a restarted service.
 export async function requireCurrentCode() {
   if (await codeMarker() !== startupCode) {
-    throw new Error('The service is running old code. Stop the running service and restart it with npm start.');
+    throw Object.assign(new Error(serviceStart === 'auto'
+      ? 'The service is running old code: its files changed after it started. It is replaced once it is idle; send the call again.'
+      : 'The service is running old code. Stop the running service and restart it with npm start.'), { code: 'stale_code', serviceStart });
   }
 }
 

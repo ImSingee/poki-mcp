@@ -8,9 +8,19 @@ license: AGPL-3.0-only
 
 ## Tool discovery
 
-The default `tools/list` contains the tools for device selection, screen reads, app launch, touch, text input, navigation, prompts, and batches. For tools outside that list, read `docs/tools.md` in the Poki checkout used by your registered MCP server. This skill can be copied into a client skill directory.
+The default `tools/list` contains the tools for device discovery, screen reads, app launch, touch, text input, navigation, prompts, and batches. For tools outside that list, read `docs/tools.md` in the Poki checkout used by your registered MCP server. This skill can be copied into a client skill directory.
 
 Set `POKI_MCP_TOOLS=all` in the MCP client's process environment and reconnect to list the complete catalog. Tools absent from the default list still accept direct calls. Device actions can run inside `batch_commands`; lease management calls must stay outside a batch. Consecutive calls do not require `acquire_device`. Poki Agent selects the complete catalog for its own MCP process and retains its own tool allowlist.
+
+## Name the device on every call
+
+Call `list_devices` once and pass one of its ids as `device` on every device tool call; an exact device name also works. When exactly one device is listed, its `default` field names it. There is no selected device to fall back on. `batch_commands` takes one top-level `device`, and its steps name none. `run_code` takes `devices`, and each `tools.<name>(...)` call in the script names one of them as `device`. `start_simulator` returns the new simulator's id; use it as `device` afterwards. Calls to different devices may run at the same time; calls to one device run in the order sent.
+
+## Approval
+
+`poki_mcp_status.approval_mode` says who approves `install_app`, `uninstall_app`, `build_and_run`, `open_url`, `download_app_container`, `get_clipboard` and `set_clipboard`. With `ask-human`, Poki shows a dialog on its host and waits. With `host`, Poki shows no dialog: your client decides, and a client that runs tools without asking runs them unconfirmed. In `host` mode `request_human_action` is refused, so ask the user in the conversation instead. Run these tools only when the user's task calls for them.
+
+## Code that decides each step
 
 `run_code` is in the complete catalog, not the default list. It runs an async JavaScript function that calls device tools with `await tools.<name>(args)`, so the code reads a result and decides the next step in one call instead of a model round trip per step. Prefer it when a task is predictable but depends on what each step returns, such as scrolling until a row appears and then reading its value. A tool error throws and the code can catch it; an action that reports `sent=false` or an unknown outcome stops the script, as a batch stops. The sandbox has no require, file system, network, process or timers.
 
