@@ -34,12 +34,13 @@ const instructions = {
 
 export class PairingJobs {
   jobs = new Map();
-  constructor({ stateDir = defaultStateDir, native = pokiNative, limitMs = pairingLimitMs, retainMs = retentionMs, nativeRequest = jobRequest, inventoryChanged = () => {}, ensureImage = ensureDeveloperImage } = {}) {
-    Object.assign(this, { stateDir, native, limitMs, retainMs, nativeRequest, inventoryChanged, ensureImage });
+  // now: the clock for start, end and retention times (tests pass their own).
+  constructor({ stateDir = defaultStateDir, native = pokiNative, limitMs = pairingLimitMs, retainMs = retentionMs, nativeRequest = jobRequest, inventoryChanged = () => {}, ensureImage = ensureDeveloperImage, now = Date.now } = {}) {
+    Object.assign(this, { stateDir, native, limitMs, retainMs, nativeRequest, inventoryChanged, ensureImage, now });
   }
   active() { return [...this.jobs.values()].find(job => !isTerminal(job.state)); }
   busy() { return Boolean(this.active()); }
-  prune(now = Date.now()) {
+  prune(now = this.now()) {
     for (const [id, job] of this.jobs) if (isTerminal(job.state) && now - job.ended_ms >= this.retainMs) this.jobs.delete(id);
   }
   get(id) {
@@ -61,7 +62,7 @@ export class PairingJobs {
     const running = this.active();
     if (running) return { job: view(running), existing: true };
     const id = `pair-${randomBytes(6).toString('hex')}`;
-    const job = { id, state: 'starting', host_name: name || defaultHostName(), started_at: new Date().toISOString(), started_ms: Date.now(), expires_ms: Date.now() + this.limitMs, history: [] };
+    const job = { id, state: 'starting', host_name: name || defaultHostName(), started_at: new Date(this.now()).toISOString(), started_ms: this.now(), expires_ms: this.now() + this.limitMs, history: [] };
     if (device) Object.assign(job, { kind: 'prepare', device: { id: device.id, name: device.name } });
     this.jobs.set(id, job);
     this.transition(job, 'starting');
@@ -73,7 +74,7 @@ export class PairingJobs {
     Object.assign(job, fields, { state, updated_at: new Date().toISOString() });
     job.history.push({ state, at: job.updated_at });
     if (isTerminal(state)) {
-      job.ended_ms = Date.now();
+      job.ended_ms = this.now();
       clearTimeout(job.timer);
       job.controller?.abort(new DOMException(`Pairing ${state}`, 'AbortError'));
     }

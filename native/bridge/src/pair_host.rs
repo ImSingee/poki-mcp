@@ -89,28 +89,48 @@ async fn bind_pairing_listener(port: u16) -> Result<TcpListener> {
 pub enum Stop {
     /// SIGTERM or SIGINT: the daemon cancelled the pairing job, or the person pressed Ctrl-C.
     Signal,
+    /// Standard input closed: the process that started this one is gone (a daemon that was killed
+    /// hard never sends SIGTERM).
+    ParentGone,
     /// Nobody finished pairing in Settings within the limit.
     Timeout,
 }
 
 const TIMEOUT_MESSAGE: &str = "Wireless pairing was not finished in Settings within 10 minutes. Run the wireless pairing command again to retry.";
 const CANCELLED_MESSAGE: &str = "Wireless pairing was cancelled.";
+const PARENT_GONE_MESSAGE: &str =
+    "Wireless pairing stopped: the process that started it is gone (its standard input closed).";
 
-/// Resolves when the pairing limit passes or the process is asked to stop.
-async fn stop_signal() -> Stop {
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
+/// Resolves once standard input reaches end of file or fails.
+async fn input_closed() {
+    use tokio::io::AsyncReadExt;
+    let mut stdin = tokio::io::stdin();
+    let mut buffer = [0u8; 256];
+    while matches!(stdin.read(&mut buffer).await, Ok(n) if n > 0) {}
+}
+
+/// Everything that ends a pairing early, registered before anything is advertised: a SIGTERM or
+/// SIGINT that arrives from now on is recorded and ends the pairing with a goodbye, never by the
+/// default disposition. `watch_input`: stop when standard input closes as well.
+fn stop_sources(watch_input: bool) -> Result<impl std::future::Future<Output = Stop>> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    Ok(async move {
+        let parent = async {
+            if watch_input {
+                input_closed().await
+            } else {
+                std::future::pending::<()>().await
             }
-            Err(_) => std::future::pending::<()>().await,
+        };
+        tokio::select! {
+            _ = tokio::time::sleep(PAIRING_LIMIT) => Stop::Timeout,
+            _ = terminate.recv() => Stop::Signal,
+            _ = interrupt.recv() => Stop::Signal,
+            _ = parent => Stop::ParentGone,
         }
-    };
-    tokio::select! {
-        _ = tokio::time::sleep(PAIRING_LIMIT) => Stop::Timeout,
-        _ = terminate => Stop::Signal,
-        _ = tokio::signal::ctrl_c() => Stop::Signal,
-    }
+    })
 }
 
 fn pairing_file_bytes(pairing_file: &RpPairingFile, host_name: &str) -> Result<Vec<u8>> {
@@ -198,6 +218,10 @@ async fn pair_host_until(
             emit(json!({"event":"cancelled"}));
             return Err(CANCELLED_MESSAGE.into());
         }
+        Err(Stop::ParentGone) => {
+            emit(json!({"event":"cancelled","reason":"parent_gone"}));
+            return Err(PARENT_GONE_MESSAGE.into());
+        }
         Err(Stop::Timeout) => {
             emit(json!({"event":"timeout"}));
             return Err(TIMEOUT_MESSAGE.into());
@@ -214,8 +238,13 @@ async fn pair_host_until(
     }))
 }
 
+/// Pairs until done, cancelled (SIGTERM, SIGINT, standard input closing) or the 10-minute limit.
+/// The stop sources exist before the `starting` event, so a caller that waits for it can always
+/// cancel cleanly.
 pub async fn pair_host(state_dir: &str, output: &str, name: &str, port: u16) -> Result<Value> {
-    pair_host_until(state_dir, output, name, port, stop_signal()).await
+    let stop = stop_sources(true)?;
+    emit(json!({"event":"starting"}));
+    pair_host_until(state_dir, output, name, port, stop).await
 }
 
 #[cfg(test)]
@@ -317,7 +346,7 @@ mod tests {
     async fn an_abandoned_pairing_stops_waiting_after_ten_minutes() {
         let started = tokio::time::Instant::now();
         let stop = tokio::select! {
-            stop = stop_signal() => stop,
+            stop = stop_sources(false).unwrap() => stop,
             _ = tokio::time::sleep(PAIRING_LIMIT * 2) => panic!("the pairing limit never fired"),
         };
         assert_eq!(stop, Stop::Timeout);
@@ -341,12 +370,17 @@ mod tests {
                     .enable_all()
                     .build()
                     .unwrap()
-                    .block_on(pair_host(
-                        state.to_str().unwrap(),
-                        output.to_str().unwrap(),
-                        &host_name,
-                        0,
-                    ))
+                    .block_on(async {
+                        // Not pair_host: the test's standard input may already be closed.
+                        pair_host_until(
+                            state.to_str().unwrap(),
+                            output.to_str().unwrap(),
+                            &host_name,
+                            0,
+                            stop_sources(false)?,
+                        )
+                        .await
+                    })
             }
         });
 
