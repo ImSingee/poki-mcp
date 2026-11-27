@@ -680,34 +680,37 @@ export class Session {
     }
     return this.coordinator.call(this, name, args, requestSignal, requestId, order);
   }
-  // Resolves once the calls before `order` in its stream have been placed on their queues, or after
-  // orderWaitMs when one of them never arrives (cancelled before it was sent).
+  // Resolves once every call before `order` in its stream has been placed on its queue, or after
+  // orderWaitMs when one of them never arrives (cancelled before it was sent): only then are the
+  // missing ones skipped.
   inOrder(order) {
     if (!order || typeof order.stream !== 'string' || !Number.isInteger(order.seq)) return Promise.resolve();
-    const streams = this.streams ??= new Map();
     const entry = this.stream(order.stream);
     if (order.seq <= entry.placed + 1) return Promise.resolve();
     return new Promise(resolve => {
-      const waiter = { seq: order.seq, resolve };
-      entry.waiters.push(waiter);
+      entry.waiters.push({ seq: order.seq, resolve });
       setTimeout(() => { entry.placed = Math.max(entry.placed, order.seq - 1); this.wakeStream(entry); }, orderWaitMs).unref();
     });
   }
-  // A shim numbers its calls from 1 for each daemon it reaches (stdio.mjs).
+  // A shim numbers its calls from 1 for each daemon it reaches (stdio.mjs). placed is the highest seq
+  // up to which every call has been placed; done holds calls placed after a gap.
   stream(id) {
     const streams = this.streams ??= new Map();
-    if (!streams.has(id)) streams.set(id, { placed: 0, waiters: [] });
+    if (!streams.has(id)) streams.set(id, { placed: 0, done: new Set(), waiters: [] });
     return streams.get(id);
   }
   // Also called for calls that take no place on a queue (lease management, a call cancelled before it
-  // arrived), so the calls after them do not wait for them.
+  // arrived), so the calls after them do not wait for them. A call placed after a gap does not let
+  // later calls past the gap.
   placed(order) {
     if (!order || typeof order.stream !== 'string' || !Number.isInteger(order.seq)) return;
     const entry = this.stream(order.stream);
-    entry.placed = Math.max(entry.placed, order.seq);
+    if (order.seq > entry.placed) entry.done.add(order.seq);
     this.wakeStream(entry);
   }
   wakeStream(entry) {
+    for (const seq of entry.done) if (seq <= entry.placed) entry.done.delete(seq);
+    while (entry.done.delete(entry.placed + 1)) entry.placed++;
     entry.waiters.sort((a, b) => a.seq - b.seq);
     while (entry.waiters.length && entry.waiters[0].seq <= entry.placed + 1) entry.waiters.shift().resolve();
   }

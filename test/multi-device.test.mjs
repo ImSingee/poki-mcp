@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fixture, value } from './fixture.mjs';
 import { approvalMode } from '../src/human.mjs';
+import { Session } from '../src/device.mjs';
 
 const A = 'fixture-phone', B = 'fixture-phone-2';
 const text = result => result.content.map(block => block.text ?? '').join('\n');
@@ -66,12 +67,13 @@ test('a session holds leases on two phones; releasing one leaves the other and i
 test('expiry of one lease does not stop the session\'s work on its other device', { timeout: 40000 }, async t => {
   const f = await fixture(t);
   await f.set({ twoPhones: true, label: 'Ready' });
-  assert.ok(value(await f.call('acquire_device', { device: A, ttl_seconds: 1 })).lease_id);
+  // B first, so A's short lease starts its clock right before the calls that outlast it.
   assert.ok(value(await f.call('acquire_device', { device: B, ttl_seconds: 60 })).lease_id);
-  const [onA, onB] = await Promise.all([f.call('wait', { device: A, seconds: 20 }), f.call('wait', { device: B, seconds: 2 })]);
+  assert.ok(value(await f.call('acquire_device', { device: A, ttl_seconds: 3 })).lease_id);
+  const [onA, onB] = await Promise.all([f.call('wait', { device: A, seconds: 20 }), f.call('wait', { device: B, seconds: 5 })]);
   assert.equal(onA._meta.stop_reason, 'expired');
   assert.notEqual(onB.isError, true, text(onB));
-  assert.equal(value(onB).waited, 2);
+  assert.equal(value(onB).waited, 5);
 });
 
 test('cancel_device with a device stops only that device\'s work', { timeout: 40000 }, async t => {
@@ -158,4 +160,37 @@ test('with a display the dialog still asks, and the annotations are there too', 
   await f.until(log => log.includes('"dialog":true'));
   assert.ok(value(await f.call('cancel_device')).stopped);
   assert.equal((await pending).isError, true);
+});
+
+// A shim numbers its calls; the daemon places them on their queues in that order. A call that takes no
+// queue place (lease management) or was cancelled before it arrived is placed at once, and must not let
+// a later call pass an earlier one that is still on its way.
+test('a call placed after a gap does not let later calls past the gap', async () => {
+  const session = new Session();
+  const order = seq => ({ stream: 'shim', seq });
+  let third = false;
+  const waiting = session.inOrder(order(3)).then(() => { third = true; });
+  session.placed(order(2));
+  await sleep(50);
+  assert.equal(third, false, 'call 3 waits for call 1');
+  session.placed(order(1));
+  await waiting;
+  assert.equal(third, true);
+  // A call that never arrives is skipped after the wait.
+  const started = performance.now();
+  await session.inOrder(order(5));
+  assert.ok(performance.now() - started >= 400);
+});
+
+test('stopping one device\'s work leaves the background work a script started on another device', { timeout: 40000 }, async t => {
+  const f = await fixture(t);
+  await f.set({ twoPhones: true, label: 'Ready' });
+  const script = f.call('run_code', { devices: [A, B], code: `await tools.start_recording({ device: ${JSON.stringify(B)} }); await tools.wait({ device: ${JSON.stringify(A)}, seconds: 20 }); return 'done';` });
+  await f.until(log => log.includes('screencapture'));
+  await sleep(300);
+  const cancelled = value(await f.call('cancel_device', { device: A }));
+  assert.deepEqual(cancelled.devices, [A]);
+  await script;
+  const stopped = await f.call('stop_recording', { device: B });
+  assert.notEqual(stopped.isError, true, `B still records: ${text(stopped)}`);
 });
