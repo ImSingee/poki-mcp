@@ -5,10 +5,10 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { Client } from '@modelcontextprotocol/client';
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { fixture, value } from './fixture.mjs';
-import { olderRelease } from '../src/daemon-launch.mjs';
+import { olderRelease, pidNamespace } from '../src/daemon-launch.mjs';
 import { createServer } from 'node:http';
 import { mkdtemp, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -92,7 +92,7 @@ test('an automatic service exits once idle, and stays while a client is connecte
 });
 
 test('a shim killed without closing its session does not keep the service running', { timeout: 40000 }, async t => {
-  const f = await fixture(t, { daemon: false, extraEnv: () => ({ POKI_DAEMON_IDLE_EXIT_MS: '400' }) });
+  const f = await fixture(t, { daemon: false, extraEnv: () => ({ POKI_DAEMON_IDLE_EXIT_MS: '400', POKI_MCP_HEARTBEAT_MS: '200' }) });
   await f.a.close();
   // A shim the client pool reaps with SIGKILL never sends /session/close.
   const child = spawn(process.execPath, [join(f.dir, 'src/stdio.mjs')], { env: f.env, stdio: ['pipe', 'pipe', 'inherit'] });
@@ -225,7 +225,7 @@ test('shims that find the same stale start lock at once still start one service'
   const dead = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
   await once(dead, 'exit');
   await mkdir(join(f.dir, 'state'), { recursive: true });
-  await writeFile(join(f.dir, 'state/daemon.lock'), JSON.stringify({ pid: dead.pid, nonce: 'dead' }));
+  await writeFile(join(f.dir, 'state/daemon.lock'), JSON.stringify({ pid: dead.pid, ...(pidNamespace ? { pid_ns: pidNamespace } : {}), nonce: 'dead' }));
   const clients = [f.a, ...await Promise.all([1, 2, 3, 4, 5].map(() => f.connect()))];
   await Promise.all(clients.map(status));
   assert.equal((await readyLines(f)).length, 1, 'exactly one service became ready');
@@ -263,7 +263,7 @@ test('a shim whose client leaves while its first call still waits for a service 
 });
 
 test('a shim killed while its session records the screen: the recording is stopped and the service still exits', { timeout: 40000 }, async t => {
-  const f = await fixture(t, { daemon: false, extraEnv: () => ({ POKI_DAEMON_IDLE_EXIT_MS: '400' }) });
+  const f = await fixture(t, { daemon: false, extraEnv: () => ({ POKI_DAEMON_IDLE_EXIT_MS: '400', POKI_MCP_HEARTBEAT_MS: '200' }) });
   await f.a.close();
   const child = spawn(process.execPath, [join(f.dir, 'src/stdio.mjs')], { env: f.env, stdio: ['pipe', 'pipe', 'inherit'] });
   const exited = once(child, 'exit');
@@ -290,4 +290,84 @@ test('run_code through a connected client whose automatic service turns out to r
   const result = await f.call('run_code', { code: `return (await tools.list_elements({ device: 'fixture-phone' })).elements.length;` });
   assert.notEqual(result.isError, true, result.content[0].text);
   assert.notEqual((await endpointOf(f)).pid, old.pid);
+});
+
+// Only a tool call starts the service. The MCP client keeps a background stream open and reconnects it
+// on its own; those reconnections must not bring back a service the user stopped.
+test('a stopped service stays stopped while a client stays connected, until the next tool call', { timeout: 60000 }, async t => {
+  const f = await fixture(t);
+  await status(f.a);
+  await f.daemon.stop('SIGTERM');
+  await sleep(8000);
+  assert.deepEqual(await readyLines(f), [], 'no service started without a tool call');
+  assert.equal(await endpointOf(f), null);
+  // The client still works: its next call starts a service.
+  const report = await status(f.a);
+  assert.match(report.implementation, /Poki MCP/);
+  assert.match((await readyLines(f)).at(-1), /"auto":true/);
+});
+
+// A client in another PID namespace (a container sharing the state directory) sends a pid that means
+// nothing to the daemon. Its session, and the lease it holds, outlast other clients checking /version.
+test('a session whose client runs in another PID namespace keeps its lease when other shims start', { timeout: 40000 }, async t => {
+  const f = await fixture(t);
+  const endpoint = await endpointOf(f);
+  const http = (session, headers = {}) => { const client = new Client({ name: 'http', version: '1' }); t.after(() => client.close()); return client.connect(new StreamableHTTPClientTransport(new URL(endpoint.url), { requestInit: { headers: { Authorization: `Bearer ${endpoint.token}`, 'x-poki-mcp-session': session, ...headers } } })).then(() => client); };
+  // A pid no process here has, as a client in another container would send it.
+  const telegram = await http('telegram-task', { 'x-poki-mcp-client-pid': '3999999' });
+  const lease = await telegram.callTool({ name: 'acquire_device', arguments: { device: 'fixture-phone', ttl_seconds: 60 } });
+  assert.ok(!lease.isError, lease.content?.[0]?.text);
+  const other = await http('other-task');
+  const refusedBefore = await other.callTool({ name: 'acquire_device', arguments: { device: 'fixture-phone' } });
+  assert.ok(refusedBefore.isError);
+  // Another client starting up asks /version, as every shim does.
+  await status(await f.connect());
+  const response = await fetch(new URL('/version', endpoint.url), { headers: { Authorization: `Bearer ${endpoint.token}` } });
+  assert.ok((await response.json()).sessions >= 2);
+  const refusedAfter = await other.callTool({ name: 'acquire_device', arguments: { device: 'fixture-phone' } });
+  assert.ok(refusedAfter.isError, 'the other session still cannot take the leased phone');
+  assert.match(refusedAfter.content[0].text, /occupied/);
+});
+
+// The daemon in mcp.json may run in another PID namespace, where its pid names no process here. It is
+// found by its answer to /version, so no second daemon is started beside it.
+test('a running service whose pid is not visible from the shim is still used', { timeout: 30000 }, async t => {
+  const f = await fixture(t);
+  const entry = await endpointOf(f);
+  await writeFile(join(f.dir, 'state/mcp.json'), JSON.stringify({ ...entry, pid: 3999999, pid_ns: 'pid:[1]' }), { mode: 0o600 });
+  const client = await f.connect();
+  const report = await status(client);
+  assert.match(report.implementation, /Poki MCP/);
+  assert.deepEqual(await readyLines(f), [], 'no automatic service was started');
+  assert.equal((await endpointOf(f)).port, entry.port);
+});
+
+// The start lock records its holder's pid, which a later process can reuse. A lock its holder stopped
+// touching is stale whatever that pid now names.
+test('a start lock whose pid now belongs to a live process is broken once it goes untouched', { timeout: 30000 }, async t => {
+  const f = await fixture(t, { daemon: false });
+  const lock = join(f.dir, 'state/daemon.lock');
+  await mkdir(join(f.dir, 'state'), { recursive: true });
+  // This test's own pid: alive, but not a shim starting a service.
+  await writeFile(lock, JSON.stringify({ pid: process.pid, nonce: 'left-behind' }));
+  const old = new Date(Date.now() - 60000);
+  await utimes(lock, old, old);
+  const started = performance.now();
+  const report = await status(f.a);
+  assert.match(report.implementation, /Poki MCP/);
+  assert.ok(performance.now() - started < 15000, 'the call did not wait for the start timeout');
+});
+
+test('a call that cannot start the service because of a held lock names that lock', { timeout: 30000 }, async t => {
+  const f = await fixture(t, { daemon: false });
+  const lock = join(f.dir, 'state/daemon.lock');
+  await mkdir(join(f.dir, 'state'), { recursive: true });
+  await writeFile(lock, JSON.stringify({ pid: process.pid, nonce: 'held' }));
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `import { ensureDaemon } from ${JSON.stringify(join(f.dir, 'src/daemon-launch.mjs'))}; await ensureDaemon({ timeoutMs: 1500 }).catch(error => { console.log(error.message); });`], { env: f.env, stdio: ['ignore', 'pipe', 'inherit'] });
+  let output = '';
+  child.stdout.on('data', chunk => { output += chunk; });
+  await once(child, 'exit');
+  assert.match(output, /did not become reachable/);
+  assert.ok(output.includes(lock), output);
+  assert.match(output, new RegExp(`held by pid ${process.pid}`));
 });

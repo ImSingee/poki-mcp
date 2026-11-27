@@ -14,7 +14,7 @@ import { warnIfNativeStale } from './build-info.mjs';
 import { closeLocalHelpers, remoteDevices, warmRemote } from './remote.mjs';
 import { version, codeFingerprint, currentCodeFingerprint, setServiceStart } from './build-info.mjs';
 import { approvalMode } from './human.mjs';
-import { runningDaemon, alive } from './daemon-launch.mjs';
+import { runningDaemon, pidNamespace } from './daemon-launch.mjs';
 
 // --auto: started by a stdio shim (src/daemon-launch.mjs). It takes a free port unless --port says
 // otherwise, leaves when another daemon already serves this state directory, and exits once it has
@@ -81,13 +81,14 @@ const validOrigin = localhostOriginValidation();
 const active = new Set();
 // MCP requests (POST /mcp) still being read or answered. A client's open GET stream is not one.
 let posting = 0;
-// Each session's shim sends its pid, so a shim that died without closing its session (a pool that
-// reaps idle stdio processes with SIGKILL) does not keep the session, or this daemon, alive forever.
-// Such a session is closed even while it still owns work: closing it stops its recordings and
-// simulated locations and releases its leases, which nobody else could. A session without a pid (a
-// direct HTTP client) is dropped only once it owns nothing and has been idle for as long as an
-// automatic daemon waits.
-const lastSeen = new Map(), clientPids = new Map();
+// Each session's stdio shim sends a heartbeat (x-poki-mcp-heartbeat-ms says how often), so a shim that
+// died without closing its session (a pool that reaps idle stdio processes with SIGKILL) does not keep
+// the session, or this daemon, alive forever. Such a session is closed once it has missed three
+// heartbeats and has no request open, even while it still owns work: closing it stops its recordings
+// and simulated locations and releases its leases, which nobody else could. Process ids are not used:
+// a client may run in another PID namespace. A session without heartbeats (a direct HTTP client) is
+// dropped only once it owns nothing and has been idle for as long as an automatic daemon waits.
+const lastSeen = new Map(), heartbeats = new Map(), open = new Map();
 let lastActivity = performance.now();
 const sessionBusy = session => [...coordinator.operations].some(op => op.owner === session)
   || [...coordinator.leases.values()].some(lease => lease.owner === session) || session.backgroundDevices?.size > 0;
@@ -99,14 +100,18 @@ const busyReasons = () => {
   if (background) reasons.push(`background work (recording or simulated location) on ${background} device(s)`);
   return reasons;
 };
+const forget = id => { sessions.delete(id); lastSeen.delete(id); heartbeats.delete(id); };
+const silent = (id, session) => {
+  if (open.get(id)) return false;
+  const quiet = performance.now() - (lastSeen.get(id) ?? 0), beat = heartbeats.get(id);
+  return beat ? quiet > 3 * beat + 1000 : quiet > idleExitMs && !sessionBusy(session);
+};
 async function pruneSessions() {
   for (const [id, session] of [...sessions]) {
-    const pid = clientPids.get(id);
-    const gone = pid ? !alive(pid) : performance.now() - (lastSeen.get(id) ?? 0) > idleExitMs && !sessionBusy(session);
-    if (gone) {
-      sessions.delete(id); lastSeen.delete(id); clientPids.delete(id);
-      await session.close().catch(() => {});
-    }
+    if (!silent(id, session)) continue;
+    forget(id);
+    console.log(JSON.stringify({ event: 'session-dropped', session: id, reason: heartbeats.has(id) ? 'heartbeat' : 'idle' }));
+    await session.close().catch(() => {});
   }
 }
 const versionInfo = async () => {
@@ -142,19 +147,26 @@ async function handle(req, res) {
     void stop();
     return;
   }
-  if (!['/mcp', '/session/close', '/request/cancel'].includes(req.url)) { res.writeHead(404); res.end(); return; }
+  if (!['/mcp', '/session/close', '/session/heartbeat', '/request/cancel'].includes(req.url)) { res.writeHead(404); res.end(); return; }
   const session = req.headers['x-poki-mcp-session'];
   if (typeof session !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(session)) { res.writeHead(400); res.end('Invalid session'); return; }
+  // Only an MCP request starts a session; a heartbeat, close or cancel for one this daemon does not
+  // know (dropped, or held by a daemon that was replaced) changes nothing.
+  if (req.url !== '/mcp' && !sessions.has(session)) { res.writeHead(req.method === 'POST' ? 404 : 405); res.end(); return; }
   lastSeen.set(session, performance.now());
-  const clientPid = Number(req.headers['x-poki-mcp-client-pid']);
-  if (Number.isInteger(clientPid) && clientPid > 0) clientPids.set(session, clientPid);
+  const beat = Number(req.headers['x-poki-mcp-heartbeat-ms']);
+  if (Number.isFinite(beat) && beat > 0) heartbeats.set(session, Math.min(60000, Math.max(100, beat)));
+  if (req.url === '/session/heartbeat') { if (req.method !== 'POST') { res.writeHead(405); res.end(); return; } res.end('{}'); return; }
   if (!sessions.has(session)) sessions.set(session, new Session(coordinator));
   const devices = sessions.get(session);
   devices.peers = () => sessions.values();
   devices.label ??= session;
+  // A request still open keeps its session: its client is plainly there.
+  open.set(session, (open.get(session) ?? 0) + 1);
+  res.once('close', () => { open.set(session, open.get(session) - 1); if (!open.get(session)) open.delete(session); lastSeen.set(session, performance.now()); });
   if (req.url === '/session/close') {
     if (req.method !== 'POST') { res.writeHead(405); res.end(); return; }
-    await devices.close(); sessions.delete(session); lastSeen.delete(session); clientPids.delete(session); res.end('{}'); return;
+    await devices.close(); forget(session); res.end('{}'); return;
   }
   if (req.url === '/request/cancel') {
     if (req.method !== 'POST') { res.writeHead(405); res.end(); return; }
@@ -191,7 +203,7 @@ await once(servers[0], 'listening');
 const actualPort = servers[0].address().port;
 for (const [index, server] of servers.entries()) if (index > 0) server.listen(actualPort, bindHosts[index]);
 await Promise.all(servers.slice(1).map(server => once(server, 'listening')));
-const entry = { url: `http://127.0.0.1:${actualPort}/mcp`, port: actualPort, token, enabled: true, pid: process.pid };
+const entry = { url: `http://127.0.0.1:${actualPort}/mcp`, port: actualPort, token, enabled: true, pid: process.pid, ...(pidNamespace ? { pid_ns: pidNamespace } : {}) };
 const temporary = `${endpointFile}.${process.pid}.tmp`;
 await writeFile(temporary, JSON.stringify(entry, null, 2), { mode: 0o600, flag: 'wx' });
 await rename(temporary, endpointFile);
@@ -199,6 +211,9 @@ await chmod(endpointFile, 0o600);
 console.log(JSON.stringify({ event: 'ready', pid: process.pid, url: entry.url, endpointFile, tools: definitions.length, auto, approval_mode: approval }));
 
 const stopUpdateChecks = startUpdateChecks();
+// Sessions whose shim went quiet are dropped within a second, whichever way this daemon was started.
+const pruning = setInterval(() => { void pruneSessions(); }, 1000);
+pruning.unref();
 
 // Start the RemotePairing helpers now, not inside the first tool call
 // that needs one: their session setup can take longer than a client's
@@ -209,7 +224,7 @@ let stopping = false;
 async function stop() {
   if (stopping) return;
   stopping = true;
-  stopUpdateChecks();
+  stopUpdateChecks(); clearInterval(pruning);
   const closed = Promise.all(servers.map(server => new Promise(resolve => server.close(resolve))));
   for (const server of servers) server.closeAllConnections();
   await Promise.allSettled([...sessions.values()].map(devices => devices.close()));
@@ -234,10 +249,12 @@ if (auto) {
   const idleCheck = setInterval(async () => {
     await pruneSessions();
     // Two shims that both started a daemon: the one mcp.json does not name leaves once it has no clients.
-    const named = await readFile(endpointFile, 'utf8').then(JSON.parse).catch(() => null);
-    if (named && named.pid !== process.pid && alive(named.pid) && !sessions.size && !busyReasons().length && !posting) {
+    // The other one answers with the token mcp.json names, whatever PID namespace it runs in.
+    const other = !sessions.size && !busyReasons().length && !posting && await readFile(endpointFile, 'utf8').then(JSON.parse).then(entry => entry.pid !== process.pid, () => false);
+    const named = other ? await runningDaemon().catch(() => undefined) : undefined;
+    if (named?.info && named.endpoint.pid !== process.pid) {
       clearInterval(idleCheck);
-      console.log(JSON.stringify({ event: 'superseded', by: named.pid }));
+      console.log(JSON.stringify({ event: 'superseded', by: named.endpoint.pid }));
       await stop();
       return;
     }

@@ -18,6 +18,11 @@ export function approvalMode(env = process.env, host = platform()) {
   return host === 'linux' && !env.DISPLAY && !env.WAYLAND_DISPLAY ? 'host' : 'ask';
 }
 
+// ask (a dialog on this machine) is stricter than host (the MCP client's own prompts), which is
+// stricter than allow (nobody asked).
+const strictness = { allow: 0, host: 1, ask: 2 };
+export const stricterApproval = (a, b) => strictness[a] > strictness[b];
+
 // A real macOS dialog is the acknowledgment. A successful notification alone is not.
 export async function askHuman(message, seconds = 120) {
     if (approvalMode() === 'host') throw new Error('This Poki MCP service runs in host approval mode, so it shows no dialog on its machine. Ask the user in the conversation instead, then inspect the device.');
