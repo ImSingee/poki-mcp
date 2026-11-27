@@ -272,6 +272,10 @@ coordination tests on timing; they were in fact two porting gaps —
 the app-management paths called the macOS-only `plutil` and `ditto`,
 and the test fixture did not stub `zenity` — both fixed since.
 
+## Live screen
+
+The screen panel (`show_screen`, [the live screen](docs/tools.md#live-screen)) needs nothing more for browsers that decode HEVC (Chrome and Safari on macOS). For browsers that do not (Linux Chrome without a hardware decoder, Chromium, Firefox), Poki transcodes to H.264 or JPEG with `ffmpeg`, which the setup above installs; libx264's ultrafast preset at the 1280 px long edge costs a core on a small ARM board while a viewer watches. WebRTC uses host candidates and a public STUN server by default; a viewer on another network reaches this machine directly only through a TURN server you run (`POKI_TURN_URL`, `POKI_TURN_SECRET`, for example coturn with `use-auth-secret`), else the panel stays on tool calls through the MCP client. Streaming keeps the iPhone's camera and microphone busy until the panel closes.
+
 ## Known limitations
 
 - OCR recognition quality on Linux is tesseract's, not Vision's: clear

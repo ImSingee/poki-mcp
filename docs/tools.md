@@ -32,6 +32,7 @@ The default `tools/list` response contains the tools for phone tasks. Tool names
 | Touch and input | `tap`, `tap_text`, `long_press`, `double_tap`, `drag`, `pinch`, `fill`, `type_text`, `scroll`, `scroll_to`, `swipe`, `press_key`, `go_back`, `hide_keyboard`, `press_button`, `get_clipboard` |
 | Wait, prompts, and batches | `wait_for`, `handle_alert`, `batch_commands` |
 | Wireless pairing (every profile) | `pair_device`, `pairing_status`, `pairing_cancel` (pairing view only), `unpair_device` |
+| Live screen (every profile) | `show_screen`; for the screen view only: `screen_open`, `screen_read`, `screen_close`, `screen_keyframe`, `screen_input`, `screen_takeover`, `screen_rtc_config`, `screen_rtc_offer` |
 
 The runtime default list is defined in `src/tools.mjs`. The complete catalog includes simulator management, app installation, recording, location, appearance, drawing with `touch_path` and `draw_strokes`, and device leases.
 
@@ -132,6 +133,25 @@ Poki serves MCP Apps views as `ui://poki/*` resources (`text/html;profile=mcp-ap
 
 `tools/list` carries each tool's `_meta`: `ui.resourceUri` (and the older `ui/resourceUri`) for the tool that opens a view, `ui.visibility` (`["model", "app"]`, or `["app"]` for tools only a view calls), and `lobehub/ui.preferredModelDisplayMode`. App-only tools are listed too; hosts hide them from the model. Hosts without MCP Apps get the same results as text and structured content. See [Use Poki from LobeHub](lobehub.md).
 
+## Live screen
+
+`show_screen {device?}` opens the screen view (`ui://poki/screen`) in LobeHub's side panel (`lobehub/ui.preferredModelDisplayMode: "fullscreen"`), where the person watches a paired iPhone and taps, swipes and types on it. Without `device` the view's own device menu chooses the iPhone. In a client without MCP Apps it only returns a short text. Streaming keeps the iPhone's displayservice session open, and while it is open **iOS keeps the camera and microphone busy** for other apps: the session is released one second after the last viewer leaves, and a viewer the view stops renewing ends after 10 seconds.
+
+The video is the HEVC the iPhone itself sends (see [native/NATIVE.md](../native/NATIVE.md#screen-video)). One subscription per device is shared by every viewer. The view picks what its browser can decode, in this order: HEVC as sent, H.264 transcoded on this computer, or JPEG (at most 10 pictures a second, only the latest kept). Transcoding needs `ffmpeg` with `libx264`; it runs only while a viewer reads that codec. Measured on 2026-11-28 in a sandboxed MCP Apps frame: Chrome and Safari on macOS decode HEVC and H.264; Google Chrome on Linux without a hardware decoder decodes H.264 only; Chromium builds without proprietary codecs (Playwright's) show JPEG.
+
+Transports, chosen by the view and shown in its corner with the codec, frames per second and the last round trip:
+
+| | How | When |
+| --- | --- | --- |
+| WebRTC | `screen_rtc_config` and `screen_rtc_offer` exchange one offer and answer (no trickle); frames come on a DataChannel. | The view's browser reaches this computer (host or STUN candidates, or the TURN server below) within three seconds. |
+| Tool calls | `screen_read` long polls (`wait_ms` up to 1000), two in flight, a batch of frames each. | Always available, including through LobeHub's relay from any network. |
+
+`screen_read {stream, ack, credit, wait_ms, resync?, max_bytes?}`: `ack` is the last frame decoded, which returns credit; frames that would be sent after a gap, or more than a second late, are dropped up to the next key frame, never inside a chain; a keyframe is requested at most once a second. One reply carries at most `POKI_SCREEN_READ_MAX_BYTES` (default 256 KiB) and `POKI_SCREEN_READ_MAX_FRAMES` (default 16); a single frame over the limit travels alone. The defaults are below the 500 KB frames measured through LobeHub's relay with its local gateway; its production gateway's limits are not measured, and a view whose reads fail halves `max_bytes` before it falls back to the next codec. `POKI_SCREEN_H264_BITRATE` sets the transcoder's starting bitrate (default 1.5 Mbit/s); it adapts between 0.3 and 4 Mbit/s to how quickly frames are acknowledged.
+
+`screen_input {stream, kind, x, y, x2?, y2?, t_ms?, ...}` sends one gesture or key: `tap`, `long_press`, `swipe`, `drag`, `pinch` (`start_distance`, `end_distance`), `button` (`home`, `lock`, `volume_up`, `volume_down`), `key` (with `modifiers`), `text`. Coordinates are normalized to the screen as shown (0..1). It goes through the device's lease and input lock like any input, waiting at most 1.5 seconds: while the agent holds the device, or has input running on it, the reply is `reason: "busy"` and the view offers **Take over**. `screen_takeover {stream, confirm: true}` runs only after the person confirms in the view: it stops every other session's work and lease on that device and holds the device for the view (renewed by each input, released when the view closes). The screen tools skip the device queues, and `batch_commands` and `run_code` refuse them.
+
+WebRTC's ICE servers: STUN `POKI_STUN_URL` (default `stun:stun.l.google.com:19302`; set it empty to use host candidates only), and TURN when `POKI_TURN_URL` is set (comma-separated `turn:`/`turns:` URLs), with credentials from `POKI_TURN_SECRET` (coturn's `use-auth-secret`, time-limited) or `POKI_TURN_USERNAME` and `POKI_TURN_PASSWORD`. Poki's WebRTC library (werift) uses only the first TURN URL, so a `turns:` URL on port 443 is put first. `POKI_SCREEN_RTC=0` turns WebRTC off.
+
 ## Ask in plain language
 
 Ask your agent for the task you want done:
@@ -175,6 +195,10 @@ Accessibility can miss changes that affect only pixels, such as Calculator's dis
 | Pairing | `pairing_status` | Report a pairing job: state, PIN while one is shown, device id once paired, reason and action on failure. |
 | Pairing | `pairing_cancel` | Cancel a pairing job. Visible to the pairing view only. |
 | Pairing | `unpair_device` | Remove a wirelessly paired iPhone: stop its work and leases in every session, close its helper, delete its saved pairing. |
+| Live screen | `show_screen` | Open the `ui://poki/screen` view on a paired iPhone (or let the person choose one there). Keeps the iPhone's camera and microphone busy while shown. |
+| Live screen | `screen_open`, `screen_read`, `screen_close`, `screen_keyframe` | Start a screen stream in a codec the view decodes, long-poll its frames with credit, end it, ask for a key frame. Screen view only. |
+| Live screen | `screen_input`, `screen_takeover` | One gesture or key from the view, through the device's lease and input lock; take the device from the agent after the person confirms. Screen view only. |
+| Live screen | `screen_rtc_config`, `screen_rtc_offer` | ICE servers, and the answer to the view's WebRTC offer. Screen view only. |
 | Coordination | `acquire_device` | Exclusively occupy one device across tool calls in this MCP session. A session may hold leases on several devices, one each. |
 | Coordination | `renew_device` | Extend one of this session’s device leases by 1–600 seconds (default 120). |
 | Coordination | `release_device` | Release one of this session’s device leases after cancelling this session's accepted work on that device and awaiting its recording/location cleanup. |
