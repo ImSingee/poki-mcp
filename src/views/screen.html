@@ -202,6 +202,13 @@ class Decoder {
     try { this.video.decode(new EncodedVideoChunk({ type: frame.key ? 'key' : 'delta', timestamp, data: frame.data })); }
     catch { this.waitingKey = true; this.onDecoded(undefined, true); }
   }
+  // The codec string of the stream's latest key frame, once it is known: decode with it.
+  reconfigure(codecString) {
+    if (this.codec === 'jpeg' || !codecString || codecString === this.codecString) return;
+    this.codecString = codecString;
+    this.waitingKey = true; this.pending.clear();
+    try { this.open(); } catch { this.onFailure('decode'); }
+  }
   get backlog() { return this.video?.decodeQueueSize ?? 0; }
   close() { clearInterval(this.watchdog); try { this.video?.close(); } catch {} }
 }
@@ -296,6 +303,7 @@ async function poll(generation, lane) {
       if (generation !== state.generation) return;
       state.failures = 0;
       if (reply.closed) { void openStream(); return; }
+      if (reply.codec_string && reply.codec_string !== state.codecString) { state.codecString = reply.codec_string; decoder?.reconfigure(reply.codec_string); }
       if (reply.frames?.length) { stats.latency = Math.round(performance.now() - started); accept(reply, generation); }
       if (reply.width && !state.width) Object.assign(state, { width: reply.width, height: reply.height });
     } catch (error) {
@@ -335,7 +343,7 @@ async function tryRtc(generation) {
       const timer = setTimeout(() => reject(new Error('ICE did not connect')), settings.rtcTimeoutMs);
       control.onmessage = event => {
         let message; try { message = JSON.parse(event.data); } catch { return; }
-        if (message.type === 'ready') { clearTimeout(timer); resolve(); }
+        if (message.type === 'ready') { clearTimeout(timer); if (message.codec_string) { state.codecString = message.codec_string; decoder?.reconfigure(message.codec_string); } resolve(); }
         else if (message.type === 'discontinuity') resetChain();
         else if (message.type === 'input-result') inputReplies.get(message.id)?.(message);
       };

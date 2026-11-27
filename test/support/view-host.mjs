@@ -4,12 +4,14 @@
 // allow-same-origin (origin null, as in LobeHub), and every resources/read and tools/call sent to a
 // real Poki stdio server (src/stdio.mjs) through MCP.
 //
-//   node test/support/view-host.mjs [--port 4790] [--stub]
+//   node test/support/view-host.mjs [--port 4790] [--stub] [--view pairing|screen]
 //   GET /calls lists every tools/call with its time, its source (agent, view, direct) and the job state.
 //
 // --stub runs Poki from a temporary copy of this checkout with a stand-in poki-native
 // (test/support/pairing-native.mjs) and one iPhone already paired, so pairing can be walked through
 // without an iPhone: the page's "iPhone accepts the PIN" button plays the phone's part.
+// --view screen opens the screen panel (show_screen) instead; with --stub the paired iPhone sends
+// the sample stream in native/bridge/tests/fixtures, and its taps are logged to commands.jsonl.
 import http from 'node:http';
 import { mkdtemp, cp, mkdir, writeFile, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -21,7 +23,9 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { root } from '../../src/config.mjs';
 import { pairingNative } from './pairing-native.mjs';
 
-const { values: options } = parseArgs({ options: { port: { type: 'string', default: '4790' }, stub: { type: 'boolean', default: false } } });
+const { values: options } = parseArgs({ options: { port: { type: 'string', default: '4790' }, stub: { type: 'boolean', default: false }, view: { type: 'string', default: 'pairing' } } });
+const shown = { pairing: { uri: 'ui://poki/pairing', tool: 'pair_device', args: {}, displayMode: 'inline' }, screen: { uri: 'ui://poki/screen', tool: 'show_screen', args: options.stub ? { device: 'lab-iphone' } : {}, displayMode: 'fullscreen' } }[options.view];
+if (!shown) throw new Error('--view is pairing or screen.');
 
 let pokiRoot = root, env = { ...process.env }, stubDir;
 if (options.stub) {
@@ -42,8 +46,10 @@ if (options.stub) {
       { event: 'paired', device: { udid: 'new-iphone', name: 'New iPhone', model: 'iPhone17,1' }, peer: '192.0.2.27' }],
     names: { 'lab-iphone': 'Lab iPhone', 'new-iphone': 'New iPhone' },
     // Long enough to see the view's "Preparing developer services" step.
-    remote: { installDelayMs: 4000 },
+    remote: { installDelayMs: 4000, displayService: true, video: join(stubDir, 'video.json') },
   }));
+  const { sampleFrames } = await import('../stream-fixture.mjs');
+  await writeFile(join(stubDir, 'video.json'), JSON.stringify(sampleFrames().map(f => ({ key: f.key, config: f.config?.toString('base64'), data: f.data.toString('base64') }))));
   const labConfig = join(stubDir, 'state/remote/lab-iphone/config.json');
   await writeFile(labConfig, JSON.stringify({ id: 'lab-iphone', host: '192.0.2.10', port: 49152, pairing_file: join(stubDir, 'state/remote/lab-iphone/pairing.plist') }));
   await writeFile(join(stubDir, 'state/remote-devices.json'), JSON.stringify([{ id: 'lab-iphone', name: 'Lab iPhone', config_path: labConfig }]));
@@ -72,7 +78,7 @@ const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta n
   #log { font: 11px ui-monospace, monospace; color: #555; padding: 0 16px 16px; white-space: pre-wrap; }
 </style></head><body>
 <header>
-  <button id="call">Agent calls pair_device</button>
+  <button id="call">Agent calls ${shown.tool}</button>
   <button id="remount" disabled>Remount view</button>
   <button id="unmount" disabled>Unmount view</button>
   ${options.stub ? '<button id="accept">iPhone accepts the PIN</button>' : ''}
@@ -90,13 +96,13 @@ const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta n
     const slot = document.getElementById('slot');
     slot.style.width = document.getElementById('width').value + 'px';
     slot.replaceChildren();
-    viewHtml ??= (await post('/resource', { uri: 'ui://poki/pairing' })).contents[0].text;
+    viewHtml ??= (await post('/resource', { uri: ${JSON.stringify(shown.uri)} })).contents[0].text;
     const frame = document.createElement('iframe');
     frame.setAttribute('sandbox', 'allow-scripts allow-forms');
     frame.srcdoc = viewHtml;
     slot.append(frame);
     const theme = document.getElementById('theme').value;
-    bridge = new MockHost.AppBridge(null, { name: 'poki-view-host', version: '1' }, { serverTools: {} }, { hostContext: { theme, displayMode: 'inline', platform: 'web' } });
+    bridge = new MockHost.AppBridge(null, { name: 'poki-view-host', version: '1' }, { serverTools: {} }, { hostContext: { theme, displayMode: ${JSON.stringify(shown.displayMode)}, platform: 'web', ...(${JSON.stringify(shown.displayMode)} === 'fullscreen' ? { containerDimensions: { height: 900, width: Number(document.getElementById('width').value) } } : {}) } });
     bridge.oncalltool = async params => { log('view → ' + params.name + ' ' + JSON.stringify(params.arguments ?? {})); return post('/call', { ...params, source: 'view' }); };
     bridge.onsizechange = ({ height }) => { if (height) frame.style.height = height + 'px'; };
     bridge.oninitialized = () => { if (lastResult) bridge.sendToolResult(lastResult); };
@@ -104,8 +110,8 @@ const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta n
     document.getElementById('remount').disabled = document.getElementById('unmount').disabled = false;
   }
   document.getElementById('call').onclick = async () => {
-    log('agent → pair_device');
-    lastResult = await post('/call', { name: 'pair_device', arguments: {}, source: 'agent' });
+    log('agent → ${shown.tool}');
+    lastResult = await post('/call', { name: ${JSON.stringify(shown.tool)}, arguments: ${JSON.stringify(shown.args)}, source: 'agent' });
     document.getElementById('text').textContent = (lastResult.content ?? []).filter(b => b.type === 'text').map(b => b.text)[0] ?? '';
     await mount();
   };

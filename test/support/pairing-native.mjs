@@ -3,7 +3,10 @@
 // FIXTURE_STATE; every helper start and request is logged to FIXTURE_LOG.
 // --pair-host: plays `pairHost`, waiting at each `await` step until that file exists next to
 //   FIXTURE_STATE; on SIGTERM prints a cancelled event and exits 1, as pair_host.rs does.
-// --remote-server: answers device_info, ddi_status, install_ddi and disconnect from `remote`.
+// --remote-server: answers device_info, ddi_status, install_ddi and disconnect from `remote`; with
+//   `remote.video` (a JSON file of { key, config, data } frames, base64), also media_subscribe
+//   (those frames in a loop, 10 a second, in the helper's binary format), media_keyframe and
+//   the input ops the screen view sends (logged, answered as sent).
 export const pairingNative = `#!/usr/bin/env node
 import { appendFileSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
@@ -36,6 +39,27 @@ if (mode === '--remote-server') {
       const remote = config().remote ?? {};
       // hangInstall: an installation that never finishes and keeps the helper busy.
       if (request.op === 'install_ddi' && remote.hangInstall) { busy = true; return; }
+      if (request.op === 'media_subscribe' && remote.video) {
+        const frames = JSON.parse(readFileSync(remote.video, 'utf8'));
+        socket.write(JSON.stringify({ subscribed: true, codec: 'hevc', width: 180, height: 390 }) + '\\n');
+        let seq = 0;
+        const timer = setInterval(() => {
+          const frame = frames[seq % frames.length], config = Buffer.from(frame.config ?? '', 'base64'), data = Buffer.from(frame.data, 'base64');
+          seq++;
+          const out = Buffer.alloc(23 + config.length + data.length);
+          out.writeUInt32BE(19 + config.length + data.length, 0); out[4] = (frame.key ? 1 : 0) | (frame.config ? 2 : 0) | (seq === 1 ? 4 : 0);
+          out.writeBigUInt64BE(BigInt(seq), 5); out.writeBigUInt64BE(BigInt(seq * 100000), 13); out.writeUInt16BE(config.length, 21);
+          config.copy(out, 23); data.copy(out, 23 + config.length);
+          socket.write(out);
+        }, 100);
+        socket.on('close', () => { clearInterval(timer); log({ remote: 'media_unsubscribed' }); });
+        socket.on('error', () => {});
+        return;
+      }
+      if (['tap', 'long_press', 'drag', 'pinch', 'button', 'key', 'type_keys', 'type_text', 'media_keyframe'].includes(request.op)) {
+        socket.end(JSON.stringify(request.op === 'media_keyframe' ? { requested: true, subscribers: 1 } : { sent: true, screen_change_verified: false }) + '\\n');
+        return;
+      }
       const reply = request.op === 'disconnect' ? { disconnected: true }
         : request.op === 'device_info' ? { properties: { DeviceName: config().names?.[JSON.parse(readFileSync(process.argv[3], 'utf8')).id] ?? 'Wireless iPhone', ProductType: 'iPhone17,1', ProductVersion: '27.0' } }
         : request.op === 'ddi_status' ? { display_service: installed || Boolean(remote.displayService), cryptexd: true, ddi: installed ? { identifier: 'com.apple.MobileAsset.DDI', version: '27B52' } : null }
