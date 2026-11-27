@@ -105,8 +105,11 @@ impl Session {
                 .map_err(|attempts| format!("Remote pairing is unreachable ({attempts}). Keep the iPhone unlocked and check its configured address or Bonjour name; for Tailscale, keep both devices connected."))?;
             socket.set_nodelay(true)?;
             let peer = socket.peer_addr()?;
-            let mut control = RemotePairingClient::new(RpPairingSocket::new(socket), "poki-mcp");
-            let mut record = RpPairingFile::read_from_file(&config.pairing_file).await?;
+            let pairing_bytes = tokio::fs::read(&config.pairing_file).await?;
+            let sending_host =
+                pairing_sending_host(&pairing_bytes).unwrap_or_else(|| "poki-mcp".into());
+            let mut control = RemotePairingClient::new(RpPairingSocket::new(socket), &sending_host);
+            let mut record = RpPairingFile::from_bytes(&pairing_bytes)?;
             control.attempt_pair_verify().await?;
             // Never fall back to pairing or request consent during an ordinary operation.
             control.validate_pairing(&mut record).await?;
@@ -341,14 +344,23 @@ fn endpoint(address: SocketAddr) -> String {
     let SocketAddr::V6(v6) = address else {
         return address.to_string();
     };
-    let mut name = [0 as libc::c_char; libc::IF_NAMESIZE];
-    if v6.scope_id() == 0
-        || unsafe { libc::if_indextoname(v6.scope_id(), name.as_mut_ptr()) }.is_null()
-    {
-        return address.to_string();
+    match (v6.scope_id() != 0).then(|| interface_name(v6.scope_id())).flatten() {
+        Some(interface) => format!("[{}%{interface}]:{}", v6.ip(), v6.port()),
+        None => address.to_string(),
     }
-    let interface = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }.to_string_lossy();
-    format!("[{}%{interface}]:{}", v6.ip(), v6.port())
+}
+
+/// The name of the interface with this index, such as `en0` or `wlan0`.
+pub(crate) fn interface_name(index: u32) -> Option<String> {
+    let mut name = [0 as libc::c_char; libc::IF_NAMESIZE];
+    if unsafe { libc::if_indextoname(index, name.as_mut_ptr()) }.is_null() {
+        return None;
+    }
+    Some(
+        unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 fn socket_failure(error: &(dyn std::error::Error + Send + Sync + 'static)) -> bool {
@@ -402,6 +414,14 @@ fn refused_reply(
             json!({"isError":true,"outcome":"not_sent","stop_reason":"error","sent":false,"screen_change_verified":false,"error":error.to_string(),"instruction":"Nothing was sent to the iPhone: the helper refused this request before any input. Correct the request before retrying."}),
         ),
     }
+}
+
+fn pairing_sending_host(bytes: &[u8]) -> Option<String> {
+    plist::from_bytes::<plist::Dictionary>(bytes)
+        .ok()?
+        .get("sending_host")
+        .and_then(plist::Value::as_string)
+        .map(str::to_owned)
 }
 
 fn load(path: &str) -> Result<Session> {
@@ -1665,5 +1685,16 @@ mod tests {
         );
         PHONE.with(|slot| slot.borrow_mut().take());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sending_host_is_read_from_pairing_metadata_when_present() {
+        let pairing = RpPairingFile::generate("linux-host");
+        let mut dictionary: plist::Dictionary = plist::from_bytes(&pairing.to_bytes()).unwrap();
+        dictionary.insert("sending_host".into(), "linux-host".into());
+        let mut bytes = Vec::new();
+        plist::to_writer_xml(&mut bytes, &dictionary).unwrap();
+        assert_eq!(pairing_sending_host(&bytes).as_deref(), Some("linux-host"));
+        assert_eq!(pairing_sending_host(&pairing.to_bytes()), None);
     }
 }

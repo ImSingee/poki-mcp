@@ -14,3 +14,4 @@ export const noUsbDevice = platform() === 'linux'
   : 'usbmuxd answered, but no iPhone is attached over USB. Check whether the iPhone appears in the Finder sidebar. If Finder does not show it either, macOS has not attached it: connect it directly with a data cable, unlock it, and accept Trust This Computer. Poki cannot use an iPhone that devicectl reaches only over the network.';
 export const idevice = process.env.IDEVICE_TOOLS
   ?? join(root, '.deps/idevice/target/release/idevice-tools');
+export const pokiNative = process.env.POKI_NATIVE ?? join(root, 'build/poki-native');

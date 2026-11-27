@@ -15,6 +15,7 @@ plist = "1.7"
 futures-util = "0.3"
 libc = "0.2"
 uuid = { version = "1.16", features = ["v4"] }
+mdns-sd = "0.19"
 
 [dev-dependencies]
 tokio = { version = "1.43", features = ["test-util"] }

@@ -77,6 +77,24 @@ Run the daemon the same way as on macOS (`npm start`, or
 `$XDG_STATE_HOME/PokiMCP` (default `~/.local/state/PokiMCP`) unless
 `POKI_MCP_STATE_DIR` is set.
 
+For wireless use, [remote-iphone.md](docs/remote-iphone.md) now has two
+pairing paths. On iOS 27+ the RemotePairing record itself can be created
+without USB:
+
+```sh
+node bin/prepare-remote.mjs --wireless
+```
+
+Keep the Linux host and iPhone on the same LAN while pairing, select the
+host in Settings › Privacy & Security › Developer Mode on the phone, and
+enter the six-digit code printed by the command. This replaces only the
+pairing-file bootstrap: Developer Mode, UI Automation and any needed
+DeveloperDiskImage preparation are still separate device-preparation
+steps. Without `HOST`, the LAN address that paired is saved, and DHCP can
+change it later. Pass the phone's advertised `.local` name as `HOST` to
+keep resolving it on the LAN, or its Tailscale address when the saved
+route should use Tailscale.
+
 ## Running the daemon as a user service
 
 On a host that should keep Poki available, run the daemon under

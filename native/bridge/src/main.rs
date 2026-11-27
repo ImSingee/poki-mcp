@@ -5,6 +5,7 @@ mod device_ops;
 mod display;
 mod gesture;
 mod installation;
+mod pair_host;
 mod pasteboard;
 mod remote;
 mod stream;
@@ -474,6 +475,10 @@ impl Request {
 async fn main() {
     let result = async {
         let args: Vec<String> = std::env::args().collect();
+        if args.len() == 6 && args[1] == "--pair-host" {
+            let port = args[5].parse::<u16>()?;
+            return pair_host::pair_host(&args[2], &args[3], &args[4], port).await;
+        }
         if args.len() == 4 && args[1] == "--local-server" {
             return remote::serve_local(&args[2], &args[3]).await;
         }

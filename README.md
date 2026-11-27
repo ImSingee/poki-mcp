@@ -104,13 +104,16 @@ way (`npm ci --prefix agent`, then `poki login`); see
 exception: it needs a BlueBubbles server, which itself requires a Mac.
 Telegram works.
 
-**Wireless.** Remote use over Tailscale (RemotePairing) is built into
-the bridge and is platform-independent; the setup steps in
-[remote-iphone.md](docs/remote-iphone.md) apply, with this repository's
-state directory. The Tailscale route itself is not yet verified on a
-Linux host — but the same RemotePairing mechanism has been verified
-here over the local network, using the iPhone's LAN address in place
-of a Tailscale one, after which the cable is no longer needed at home.
+**Wireless.** Remote use over Tailscale or the LAN (RemotePairing) is
+built into the bridge and is platform-independent. On iOS 27+ the first
+pairing can be created wirelessly with
+`node bin/prepare-remote.mjs --wireless`; older systems still use the USB
+bootstrap. The setup steps in [remote-iphone.md](docs/remote-iphone.md)
+apply, with this repository's state directory. The Tailscale route itself
+is not yet verified on a Linux host — but the same RemotePairing
+mechanism has been verified here over the local network, using the
+iPhone's LAN address in place of a Tailscale one, after which the cable
+is no longer needed at home.
 
 ## Verified on real hardware
 

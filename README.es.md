@@ -74,7 +74,7 @@ node bin/call.mjs list_elements '{"device":"<device UUID>"}'
 
 **Poki Agent.** El agente de terminal independiente funciona igual en Linux (`npm ci --prefix agent` y luego `poki login`); consulta [Ejecutar Poki Agent](agent/README.md). La única excepción es el canal de iMessage: necesita un servidor BlueBubbles, que a su vez requiere un Mac. Telegram funciona.
 
-**Conexión inalámbrica.** El uso remoto mediante Tailscale (RemotePairing) está integrado en el puente y es independiente de la plataforma; los pasos de [remote-iphone.md](docs/remote-iphone.md) se aplican igual, con el directorio de estado de este repositorio. La ruta de Tailscale en sí aún no está verificada en un anfitrión Linux, pero el mismo mecanismo RemotePairing sí se ha verificado aquí a través de la red local, usando la dirección LAN del iPhone en lugar de una de Tailscale; a partir de ahí, en casa ya no hace falta el cable.
+**Conexión inalámbrica.** El uso remoto mediante Tailscale o la LAN (RemotePairing) está integrado en el puente y es independiente de la plataforma. En iOS 27+ la primera vinculación puede crearse de forma inalámbrica con `node bin/prepare-remote.mjs --wireless`; los sistemas anteriores siguen usando el arranque por USB. Los pasos de [remote-iphone.md](docs/remote-iphone.md) se aplican igual, con el directorio de estado de este repositorio. La ruta de Tailscale en sí aún no está verificada en un anfitrión Linux, pero el mismo mecanismo RemotePairing sí se ha verificado aquí a través de la red local, usando la dirección LAN del iPhone en lugar de una de Tailscale; a partir de ahí, en casa ya no hace falta el cable.
 
 ## Verificado en hardware real
 
