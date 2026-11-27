@@ -202,30 +202,16 @@ for (const samePort of [true, false]) {
 }
 
 for (const signal of ['SIGTERM', 'SIGKILL']) {
-  test(`a connected client says to run npm start while the service is down after ${signal}, and works again once it is back`, { timeout: 30000 }, async t => {
+  test(`a connected client starts the service again after ${signal}, without printing the token`, { timeout: 30000 }, async t => {
     const f = await fixture(t);
-    const { token } = await endpointOf(f);
+    const { token, pid } = await endpointOf(f);
     await f.daemon.stop(signal);
-    const down = await probe(f);
-    assert.equal(down.isError, true);
-    assert.match(down.content[0].text, /npm start/);
-    assert.ok(!down.content[0].text.includes(token));
-    await f.startDaemon();
     const back = await probe(f);
     assert.ok(!back.isError, back.content[0].text);
+    assert.ok(!back.content[0].text.includes(token));
+    assert.notEqual((await endpointOf(f)).pid, pid);
   });
 }
-
-test('a client started with no service says to run npm start, with the endpoint file left behind or gone', { timeout: 30000 }, async t => {
-  const f = await fixture(t);
-  const { token } = await endpointOf(f);
-  await f.daemon.stop('SIGKILL');
-  const start = () => promisify(execFile)(process.execPath, [join(f.dir, 'src/stdio.mjs')], { env: f.env, timeout: 10000 }).then(() => assert.fail('stdio kept running'), error => error.stderr);
-  for (const stderr of [await start(), await rm(endpointFile(f)).then(start)]) {
-    assert.match(stderr, /npm start/);
-    assert.ok(!stderr.includes(token));
-  }
-});
 
 test('a token the service still rejects after the re-read is reported without printing any token', { timeout: 30000 }, async t => {
   const f = await fixture(t);

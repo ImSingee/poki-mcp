@@ -12,10 +12,27 @@ import { stateDir, endpointFile } from './config.mjs';
 import { startUpdateChecks } from './update-check.mjs';
 import { warnIfNativeStale } from './build-info.mjs';
 import { closeLocalHelpers, remoteDevices, warmRemote } from './remote.mjs';
+import { version, codeFingerprint, currentCodeFingerprint } from './build-info.mjs';
+import { approvalMode } from './human.mjs';
+import { runningDaemon, alive } from './daemon-launch.mjs';
 
+// --auto: started by a stdio shim (src/daemon-launch.mjs). It takes a free port unless --port says
+// otherwise, leaves when another daemon already serves this state directory, and exits once it has
+// been idle for POKI_DAEMON_IDLE_EXIT_MS. Started with npm start, it keeps running until stopped.
+const auto = process.argv.includes('--auto');
 const portIndex = process.argv.indexOf('--port');
-const port = portIndex < 0 ? 47825 : Number(process.argv[portIndex + 1]);
+const port = portIndex < 0 ? (auto ? 0 : 47825) : Number(process.argv[portIndex + 1]);
 if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Invalid port');
+const idleExitMs = Number(process.env.POKI_DAEMON_IDLE_EXIT_MS ?? 600000);
+if (!Number.isFinite(idleExitMs) || idleExitMs <= 0) throw new Error('POKI_DAEMON_IDLE_EXIT_MS must be a positive number of milliseconds.');
+const approval = approvalMode();
+if (auto) {
+  const other = await runningDaemon().catch(() => undefined);
+  if (other && other.endpoint.pid !== process.pid) {
+    console.log(JSON.stringify({ event: 'already-running', pid: other.endpoint.pid }));
+    process.exit(0);
+  }
+}
 await warnIfNativeStale();
 const sessions = new Map();
 const coordinator = new Coordination();
@@ -61,6 +78,36 @@ const tls = tlsCert ? { cert: await readFile(tlsCert), key: await readFile(tlsKe
 const validHost = hostAllow.length ? hostHeaderValidation(hostAllow) : localhostHostValidation();
 const validOrigin = localhostOriginValidation();
 const active = new Set();
+// Each session's shim sends its pid, so a shim that died without closing its session (a pool that
+// reaps idle stdio processes with SIGKILL) does not keep the session, or this daemon, alive forever.
+// A session without one is dropped after being idle for as long as an automatic daemon waits.
+const lastSeen = new Map(), clientPids = new Map();
+let lastActivity = performance.now();
+const sessionBusy = session => [...coordinator.operations].some(op => op.owner === session)
+  || [...coordinator.leases.values()].some(lease => lease.owner === session) || session.backgroundDevices?.size > 0;
+const busyReasons = () => {
+  const reasons = [];
+  if (coordinator.leases.size) reasons.push(`${coordinator.leases.size} device lease(s)`);
+  if (coordinator.operations.size) reasons.push(`${coordinator.operations.size} tool call(s) in progress`);
+  const background = [...sessions.values()].reduce((count, session) => count + (session.backgroundDevices?.size ?? 0), 0);
+  if (background) reasons.push(`background work (recording or simulated location) on ${background} device(s)`);
+  return reasons;
+};
+async function pruneSessions() {
+  for (const [id, session] of [...sessions]) {
+    const pid = clientPids.get(id);
+    const gone = pid ? !alive(pid) : performance.now() - (lastSeen.get(id) ?? 0) > idleExitMs;
+    if (gone && !sessionBusy(session)) {
+      sessions.delete(id); lastSeen.delete(id); clientPids.delete(id);
+      await session.close().catch(() => {});
+    }
+  }
+}
+const versionInfo = async () => {
+  const reasons = busyReasons();
+  // stale: this checkout's files changed after this process loaded them.
+  return { version, code: codeFingerprint, stale: await currentCodeFingerprint() !== codeFingerprint, pid: process.pid, auto, approval_mode: approval, sessions: sessions.size, busy: reasons.length > 0, busy_reasons: reasons };
+};
 
 async function handle(req, res) {
   if (!validHost(req, res) || !validOrigin(req, res)) return;
@@ -70,16 +117,36 @@ async function handle(req, res) {
     res.end(JSON.stringify({ error: 'Authorization required' }));
     return;
   }
+  lastActivity = performance.now();
+  if (req.url === '/version') {
+    if (req.method !== 'GET') { res.writeHead(405); res.end(); return; }
+    await pruneSessions();
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(await versionInfo())); return;
+  }
+  if (req.url === '/shutdown') {
+    if (req.method !== 'POST') { res.writeHead(405); res.end(); return; }
+    // Only an automatic daemon with nothing to lose stops this way; it is how a newer shim replaces it.
+    await pruneSessions();
+    const reasons = busyReasons();
+    if (!auto || reasons.length) { res.writeHead(409, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ stopped: false, auto, busy_reasons: reasons })); return; }
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ stopped: true }));
+    console.log(JSON.stringify({ event: 'replaced' }));
+    void stop();
+    return;
+  }
   if (!['/mcp', '/session/close', '/request/cancel'].includes(req.url)) { res.writeHead(404); res.end(); return; }
   const session = req.headers['x-poki-mcp-session'];
   if (typeof session !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(session)) { res.writeHead(400); res.end('Invalid session'); return; }
+  lastSeen.set(session, performance.now());
+  const clientPid = Number(req.headers['x-poki-mcp-client-pid']);
+  if (Number.isInteger(clientPid) && clientPid > 0) clientPids.set(session, clientPid);
   if (!sessions.has(session)) sessions.set(session, new Devices(coordinator));
   const devices = sessions.get(session);
   devices.peers = () => sessions.values();
   devices.label ??= session;
   if (req.url === '/session/close') {
     if (req.method !== 'POST') { res.writeHead(405); res.end(); return; }
-    await devices.close(); sessions.delete(session); res.end('{}'); return;
+    await devices.close(); sessions.delete(session); lastSeen.delete(session); clientPids.delete(session); res.end('{}'); return;
   }
   if (req.url === '/request/cancel') {
     if (req.method !== 'POST') { res.writeHead(405); res.end(); return; }
@@ -119,7 +186,7 @@ const temporary = `${endpointFile}.${process.pid}.tmp`;
 await writeFile(temporary, JSON.stringify(entry, null, 2), { mode: 0o600, flag: 'wx' });
 await rename(temporary, endpointFile);
 await chmod(endpointFile, 0o600);
-console.log(JSON.stringify({ event: 'ready', url: entry.url, endpointFile, tools: definitions.length }));
+console.log(JSON.stringify({ event: 'ready', pid: process.pid, url: entry.url, endpointFile, tools: definitions.length, auto, approval_mode: approval }));
 
 const stopUpdateChecks = startUpdateChecks();
 
@@ -140,10 +207,29 @@ async function stop() {
   await closeLocalHelpers();
   await closed;
   const entry = await readFile(endpointFile, 'utf8').then(JSON.parse).catch(() => null);
-  if (entry?.pid === process.pid) await unlink(endpointFile);
+  if (entry?.pid === process.pid) await unlink(endpointFile).catch(() => {});
+  // Whatever still holds the event loop (a helper's socket, a pending update check) must not keep a
+  // stopped daemon around.
+  setTimeout(() => process.exit(0), 2000).unref();
 }
 process.on('SIGINT', () => void stop());
 process.on('SIGTERM', () => void stop());
+
+if (auto) {
+  // Idle: no session (a dead client's session is pruned), no lease, no call in progress and no
+  // background work, for idleExitMs since the last of them.
+  let idleSince = performance.now();
+  const idleCheck = setInterval(async () => {
+    await pruneSessions();
+    if (sessions.size || busyReasons().length || active.size) { idleSince = performance.now(); return; }
+    if (performance.now() - Math.max(idleSince, lastActivity) >= idleExitMs) {
+      clearInterval(idleCheck);
+      console.log(JSON.stringify({ event: 'idle-exit', idle_ms: idleExitMs }));
+      await stop();
+    }
+  }, Math.min(30000, Math.max(50, idleExitMs / 5)));
+  process.on('exit', () => clearInterval(idleCheck));
+}
 
 const supervisedBy = Number(process.env.POKI_PARENT_PID ?? '');
 if (Number.isInteger(supervisedBy) && supervisedBy > 0) {

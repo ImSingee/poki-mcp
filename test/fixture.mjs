@@ -121,7 +121,7 @@ else if(tool==='osascript'||tool==='zenity') {log({dialog:true});setInterval(()=
 else throw Error('Unexpected fixture command '+tool);
 `;
 export const value = result => JSON.parse(result.content.find(c => c.type === 'text').text);
-export async function fixture(t, { approvalMode = 'ask', staleNative = false, toolsProfile = '', beforeStart, extraEnv } = {}) {
+export async function fixture(t, { approvalMode = 'ask', staleNative = false, toolsProfile = '', beforeStart, extraEnv, daemon: startFirst = true } = {}) {
  const dir=await mkdtemp(join(tmpdir(),'poki-coordination-'));
  await cp(join(root,'src'),join(dir,'src'),{recursive:true});
  await cp(join(root,'package.json'),join(dir,'package.json'));
@@ -132,14 +132,18 @@ export async function fixture(t, { approvalMode = 'ask', staleNative = false, to
  for(const tool of ['python3','xcrun','idevice','ffmpeg','ffprobe','osascript','zenity','pymobiledevice3'])await writeFile(join(dir,'bin',tool),fixtureProgram,{mode:0o755});
  for(const tool of ['poki-native','ocr','simulator'])await writeFile(join(dir,'build',tool),fixtureProgram,{mode:0o755});
  if(staleNative){await mkdir(join(dir,'native/bridge/src'),{recursive:true});await writeFile(join(dir,'native/bridge/src/main.rs'),'fn main() {}');await utimes(join(dir,'build/poki-native'),1,1);}
- const env={...process.env,POKI_NO_UPDATE_CHECK:'1',POKI_MCP_TOOLS:toolsProfile,POKI_MCP_APPROVAL_MODE:approvalMode,HOME:dir,PATH:join(dir,'bin')+':'+process.env.PATH,POKI_MCP_STATE_DIR:join(dir,'state'),IDEVICE_TOOLS:join(dir,'bin/idevice'),FIXTURE_STATE:state,FIXTURE_LOG:log,FIXTURE_IMAGE:image,...extraEnv?.(dir)};
+ const env={...process.env,POKI_DAEMON_IDLE_EXIT_MS:'120000',POKI_NO_UPDATE_CHECK:'1',POKI_MCP_TOOLS:toolsProfile,POKI_MCP_APPROVAL_MODE:approvalMode,HOME:dir,PATH:join(dir,'bin')+':'+process.env.PATH,POKI_MCP_STATE_DIR:join(dir,'state'),IDEVICE_TOOLS:join(dir,'bin/idevice'),FIXTURE_STATE:state,FIXTURE_LOG:log,FIXTURE_IMAGE:image,...extraEnv?.(dir)};
  let stderr='';
  const daemons=[];
- const startDaemon=async(port=0)=>{const child=spawn(process.execPath,[join(dir,'src/daemon.mjs'),'--port',String(port)],{env,stdio:['ignore','pipe',staleNative?'pipe':'inherit']});child.stderr?.on('data',chunk=>{stderr+=chunk;});const exited=once(child,'exit'),lines=createInterface({input:child.stdout});await once(lines,'line');const running={stop:async(signal='SIGTERM')=>{child.kill(signal);await exited;lines.close();}};daemons.push(running);return running;};
+ const startDaemon=async(port=0)=>{const child=spawn(process.execPath,[join(dir,'src/daemon.mjs'),'--port',String(port)],{env,stdio:['ignore','pipe',staleNative?'pipe':'inherit']});child.stderr?.on('data',chunk=>{stderr+=chunk;});const exited=once(child,'exit'),lines=createInterface({input:child.stdout});await once(lines,'line');const running={pid:child.pid,stop:async(signal='SIGTERM')=>{child.kill(signal);await exited;lines.close();}};daemons.push(running);return running;};
  await beforeStart?.(dir);
- const daemon=await startDaemon();
+ const daemon=startFirst?await startDaemon():undefined;
  const clients=[];
- t.after(async()=>{await Promise.allSettled(clients.map(c=>c.close()));await Promise.all(daemons.map(d=>d.stop()));await rm(dir,{recursive:true,force:true});});
+ // A shim starts its own daemon (--auto, detached) when none runs; it is found through mcp.json.
+ const autoDaemons=new Set();
+ const noteAutoDaemon=async()=>{const entry=await readFile(join(dir,'state/mcp.json'),'utf8').then(JSON.parse).catch(()=>null);if(entry?.pid&&!daemons.some(d=>d.pid===entry.pid))autoDaemons.add(entry.pid);};
+ const stopAutoDaemons=async()=>{await noteAutoDaemon();for(const line of (await readFile(join(dir,'state/daemon.log'),'utf8').catch(()=>'')).split('\n')){try{const event=JSON.parse(line);if(event.event==='ready')autoDaemons.add(event.pid);}catch{}}for(const pid of autoDaemons){try{process.kill(pid,'SIGKILL');}catch{}}};
+ t.after(async()=>{await Promise.allSettled(clients.map(c=>c.close()));await Promise.all(daemons.map(d=>d.stop()));await stopAutoDaemons();await rm(dir,{recursive:true,force:true});});
  const connect=async(profile=toolsProfile)=>{const c=new Client({name:'fixture-client',version:'1'});await c.connect(new StdioClientTransport({command:process.execPath,args:[join(dir,'src/stdio.mjs')],env:{...env,POKI_MCP_TOOLS:profile}}));clients.push(c);return c;};
  const a=await connect();
  // Read the append-only log directly so a write between reads cannot be missed.
@@ -151,5 +155,5 @@ export async function fixture(t, { approvalMode = 'ask', staleNative = false, to
    await new Promise(resolve=>setTimeout(resolve,25));
   }
  };
- return {a,connect,dir,env,until,image,daemon,startDaemon,get stderr(){return stderr;},set:async data=>{const temporary=`${state}.${process.pid}.tmp`;await writeFile(temporary,JSON.stringify(data));await rename(temporary,state);},events:async()=> (await readFile(log,'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse),call:(name,args={})=>a.callTool({name,arguments:args})};
+ return {a,connect,dir,env,until,image,daemon,startDaemon,noteAutoDaemon,get stderr(){return stderr;},set:async data=>{const temporary=`${state}.${process.pid}.tmp`;await writeFile(temporary,JSON.stringify(data));await rename(temporary,state);},events:async()=> (await readFile(log,'utf8')).trim().split('\n').filter(Boolean).map(JSON.parse),call:(name,args={})=>a.callTool({name,arguments:args})};
 }

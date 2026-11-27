@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { readdir, stat, access, constants, readFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { root } from './config.mjs';
@@ -23,6 +24,11 @@ async function codeMarker() {
 }
 
 const startupCode = await codeMarker();
+// Identifies the code this process loaded, so a shim can tell whether a running daemon loaded the same.
+const fingerprint = marker => createHash('sha256').update(marker).digest('hex').slice(0, 16);
+export const codeFingerprint = fingerprint(startupCode);
+// The code on disk now, which a running daemon must match (see daemon-launch.mjs).
+export const currentCodeFingerprint = async () => fingerprint(await codeMarker());
 
 export async function requireCurrentCode() {
   if (await codeMarker() !== startupCode) {
