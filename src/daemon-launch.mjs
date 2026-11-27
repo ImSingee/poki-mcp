@@ -5,8 +5,8 @@
 // start and reap stdio processes freely still share it. The daemon a shim starts runs with --auto:
 // it picks a free port, writes mcp.json like `npm start` does, and exits after it has been idle for
 // POKI_DAEMON_IDLE_EXIT_MS. A daemon started with `npm start` is used as it is and never restarted.
-import { open, readFile, unlink, mkdir, stat } from 'node:fs/promises';
-import { openSync, closeSync, readFileSync } from 'node:fs';
+import { open, readFile, unlink, mkdir, stat, utimes } from 'node:fs/promises';
+import { openSync, closeSync, readFileSync, readlinkSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
@@ -17,18 +17,28 @@ import { version } from './build-info.mjs';
 export const lockFile = join(stateDir, 'daemon.lock');
 export const logFile = join(stateDir, 'daemon.log');
 const startTimeoutMs = 60000;
+// A shim holding the start lock touches it this often; a lock left untouched for lockStaleMs is
+// stale, whoever its pid now names.
+const lockTouchMs = 2000, lockStaleMs = 20000;
 
 export function alive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
 }
+// The PID namespace this process runs in (Linux), recorded beside every pid this module writes. A pid
+// written in another namespace (another container sharing the state directory) says nothing here, so
+// it is only checked when the namespaces match. On macOS both sides have none.
+export const pidNamespace = (() => { try { return readlinkSync('/proc/self/ns/pid'); } catch { return undefined; } })();
+const sameNamespace = record => (record?.pid_ns ?? undefined) === pidNamespace;
+// Known to be gone: its pid is checked only when it is visible from here.
+const deadHere = record => sameNamespace(record) && !alive(record.pid);
 
 export async function readEndpoint() {
   const entry = await readFile(endpointFile, 'utf8').then(JSON.parse).catch(() => null);
   if (!entry) return null;
   const url = new URL(entry.url);
   if (!entry.enabled || url.hostname !== '127.0.0.1' || url.protocol !== 'http:' || url.pathname !== '/mcp') throw new Error(`Invalid local MCP endpoint in ${endpointFile}`);
-  return { url, token: entry.token, pid: entry.pid };
+  return { url, token: entry.token, pid: entry.pid, pid_ns: entry.pid_ns };
 }
 
 // a < b for x.y.z versions; anything unparsable counts as different, so as older.
@@ -49,10 +59,18 @@ export async function daemonInfo(endpoint) {
   return response.json();
 }
 
-async function waitForExit(pid, ms) {
+// A stopping daemon removes its own mcp.json entry last (daemon.mjs stop()), so once the entry no
+// longer names it, it will not touch mcp.json again and a new daemon can be started. One that died
+// before removing it is gone when its pid is (seen from here) or nothing answers on its port.
+async function waitForExit(endpoint, ms) {
   const end = performance.now() + ms;
-  while (alive(pid)) {
-    if (performance.now() >= end) throw new Error(`Poki MCP (pid ${pid}) did not stop within ${ms} ms.`);
+  for (;;) {
+    const named = await readEndpoint().catch(() => null);
+    if (named?.pid !== endpoint.pid || deadHere(endpoint)) return;
+    if (performance.now() >= end) {
+      if (await daemonInfo(endpoint).then(() => false, error => refused(error))) return;
+      throw new Error(`Poki MCP (pid ${endpoint.pid}) did not stop within ${ms} ms.`);
+    }
     await sleep(50);
   }
 }
@@ -76,36 +94,68 @@ async function breakStaleLock(held) {
   finally { await handle.close(); await unlink(breaker).catch(() => {}); }
 }
 
-// The lock only decides which shim starts the daemon. A holder that died leaves its pid behind,
-// and that lock is broken; a lock whose holder has not written its pid yet is waited for.
+// The lock only decides which shim starts the daemon. Its holder touches it while it waits for the
+// daemon, so a lock left untouched for lockStaleMs is stale even when its pid now names another live
+// process or lives in another PID namespace; a holder that died here is seen at once.
 async function takeLock() {
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
-  const content = JSON.stringify({ pid: process.pid, nonce: randomUUID() });
+  const content = JSON.stringify({ pid: process.pid, ...(pidNamespace ? { pid_ns: pidNamespace } : {}), nonce: randomUUID() });
   try {
     const handle = await open(lockFile, 'wx', 0o600);
     try { await handle.writeFile(content); } finally { await handle.close(); }
-    // Only this shim removes its own lock while it lives, so reading and then unlinking is safe here.
-    return { release: async () => { if (await readFile(lockFile, 'utf8').catch(() => null) === content) await unlink(lockFile).catch(() => {}); } };
+    let touched = Date.now();
+    return {
+      touch: async () => { if (Date.now() - touched >= lockTouchMs) { touched = Date.now(); await utimes(lockFile, new Date(), new Date()).catch(() => {}); } },
+      // Only this shim removes its own lock while it lives, so reading and then unlinking is safe here.
+      release: async () => { if (await readFile(lockFile, 'utf8').catch(() => null) === content) await unlink(lockFile).catch(() => {}); },
+    };
   } catch (error) { if (error.code !== 'EEXIST') throw error; }
   const held = await readFile(lockFile, 'utf8').catch(() => null);
   if (held === null) return null;
+  let holder;
+  try { holder = JSON.parse(held); } catch {}
+  const age = Date.now() - ((await stat(lockFile).catch(() => null))?.mtimeMs ?? Date.now());
+  if (age > lockStaleMs || (Number.isInteger(holder?.pid) && deadHere(holder))) await breakStaleLock(held);
+  return null;
+}
+
+// Who holds the start lock, for an error that says why nothing started.
+async function lockHolder() {
+  const held = await readFile(lockFile, 'utf8').catch(() => null);
+  if (held === null) return '';
   let pid;
   try { pid = JSON.parse(held).pid; } catch {}
-  const stale = pid === undefined
-    ? Date.now() - ((await stat(lockFile).catch(() => null))?.mtimeMs ?? Date.now()) > 10000
-    : !alive(pid);
-  if (stale) await breakStaleLock(held);
-  return null;
+  const age = Math.round((Date.now() - ((await stat(lockFile).catch(() => null))?.mtimeMs ?? Date.now())) / 1000);
+  return ` The start lock ${lockFile} is held${pid ? ` by pid ${pid}` : ''} (touched ${age} s ago); if no Poki MCP client is starting the service, delete it.`;
+}
+
+// The environment an automatically started daemon gets. It outlives the client that started it and
+// serves every other client of this state directory, so it takes only what it and the host tools it
+// runs need: never the starting client's secrets (POKI_IPHONE_PASSCODE, model API keys, tokens).
+// POKI_DAEMON_ENV names further variables to pass, comma-separated.
+const systemEnv = new Set(['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LANGUAGE', 'TZ',
+  // Dialogs (ask approval mode), Xcode, usbmuxd, certificates and proxies.
+  'DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS', 'DEVELOPER_DIR', 'USBMUXD_SOCKET_ADDRESS',
+  'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS', 'NODE_USE_ENV_PROXY', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
+  'IDEVICE_TOOLS']);
+// Every POKI_ setting the daemon reads. Not POKI_MCP_TOKEN (an automatic daemon makes its own), and
+// not POKI_PARENT_PID or POKI_MCP_SESSION, which belong to the shim's own client.
+export const daemonSettings = new Set(['POKI_ALLOW_PLAINTEXT_BIND', 'POKI_BIND_HOST', 'POKI_BUILD_COMMIT', 'POKI_CUA_ACTION_CAP_MS', 'POKI_CUA_BACKEND',
+  'POKI_CUA_TREE_MS', 'POKI_DAEMON_IDLE_EXIT_MS', 'POKI_DDI_DIR', 'POKI_HOST_ALLOW', 'POKI_INPUT_LOCK_WAIT_MS', 'POKI_MAX_CONCURRENT_READS', 'POKI_MCP_APPROVAL_MODE',
+  'POKI_MCP_CALL_LOG', 'POKI_MCP_NATIVE_TRACE', 'POKI_MCP_STATE_DIR', 'POKI_MCP_TOOLS', 'POKI_NATIVE', 'POKI_NO_UPDATE_CHECK', 'POKI_PYMOBILEDEVICE3',
+  'POKI_TLS_CERT', 'POKI_TLS_KEY', 'POKI_TOOL_PROFILE', 'POKI_WDA_URL']);
+export function daemonEnvironment(env = process.env) {
+  const extra = new Set((env.POKI_DAEMON_ENV ?? '').split(',').map(name => name.trim()).filter(Boolean));
+  const passed = name => systemEnv.has(name) || daemonSettings.has(name) || /^(LC_|XDG_)/.test(name) || extra.has(name);
+  return Object.fromEntries(Object.entries(env).filter(([name, value]) => value !== undefined && passed(name)));
 }
 
 const logTail = () => { try { return readFileSync(logFile, 'utf8').trim().split('\n').slice(-5).join('\n'); } catch { return ''; } };
 
 // Resolves to the started daemon's endpoint, or null when it found another daemon and left.
-async function spawnDaemon(deadline) {
+async function spawnDaemon(deadline, lock) {
   const log = openSync(logFile, 'a', 0o600);
-  const env = { ...process.env };
-  // The daemon outlives this shim: it must not watch the shim's parent or carry its session.
-  delete env.POKI_PARENT_PID; delete env.POKI_MCP_SESSION;
+  const env = daemonEnvironment();
   let child;
   try { child = spawn(process.execPath, [join(root, 'src/daemon.mjs'), '--auto'], { detached: true, stdio: ['ignore', log, log], env, cwd: root }); }
   finally { closeSync(log); }
@@ -121,6 +171,7 @@ async function spawnDaemon(deadline) {
     // Ready: ours, or another one that won a race to start (ours then leaves by itself).
     const running = await runningDaemon().catch(() => undefined);
     if (running && (running.endpoint.pid === child.pid || running.info.auto)) return { ...running.endpoint, info: running.info };
+    await lock.touch();
     await sleep(50);
   }
   throw new Error(`Poki MCP did not become ready within ${startTimeoutMs} ms. The end of ${logFile}:\n${logTail()}`);
@@ -130,11 +181,11 @@ const refused = error => error?.cause?.code === 'ECONNREFUSED';
 
 // The daemon named in mcp.json, with what it reports: null when there is none, its process is gone,
 // or nothing listens on its port any more (a daemon writes mcp.json only once it listens, so a
-// refused connection means it stopped or its pid now belongs to another process). undefined when
-// it is there but did not answer yet.
+// refused connection means it stopped). undefined when it is there but did not answer yet. Whether
+// it runs is decided by its answer, not its pid, which may belong to another PID namespace.
 export async function runningDaemon() {
   const endpoint = await readEndpoint().catch(() => null);
-  if (!endpoint || !alive(endpoint.pid)) return null;
+  if (!endpoint || deadHere(endpoint)) return null;
   try { return { endpoint, info: await daemonInfo(endpoint) }; }
   catch (error) {
     // A daemon from before 0.2.0 has no /version, and only npm start started those.
@@ -149,7 +200,7 @@ export async function runningDaemon() {
 export async function ensureDaemon({ timeoutMs = startTimeoutMs } = {}) {
   const deadline = performance.now() + timeoutMs;
   for (;;) {
-    if (performance.now() >= deadline) throw new Error(`Poki MCP did not become reachable within ${timeoutMs} ms. The end of ${logFile}:\n${logTail()}`);
+    if (performance.now() >= deadline) throw new Error(`Poki MCP did not become reachable within ${timeoutMs} ms.${await lockHolder()} The end of ${logFile}:\n${logTail()}`);
     const running = await runningDaemon();
     if (running === undefined) { await sleep(100); continue; }
     if (running) {
@@ -162,7 +213,7 @@ export async function ensureDaemon({ timeoutMs = startTimeoutMs } = {}) {
       const response = await fetch(new URL('/shutdown', endpoint.url), { method: 'POST', headers: authorized(endpoint), signal: AbortSignal.timeout(3000) }).catch(() => null);
       await response?.body?.cancel();
       // 409: work started in between, and the next round reports it.
-      if (response?.status !== 409) await waitForExit(endpoint.pid, 15000);
+      if (response?.status !== 409) await waitForExit(endpoint, 15000);
       continue;
     }
     const lock = await takeLock();
@@ -170,7 +221,7 @@ export async function ensureDaemon({ timeoutMs = startTimeoutMs } = {}) {
     try {
       // Another shim may have started one between the check above and taking the lock.
       if (await runningDaemon() !== null) continue;
-      const started = await spawnDaemon(deadline);
+      const started = await spawnDaemon(deadline, lock);
       if (started) return started;
     } finally { await lock.release(); }
   }

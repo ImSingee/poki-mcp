@@ -32,6 +32,9 @@ chmod 700 "$CONF_DIR" "$CONF_DIR/state"
 # but anyone who can run docker here can read the files they came from anyway.
 {
   echo "POKI_MCP_STATE_DIR=/state"
+  # The daemon runs in the poki container, which has the USB connection. When it is down, a call
+  # here fails instead of starting a daemon in this container, which cannot reach the phone.
+  echo "POKI_MCP_AUTOSTART=0"
   echo "HOME=/root"
   echo "TELEGRAM_BOT_TOKEN=$(cat "$TOKEN_FILE")"
 } > "$ENV_FILE"

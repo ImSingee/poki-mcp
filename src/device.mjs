@@ -12,7 +12,7 @@ import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import { root, stateDir, idevice, noUsbDevice } from './config.mjs';
-import { definitions, stepSchema, sessionTools, pairingTools } from './tools.mjs';
+import { definitions, stepSchema, sessionTools, approvedTools, hostGated, pairingTools } from './tools.mjs';
 import { platformTool, inventorySimulators, simulatorModels, readSettings, closePlatform } from './platform.mjs';
 import { interaction, promptWarning, readScreen, describeScreen, screenChanged, whatMoved, justReadMs, confirmAfterMs, launchWithinMs, launchPollMs } from './interaction.mjs';
 import { askHuman, approvalMode } from './human.mjs';
@@ -28,7 +28,6 @@ export const text = value => ({ content: [{ type: 'text', text: typeof value ===
 // then the same data as JSON for the model.
 const structured = (value, lead) => ({ content: [...(lead ? [{ type: 'text', text: lead }] : []), { type: 'text', text: JSON.stringify(value, null, 2) }], structuredContent: value });
 const usedSimulators = new Set();
-const approvedTools = new Set(['install_app', 'uninstall_app', 'build_and_run', 'open_url', 'download_app_container', 'get_clipboard', 'set_clipboard']);
 const platformTools = new Set(['start_simulator', 'shut_down_simulator', 'start_recording', 'stop_recording', 'set_appearance', 'set_accessibility', 'list_apps', 'launch_app', 'terminate_app', 'install_app', 'uninstall_app', 'open_settings', 'open_url', 'build_and_run', 'set_location', 'clear_location', 'get_clipboard', 'set_clipboard', 'list_crashes', 'get_crash', 'download_app_container']);
 
 // A simulator reads its screen in about 0.2 s, so five seconds covers the two reads that call a screen
@@ -451,7 +450,9 @@ export class DeviceContext {
   }
   // Runs one tool on this device. The call was routed here by its device argument (or it is a step of
   // a batch on this device), so device itself is no longer an argument.
-  async dispatch(name, original = {}) {
+  // direct: the client called this tool itself (not a batch step or a run_code call), so in host
+  // approval mode it was the one asked.
+  async dispatch(name, original = {}, { direct = false } = {}) {
     if (pairingTools.has(name)) throw new Error('Call pairing tools directly, not from a batch or run_code.');
     if (sessionTools.has(name)) return this.session.dispatchSession(name, original);
     const schema = stepSchema(name);
@@ -475,6 +476,8 @@ export class DeviceContext {
       if (approvedTools.has(name)) await this.target();
       // Says on the result who let it run, so an agent can tell a gated call from an ordinary one.
       const mode = approvedTools.has(name) ? approvalMode() : undefined;
+      const refused = direct ? null : hostGated(name, mode);
+      if (refused) return { isError: true, ...text({ executed: false, error: refused }), _meta: { stop_reason: 'error' } };
       const approval = mode === undefined ? undefined : { allow: { mode: 'operator-preapproved', approved_by: 'operator' }, host: { mode: 'host', approved_by: 'mcp-client' }, ask: { mode: 'ask-human', approved_by: 'human' } }[mode];
       if (approval?.mode === 'ask-human') {
         const detail = args.path ?? args.project_path ?? args.bundle_id ?? args.url ?? (name === 'set_clipboard' ? `${Buffer.byteLength(args.text)} 字节的文本` : '');
@@ -683,34 +686,37 @@ export class Session {
     }
     return this.coordinator.call(this, name, args, requestSignal, requestId, order);
   }
-  // Resolves once the calls before `order` in its stream have been placed on their queues, or after
-  // orderWaitMs when one of them never arrives (cancelled before it was sent).
+  // Resolves once every call before `order` in its stream has been placed on its queue, or after
+  // orderWaitMs when one of them never arrives (cancelled before it was sent): only then are the
+  // missing ones skipped.
   inOrder(order) {
     if (!order || typeof order.stream !== 'string' || !Number.isInteger(order.seq)) return Promise.resolve();
-    const streams = this.streams ??= new Map();
     const entry = this.stream(order.stream);
     if (order.seq <= entry.placed + 1) return Promise.resolve();
     return new Promise(resolve => {
-      const waiter = { seq: order.seq, resolve };
-      entry.waiters.push(waiter);
+      entry.waiters.push({ seq: order.seq, resolve });
       setTimeout(() => { entry.placed = Math.max(entry.placed, order.seq - 1); this.wakeStream(entry); }, orderWaitMs).unref();
     });
   }
-  // A shim numbers its calls from 1 for each daemon it reaches (stdio.mjs).
+  // A shim numbers its calls from 1 for each daemon it reaches (stdio.mjs). placed is the highest seq
+  // up to which every call has been placed; done holds calls placed after a gap.
   stream(id) {
     const streams = this.streams ??= new Map();
-    if (!streams.has(id)) streams.set(id, { placed: 0, waiters: [] });
+    if (!streams.has(id)) streams.set(id, { placed: 0, done: new Set(), waiters: [] });
     return streams.get(id);
   }
   // Also called for calls that take no place on a queue (lease management, a call cancelled before it
-  // arrived), so the calls after them do not wait for them.
+  // arrived), so the calls after them do not wait for them. A call placed after a gap does not let
+  // later calls past the gap.
   placed(order) {
     if (!order || typeof order.stream !== 'string' || !Number.isInteger(order.seq)) return;
     const entry = this.stream(order.stream);
-    entry.placed = Math.max(entry.placed, order.seq);
+    if (order.seq > entry.placed) entry.done.add(order.seq);
     this.wakeStream(entry);
   }
   wakeStream(entry) {
+    for (const seq of entry.done) if (seq <= entry.placed) entry.done.delete(seq);
+    while (entry.done.delete(entry.placed + 1)) entry.placed++;
     entry.waiters.sort((a, b) => a.seq - b.seq);
     while (entry.waiters.length && entry.waiters[0].seq <= entry.placed + 1) entry.waiters.shift().resolve();
   }
@@ -803,12 +809,12 @@ export class Session {
     if (name === 'start_simulator' && args.simulator === undefined && args.device === undefined) {
       if (!args.model) throw new Error('Give simulator (name or UDID) or model.');
       // A new simulator has no id yet; creations run one at a time.
-      return { keys: ['simulator:create'], run: () => new DeviceContext(this).dispatch(name, args) };
+      return { keys: ['simulator:create'], run: () => new DeviceContext(this).dispatch(name, args, { direct: true }) };
     }
     const query = name === 'start_simulator' ? args.simulator ?? args.device : args.device;
     if (typeof query !== 'string' || !query) throw new Error(`${name} needs device: an id from list_devices.`);
     const id = await this.resolveDevice(query);
-    return { keys: [id], run: () => this.context(id).dispatch(name, args) };
+    return { keys: [id], run: () => this.context(id).dispatch(name, args, { direct: true }) };
   }
   // run_code's calls each name a device, which must be one of the devices it named (and holds).
   scriptContext(named, ids) {

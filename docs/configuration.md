@@ -2,7 +2,7 @@
 
 Each (session, device) pair runs its calls in the order they were sent, and calls to different devices run at the same time; see [One daemon, several clients](tools.md#one-daemon-several-clients). Every setting below is optional.
 
-The daemon reads its settings from its own environment. A daemon started automatically by a stdio client inherits that client's environment, so set daemon settings such as `POKI_MCP_APPROVAL_MODE` in the client's MCP `env`. The client that starts the daemon decides; other clients share it as it is. A daemon started with `npm start` or a user service uses the environment it was started with.
+The daemon reads its settings from its own environment. A daemon started automatically by a stdio client takes its settings from that client's environment (only the variables listed [below](#environment-of-a-daemon-a-client-starts)), so set daemon settings such as `POKI_MCP_APPROVAL_MODE` in the client's MCP `env`. The client that starts the daemon decides; other clients share it as it is. A daemon started with `npm start` or a user service uses the environment it was started with.
 
 
 | Setting | Purpose |
@@ -15,9 +15,13 @@ The daemon reads its settings from its own environment. A daemon started automat
 | `POKI_MCP_TASK_APPROVAL_TIMEOUT_MINUTES` | How long `begin_task` waits for an answer. Defaults to 9. |
 | `POKI_MCP_TASK_APPROVAL_CLIENT` | Name shown at the start of the approval prompt. Defaults to `An MCP client`. |
 | `POKI_MCP_NATIVE_TRACE` | Enable native diagnostic timing output on `stderr`. |
+| `POKI_DDI_DIR` | A directory holding a developer disk image (`BuildManifest.plist` and its payloads) for `pair_device` to install over the RemotePairing tunnel. Without it Poki uses Xcode's `iOS_DDI/Restore`, a copy pymobiledevice3 already downloaded, or a pinned, checksummed download into the state directory. See [Pair iPhones over Wi-Fi](tools.md#pair-iphones-over-wi-fi). |
 | `POKI_BIND_HOST` | Addresses the local HTTP bridge listens on, comma-separated. Defaults to `127.0.0.1`; `127.0.0.1` is added to any list that has no `127.0.0.1` or wildcard entry, because local clients read a `127.0.0.1` endpoint from `mcp.json` and send that `Host` header. A wildcard address cannot be combined with others. |
 | `POKI_HOST_ALLOW` | Comma-separated `Host` header allowlist, for example `127.0.0.1,192.168.1.20`. When set, `hostHeaderValidation(list)` replaces `localhostHostValidation()`, which otherwise rejects every non-loopback `Host` with `403` and makes a LAN bind unusable. It must contain `127.0.0.1` itself: an entry for `localhost` or `[::1]` does not match the `Host` header local clients send. |
-| `POKI_MCP_TOKEN` | Fixed bearer token for the local HTTP bridge. Defaults to a random token generated at each start. Stdio clients read it from `mcp.json` themselves and never need it; direct HTTP clients must pick up the new one after each restart. |
+| `POKI_MCP_TOKEN` | Fixed bearer token for the local HTTP bridge. Defaults to a random token generated at each start. Stdio clients read it from `mcp.json` themselves and never need it; direct HTTP clients must pick up the new one after each restart. A daemon a stdio client starts never takes it and makes its own; set it for `npm start` or a user service. |
+| `POKI_MCP_AUTOSTART=0` | A stdio client only uses a daemon that already runs, and a call fails when none does, instead of starting one. For a client whose daemon runs elsewhere, such as the Telegram container in `deploy/istoreos`. |
+| `POKI_MCP_HEARTBEAT_MS` | How often a stdio client tells the daemon it is still there (default `10000`, from `100` to `60000`). The daemon closes a session that misses three heartbeats and has no request open. |
+| `POKI_DAEMON_ENV` | Comma-separated names of further variables a daemon started by a stdio client receives (see below). |
 | `POKI_DAEMON_IDLE_EXIT_MS` | How long a daemon started automatically by a stdio client waits while idle before it exits. Default 600000 (10 minutes). Idle means no session, no lease, no call in progress, and no background recording or simulated location. A session whose stdio process is gone is dropped first. A daemon started with `npm start` never exits on idle. |
 | `POKI_TLS_CERT`, `POKI_TLS_KEY` | PEM certificate and key paths, set together. Listeners on addresses other than loopback then serve HTTPS; `127.0.0.1` stays plain HTTP, because local clients read a `http://127.0.0.1` endpoint from `mcp.json`. A wildcard `POKI_BIND_HOST` is refused with them, since it would also take `127.0.0.1`. |
 | `POKI_ALLOW_PLAINTEXT_BIND=1` | Serve plain HTTP on addresses beyond loopback. Without TLS the daemon otherwise refuses them, because the bearer token would cross the network unencrypted. Set it only when that network is already encrypted end to end, such as a tailnet. |
@@ -26,7 +30,18 @@ The daemon reads its settings from its own environment. A daemon started automat
 | `POKI_MAX_CONCURRENT_READS` | How many read-only calls run at once. Default 4. |
 | `POKI_MCP_CALL_LOG` | Path of a log with one JSON line per tool call: tool, duration, verdict and whether it failed, never arguments, text or images. |
 
-The authenticated local HTTP bridge passes the session via the `x-poki-mcp-session` header. Standard MCP clients should always connect through `src/stdio.mjs`, which finds or starts the daemon, sends the session header, and sends its own pid so that the daemon can drop the session if the process dies without closing it.
+The authenticated local HTTP bridge passes the session via the `x-poki-mcp-session` header. Standard MCP clients should always connect through `src/stdio.mjs`, which finds or starts the daemon, sends the session header, and sends a heartbeat so that the daemon can drop the session if the process dies without closing it. Process ids are not used for this, so a client and a daemon in different PID namespaces share the state directory safely. A direct HTTP client sends no heartbeat; its session is dropped once it holds nothing and has been idle for `POKI_DAEMON_IDLE_EXIT_MS`.
+
+### Environment of a daemon a client starts
+
+A daemon started by a stdio client outlives that client and serves every other client of the state directory, so it receives only what it and the host tools it runs need:
+
+- the `POKI_` settings the daemon reads (those in the table above, except the client's own: `POKI_MCP_TOKEN`, `POKI_MCP_SESSION`, `POKI_MCP_AUTOSTART`, `POKI_MCP_HEARTBEAT_MS` and `POKI_DAEMON_ENV`);
+- `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR` (`TMP`, `TEMP`), `LANG`, `LANGUAGE`, `LC_*`, `TZ` and `XDG_*`;
+- for dialogs, Xcode, usbmuxd, certificates and proxies: `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `DBUS_SESSION_BUS_ADDRESS`, `DEVELOPER_DIR`, `USBMUXD_SOCKET_ADDRESS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`, `NODE_USE_ENV_PROXY`, `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` (either case), and `IDEVICE_TOOLS`;
+- the names listed in `POKI_DAEMON_ENV`.
+
+Everything else in the client's environment stays with the client, notably `POKI_IPHONE_PASSCODE`, model API keys and other secrets: neither the daemon nor the helpers and builds it runs see them. A daemon started with `npm start` or a user service keeps the whole environment it was started with.
 
 On loopback the token file is a local convenience rather than a remote access mechanism: nothing off the machine can reach the bridge. That changes as soon as `POKI_BIND_HOST` points at something else, because the bearer token then becomes the only thing between the network and full control of the device. Give it to a LAN or tailnet you trust, keep it in a mode-0600 file rather than a command line, and expect `403` from every client whose `Host` header is not in `POKI_HOST_ALLOW`.
 

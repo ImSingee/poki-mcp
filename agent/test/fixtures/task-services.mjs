@@ -86,6 +86,7 @@ export async function taskServices(directory, { route = false, appSearch = false
   const phone = http.createServer(async (req, res) => {
     if (req.headers.authorization !== 'Bearer local-mcp-fixture') { res.writeHead(401).end(); return; }
     if (req.url === '/version') { res.end(daemonVersion()); return; }
+    if (req.url === '/session/heartbeat') { res.end('{}'); return; }
     if (req.url === '/session/close' || req.url === '/request/cancel') { fixture.events.push({ type: req.url, foreground: fixture.foreground }); res.end('{}'); return; }
     if (req.url !== '/mcp') { res.writeHead(404).end(); return; }
     const dispatch = async (name, args) => {
@@ -95,7 +96,8 @@ export async function taskServices(directory, { route = false, appSearch = false
       await beforeDeviceCall?.(name, args);
       let result;
       if (name === 'poki_mcp_status') result = { connected: 1 };
-      else if (name === 'list_devices') result = { devices };
+      // As the daemon does: a sole device is named as the default.
+      else if (name === 'list_devices') result = { devices, ...(devices.length === 1 ? { default: devices[0].id } : {}) };
       else if (name === 'list_apps') result = { apps: [{ name: 'Channel fixture', bundle_id: 'org.example.channel-fixture', path: '/large/private/path', metadata: 'x'.repeat(2000) }, ...Array.from({ length: 400 }, (_, index) => ({ name: `Unused fixture app ${index}`, bundle_id: `org.example.unused-${index}`, metadata: 'x'.repeat(200) }))] };
       else if (name === 'get_foreground_app') {
         result = fixture.foregroundError ? { isError: true, error: 'Synthetic foreground unavailable' } : fixture.foreground;

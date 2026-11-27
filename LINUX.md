@@ -204,9 +204,9 @@ Pi (an entry in `~/.pi/agent/mcp.json`):
 With a non-default state directory, give every client the same
 `POKI_MCP_STATE_DIR` (and the user service, if you run one): the
 `--env` flag for `claude mcp add`, or an `env` object next to `args`
-for Pi. A daemon a client starts runs with that client's environment,
-so daemon settings such as `POKI_MCP_APPROVAL_MODE` go in the same
-place.
+for Pi. A daemon a client starts takes its settings from that client's
+environment (never its secrets), so daemon settings such as
+`POKI_MCP_APPROVAL_MODE` go in the same place.
 
 ### Approval on Linux
 
@@ -223,9 +223,13 @@ decides from the tools' `destructiveHint`/`openWorldHint` annotations.
 stdio MCP server on a headless Linux machine reached through
 `lh connect`, these tools therefore run with no confirmation at all
 unless you set them to require approval in the LobeHub connector's
-tool settings. `unpair_device` is one of them. Setting up the
-connector, binding it to the machine that runs Poki, and the pairing
-view are described in [docs/lobehub.md](docs/lobehub.md).
+tool settings. In `host` mode `batch_commands` and `run_code` refuse
+these tools, so the client is always asked about the tool itself.
+`unpair_device` also deletes a saved pairing; it carries
+`destructiveHint`, so set it to require approval as well if you want
+LobeHub to ask. Setting up the connector, binding it to the machine that
+runs Poki, and the pairing view are described in
+[docs/lobehub.md](docs/lobehub.md).
 
 With a display, the default is `ask`, which shows a `zenity` question
 dialog. `POKI_MCP_APPROVAL_MODE=allow` lets the tools run with nobody
