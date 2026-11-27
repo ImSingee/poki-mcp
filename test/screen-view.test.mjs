@@ -55,7 +55,7 @@ const hostPage = `<!doctype html><html><head><meta charset="utf-8"><style>body{m
 </script></body></html>`;
 
 // Poki's stream tools over a stand-in phone that sends the sample stream in a loop, 10 frames a second.
-function backend({ busy = false, garbleHevc = false, rtcOffer, inputDelayMs = 0, devices = [{ id: 'fixture-phone', name: 'Lab iPhone', kind: 'physical', connection: 'RemotePairing' }] } = {}) {
+function backend({ busy = false, garbleHevc = false, rtcOffer, openCodecString, inputDelayMs = 0, devices = [{ id: 'fixture-phone', name: 'Lab iPhone', kind: 'physical', connection: 'RemotePairing' }] } = {}) {
   const native = fakeNative();
   const screens = new Screens({ subscribe: native.subscribe, keyframe: native.keyframe });
   const session = { coordinator: new Coordination(), label: 'view session' };
@@ -80,6 +80,8 @@ function backend({ busy = false, garbleHevc = false, rtcOffer, inputDelayMs = 0,
         screens, resolve: async id => ({ id, kind: 'physical' }),
         native: async (target, request) => { inputs.push({ ...args, device: target.id, request }); if (inputDelayMs) await delay(inputDelayMs); return { sent: true }; },
       });
+      // A codec string the browser cannot configure, to make the first decoder fail at once.
+      if (name === 'screen_open' && openCodecString && result.structuredContent?.codec === 'hevc') result.structuredContent.codec_string = openCodecString;
       // Through the bridge, as JSON: a Buffer would not survive.
       return JSON.parse(JSON.stringify(result));
     } finally { inFlight--; }
@@ -262,4 +264,33 @@ test('a gesture still queued when the person switches iPhones is dropped, not se
   await until(async () => h.poki.calls.some(c => c.name === 'screen_open' && c.args.device === 'phone-b'));
   await delay(2500);
   assert.deepEqual(h.poki.inputs.map(i => i.device), ['phone-a'], `a queued gesture went to ${JSON.stringify(h.poki.inputs.map(i => i.device))}`);
+});
+
+test('choosing another iPhone closes the previous stream', { skip, timeout: 60000 }, async t => {
+  const devices = [{ id: 'phone-a', name: 'Phone A', kind: 'physical', connection: 'RemotePairing' }, { id: 'phone-b', name: 'Phone B', kind: 'physical', connection: 'RemotePairing' }];
+  const h = await open(t, { settings: { rtc: false, codecs: (await ffmpegAvailable()) ? ['jpeg'] : undefined }, backendOptions: { devices } });
+  await h.mount({ content: [{ type: 'text', text: 'shown' }], structuredContent: { device: 'phone-a' } });
+  await until(() => painted(h.frame()));
+  const first = (await h.screen()).stream;
+  await h.view.locator('#device').selectOption('phone-b');
+  await until(() => h.poki.calls.some(c => c.name === 'screen_close' && c.args.stream === first));
+  // Phone A's subscription ends with its only viewer, so its camera and microphone are released.
+  await until(() => h.poki.native.subscriptions[0].open === false);
+});
+
+test('a decoder that fails while WebRTC is still connecting falls back to the next codec', { skip, timeout: 60000 }, async t => {
+  if (!(await ffmpegAvailable())) return t.skip('ffmpeg is not installed, so there is no codec to fall back to');
+  const h = await open(t, { settings: { rtc: true, codecs: ['hevc', 'jpeg'] }, backendOptions: {
+    openCodecString: 'hvc1.99.not-a-codec',
+    // The answer takes 4 s: the decoder fails well before it.
+    rtcOffer: async () => { await delay(4000); return { isError: true, content: [{ type: 'text', text: 'no peer' }] }; },
+  } });
+  await h.mount(showResult);
+  await until(() => h.poki.calls.filter(c => c.name === 'screen_open').length >= 2, 30000);
+  const [first, second] = h.poki.calls.filter(c => c.name === 'screen_open');
+  assert.deepEqual(second.args.codecs, ['jpeg']);
+  // Not after the 4 s answer, and not by the decoder watchdog later: as soon as the decoder failed.
+  assert.ok(second.at - first.at < 3000, `the fallback waited ${second.at - first.at} ms`);
+  await until(async () => (await h.screen()).codec === 'jpeg', 30000);
+  await until(() => painted(h.frame()));
 });

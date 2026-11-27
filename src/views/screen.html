@@ -269,7 +269,9 @@ function openStream() {
 }
 async function startStream() {
   const generation = ++state.generation;
-  stop(false);
+  // The stream being replaced (another iPhone, another codec) is closed, not left to its lease:
+  // it holds that phone's camera and microphone, and any takeover.
+  stop();
   if (!state.device) return;
   showError(); notice('');
   const codecs = (await supportedCodecs()).filter(codec => !state.unavailable.has(codec));
@@ -290,6 +292,8 @@ async function startStream() {
 function fallBack(generation) {
   if (generation !== state.generation) return;
   state.unavailable.add(state.codec);
+  // Even while that attempt is still setting up (WebRTC): a new attempt replaces it.
+  opening = undefined;
   void openStream();
 }
 

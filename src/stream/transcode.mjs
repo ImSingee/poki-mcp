@@ -110,14 +110,16 @@ export class Transcoder {
     this.feeding = false;
     this.pts = [];
     const Splitter = this.mode === 'jpeg' ? JpegSplitter : AvcSplitter;
-    this.splitter = new Splitter(unit => {
+    // Bound to this child: a replaced encoder's late output is dropped, never put into the new chain.
+    const splitter = this.splitter = new Splitter(unit => {
+      if (this.child !== child) return;
       // One picture out per picture in (no B-frames, no lookahead); JPEG drops pictures, so it
       // takes the newest input time.
       const pts = this.mode === 'jpeg' ? this.pts.splice(0).at(-1) : this.pts.shift();
       this.onFrame?.({ ...unit, pts_us: pts ?? 0 });
     });
     let stderr = '';
-    child.stdout.on('data', chunk => this.splitter?.push(chunk));
+    child.stdout.on('data', chunk => { if (this.child === child) splitter.push(chunk); });
     child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-2000); });
     child.stdin.on('error', () => {});
     child.once('error', error => { stderr ||= error.message; });

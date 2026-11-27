@@ -7,7 +7,9 @@ import { describe, nalUnits } from '../src/stream/codec.mjs';
 import { Screens } from '../src/stream/hub.mjs';
 import { Flow, STALE_MS } from '../src/stream/flow.mjs';
 import { Track } from '../src/stream/track.mjs';
-import { ffmpegAvailable, JpegSplitter } from '../src/stream/transcode.mjs';
+import { ffmpegAvailable, JpegSplitter, Transcoder } from '../src/stream/transcode.mjs';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { sampleFrames, samplePath, fakeNative } from './stream-fixture.mjs';
 
 const target = { id: 'fixture-phone', kind: 'physical' };
@@ -274,4 +276,21 @@ test('a resync gives back the credit of frames a lost transport never delivered'
   flow.resync();
   track.push({ ...key, seq: 61, at: 0 });
   assert.deepEqual(flow.take(track, 0, { credit: 64, ...limits }).frames.map(f => [f.seq, f.key]), [[61, true]]);
+});
+
+test('a restarted encoder\'s late output never reaches the new chain', () => {
+  const children = [];
+  const spawnFake = () => { const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough(), kill() {} }); children.push(child); return child; };
+  const pictures = [];
+  const transcoder = new Transcoder('jpeg', { spawn: spawnFake, onFrame: frame => pictures.push(frame.data[2]) });
+  const [key] = sampleFrames();
+  transcoder.write({ ...key, pts_us: 1 });
+  transcoder.restart();
+  transcoder.write({ ...key, pts_us: 2 });
+  assert.equal(children.length, 2);
+  // The new encoder's picture, then the terminated one's picture that was still in its pipe.
+  children[1].stdout.emit('data', Buffer.from([0xff, 0xd8, 2, 0xff, 0xd9]));
+  children[0].stdout.emit('data', Buffer.from([0xff, 0xd8, 1, 0xff, 0xd9]));
+  assert.deepEqual(pictures, [2]);
+  transcoder.close();
 });
