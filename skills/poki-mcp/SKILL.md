@@ -18,6 +18,8 @@ Call `list_devices` once and pass one of its ids as `device` on every device too
 
 To pair a new iPhone over Wi-Fi (iOS 27+, same network, no USB), call `pair_device`, then `pairing_status` with its `job` about every two seconds. Tell the person what its `instruction` says, and the `pin` while one is shown; stop when `terminal` is true. On `failed`, relay `action`. When `list_devices` reports `display_service: false` for a wireless device, call `pair_device` with that `device` to reinstall its developer disk image. `unpair_device` removes a wireless pairing; call it only when asked.
 
+When the person wants to watch or operate the iPhone themselves, call `show_screen` with its `device`: clients with MCP Apps open a live screen panel where they tap, swipe and type. Leave the device to them while they work there; if they take it over, your calls on it are refused until they close the panel. The panel keeps the iPhone's camera and microphone busy, so do not leave it open for no reason.
+
 ## Approval
 
 `poki_mcp_status.approval_mode` says who approves `install_app`, `uninstall_app`, `build_and_run`, `open_url`, `download_app_container`, `get_clipboard` and `set_clipboard`. With `ask-human`, Poki shows a dialog on its host and waits. With `host`, Poki shows no dialog: your client decides, and a client that runs tools without asking runs them unconfirmed. In `host` mode `request_human_action` is refused, so ask the user in the conversation instead. Run these tools only when the user's task calls for them.
