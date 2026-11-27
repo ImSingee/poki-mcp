@@ -14,6 +14,7 @@ import { warnIfNativeStale } from './build-info.mjs';
 import { closeLocalHelpers, remoteDevices, warmRemote } from './remote.mjs';
 import { version, codeFingerprint, currentCodeFingerprint, setServiceStart } from './build-info.mjs';
 import { approvalMode } from './human.mjs';
+import { screens } from './stream/hub.mjs';
 import { runningDaemon, alive } from './daemon-launch.mjs';
 
 // --auto: started by a stdio shim (src/daemon-launch.mjs). It takes a free port unless --port says
@@ -97,6 +98,8 @@ const busyReasons = () => {
   if (coordinator.operations.size) reasons.push(`${coordinator.operations.size} tool call(s) in progress`);
   const background = [...sessions.values()].reduce((count, session) => count + (session.backgroundDevices?.size ?? 0), 0);
   if (background) reasons.push(`background work (recording or simulated location) on ${background} device(s)`);
+  // A screen panel may be open in a browser with no MCP session of its own in this daemon.
+  if (screens.active) reasons.push(`${screens.active} screen stream(s)`);
   return reasons;
 };
 async function pruneSessions() {
@@ -213,6 +216,7 @@ async function stop() {
   const closed = Promise.all(servers.map(server => new Promise(resolve => server.close(resolve))));
   for (const server of servers) server.closeAllConnections();
   await Promise.allSettled([...sessions.values()].map(devices => devices.close()));
+  screens.closeAll();
   await Promise.allSettled([...active].map(server => server.close()));
   await closeLocalHelpers();
   await closed;
