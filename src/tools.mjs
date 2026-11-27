@@ -86,19 +86,26 @@ const schemaOf = (tool, { step = false } = {}) => {
   return strokeChecks[tool.name] ? schema.superRefine(strokeChecks[tool.name]) : schema;
 };
 export const definitions = catalog.tools.map(tool => [tool.name, [tool.description, guidance[tool.name]].filter(Boolean).join('\n\n'), schemaOf(tool), readOnly.has(tool.name)]);
-const stepSchemas = new Map(catalog.tools.map(tool => [tool.name, schemaOf(tool, { step: true })]));
+// Built on first use: every stdio process imports this module, and most never run a batch.
+const stepSchemas = new Map(catalog.tools.map(tool => [tool.name, () => schemaOf(tool, { step: true })]));
 const device = z.string().min(1).describe('The device to act on: its id from list_devices (or its exact name).');
 const extra = [
   ['disconnect_device', 'Close the device\'s remote connection and its local helper. Cellular reconnection may require returning the iPhone to Wi-Fi. Does not undo input.', z.object({ device }), false],
   ['reconnect_device', 'Re-establish the device\'s RemotePairing tunnel. Does not replay input. A new session may require Wi-Fi when iOS closes its remote pairing listener.', z.object({ device }), false],
   ['poki_mcp_status', 'Report Poki MCP version, current Git commit, native bridge build time, tool count, connected-device count, approval mode, and any available Poki update with release notes and the update command.', z.object({}), true],
 ];
-for (const definition of extra) { definitions.push(definition); stepSchemas.set(definition[0], definition[0] === 'poki_mcp_status' ? definition[2] : z.object({})); }
+for (const definition of extra) { definitions.push(definition); stepSchemas.set(definition[0], () => definition[0] === 'poki_mcp_status' ? definition[2] : z.object({})); }
 
 // The computer-use profile (POKI_TOOL_PROFILE=cua, cua.mjs): look and do, plus device and status tools.
-for (const [name, description, schema, readOnlyHint] of cua.definitions) { definitions.push([name, description, z.fromJSONSchema(schema), readOnlyHint]); stepSchemas.set(name, z.fromJSONSchema(withoutDevice(schema))); }
+for (const [name, description, schema, readOnlyHint] of cua.definitions) { definitions.push([name, description, z.fromJSONSchema(schema), readOnlyHint]); stepSchemas.set(name, () => z.fromJSONSchema(withoutDevice(schema))); }
 // The arguments a tool takes once its device is known: inside a batch step, or after a call was routed to its device.
-export const stepSchema = name => stepSchemas.get(name);
+export const stepSchema = name => {
+  const schema = stepSchemas.get(name);
+  if (typeof schema !== 'function') return schema;
+  const built = schema();
+  stepSchemas.set(name, built);
+  return built;
+};
 // Tools that act on no device (and so take none), and tools that name several.
 export const sessionTools = new Set(['poki_mcp_status', 'list_devices']);
 const annotationsOf = (name, readOnlyHint) => ({ readOnlyHint, ...approvalHints[name] });

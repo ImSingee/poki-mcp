@@ -7,7 +7,7 @@ import { createServer } from './tools.mjs';
 import { endpointFile } from './config.mjs';
 import { randomUUID } from 'node:crypto';
 import { version } from './build-info.mjs';
-import { ensureDaemon, alive } from './daemon-launch.mjs';
+import { ensureDaemon, alive, runningDaemon, olderRelease } from './daemon-launch.mjs';
 import { approvalMode } from './human.mjs';
 
 let endpoint;
@@ -96,6 +96,11 @@ const server = createServer(async (name, args, extra) => {
 });
 const transport = new StdioServerTransport();
 await server.connect(transport);
+// A current daemon that already runs is reached now, while the client is still listing tools, so its
+// first call does not wait for that. None is started here: listing tools never starts one.
+void runningDaemon().then(running => {
+  if (running?.info && !running.info.stale && !olderRelease(running.info.version, version)) return remoteClient();
+}).catch(() => {});
 let stopping;
 function stop() {
   return stopping ??= (async () => {
