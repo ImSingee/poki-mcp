@@ -765,6 +765,7 @@ export class Session {
   // The id a device argument names: an id, or the exact name of one device. A phone is known by its id
   // until it has been asked for its name, so an unmatched name asks the phones that are free.
   async resolveDevice(query) {
+    if (this.coordinator.unavailable.has(query)) throw new Error(this.coordinator.unavailable.get(query));
     if (this.contexts.has(query)) return query;
     const list = await this.inventory(true);
     let matches = list.filter(d => names(d, query));
@@ -779,6 +780,7 @@ export class Session {
     }
     if (!matches.length) throw new Error(`No connected device is named ${JSON.stringify(query)}. Use list_devices and pass one of its ids as device.`);
     if (matches.length !== 1) throw new Error(`Several devices match ${JSON.stringify(query)}: ${matches.map(d => `${d.name} (${d.id})`).join(', ')}. Pass the id as device.`);
+    if (this.coordinator.unavailable.has(matches[0].id)) throw new Error(this.coordinator.unavailable.get(matches[0].id));
     return matches[0].id;
   }
   // Which devices a call acts on and how to run it. Called in arrival order (Coordination.call).
@@ -854,7 +856,11 @@ export class Session {
         const matches = (await remoteDevices()).filter(d => d.id === args.device || d.name.toLocaleLowerCase() === args.device.toLocaleLowerCase());
         if (matches.length !== 1) throw new Error(matches.length ? `Several paired devices match ${JSON.stringify(args.device)}; pass the id.` : `No wirelessly paired device is named ${JSON.stringify(args.device)}. Call pair_device without device to pair a new iPhone.`);
         [device] = matches;
+        // Another session's lease keeps this session off the device, preparation included.
+        this.access(device);
       }
+      // A job's developer-image installation holds the device's input lock (jobs.mjs mount).
+      pairingJobs.coordinator ??= this.coordinator;
       const { job, existing } = pairingJobs.start({ name: args.name, device });
       const lead = existing ? 'A pairing is already running on this computer; this is its job.' : 'Pairing started.';
       return structured({ job, existing }, `${lead} ${describeJob(job)} Call pairing_status with job ${JSON.stringify(job.job)} about every two seconds: it shows the PIN to type on the iPhone, then reports when the iPhone is ready.`);
@@ -874,6 +880,14 @@ export class Session {
     }
     if (matches.length > 1) throw new Error(`Several paired devices match ${JSON.stringify(query)}: ${matches.map(d => `${d.name} (${d.id})`).join(', ')}. Pass the id.`);
     const [target] = matches;
+    if (this.coordinator.unavailable.has(target.id)) throw new Error(this.coordinator.unavailable.get(target.id));
+    // From here until the pairing is deleted, no session can resolve, lease or act on the device, so
+    // nothing can start on it after the cleanup below.
+    this.coordinator.unavailable.set(target.id, `${target.name} (${target.id}) is being unpaired. Call list_devices once it finishes.`);
+    try { return await this.removePairing(target); }
+    finally { this.coordinator.unavailable.delete(target.id); }
+  }
+  async removePairing(target) {
     await pairingJobs.cancelForDevice(target.id);
     // Every session's accepted work, recordings, locations and leases on it end, and their cached
     // state for it goes, so the id no longer resolves anywhere.
@@ -887,6 +901,7 @@ export class Session {
     // Before its config is deleted: the helper's socket is named after that config's path.
     const helper = await disconnectRemote(target).catch(error => ({ running: undefined, error: error.message }));
     await unregisterRemote(target.id);
+    for (const session of sessions) session.contexts.delete(target.id);
     const phoneCleanup = 'The iPhone may still list this computer as paired. To remove it there too, look in Settings › Privacy & Security › Developer Mode, or in the Developer settings for Clear Trusted Computers (which removes every trusted computer), depending on what your iOS version offers.';
     return structured({ unpaired: true, device: { id: target.id, name: target.name }, cancelled_operations: cancelled, helper, removed: ['remote-devices.json entry', `remote/${target.id}/ (configuration and pairing record)`], phone_cleanup: phoneCleanup },
       `Removed ${target.name} (${target.id}) from this computer. It no longer appears in list_devices. ${phoneCleanup}`);

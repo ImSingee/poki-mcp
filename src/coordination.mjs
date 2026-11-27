@@ -25,6 +25,8 @@ const failure = error => ({ isError: true, ...text(error.message), _meta: { stop
 // - A lease keeps every other session off its device. A session may hold leases on several devices.
 export class Coordination {
   leases = new Map(); operations = new Set(); revisions = new Map(); scenes = new Map();
+  // Devices being unpaired: no session may resolve, lease or act on them until the removal ends.
+  unavailable = new Map();
   inputLock = inputLockFromEnv();
   unqueued = unqueuedTools;
   revision(id) { return this.revisions.get(id) ?? 0; }
@@ -38,6 +40,7 @@ export class Coordination {
   }
   access(session, target) {
     checkWork();
+    if (this.unavailable.has(target.id)) throw new Error(this.unavailable.get(target.id));
     const lease = this.leases.get(target.id);
     if (lease && (lease.owner !== session || lease.state !== 'active' || performance.now() >= lease.until)) throw new Error('Device is occupied or being released.');
     const operation = work.getStore()?.operation;

@@ -144,6 +144,14 @@ export class PairingJobs {
   // The last step: the developer disk image over the tunnel (ddi.mjs).
   async mount(job, target) {
     if (!this.transition(job, 'mounting_ddi')) return;
+    // The installation releases the device's input session and holds its helper for minutes: it
+    // takes the device's input lock, so other sessions' input waits instead of colliding with it.
+    let release;
+    try { release = await this.coordinator?.inputLock.acquire([target.id], { session: `pairing job ${job.id}`, tool: 'pair_device' }, job.controller.signal); }
+    catch (error) {
+      if (job.state !== 'cancelled') this.fail(job, 'ddi', { reason: 'device_busy', error: error.message, action: `Another session is using ${target.id}. Call pair_device with device ${JSON.stringify(target.id)} again once it is done.`, paired: true });
+      return;
+    }
     try {
       const prepared = await this.ensureImage(target.id, (request, options) => this.nativeRequest(target, request, options, job.controller.signal), { signal: job.controller.signal });
       this.transition(job, 'ready', { ddi: { ready: true, already_mounted: prepared.already, ...(prepared.source ? { source: prepared.source } : {}) } });
@@ -151,7 +159,7 @@ export class PairingJobs {
       if (job.state === 'cancelled') return;
       const failure = error.failure ?? { reason: 'ddi_tunnel_install_failed', error: error.message, action: `Keep the iPhone unlocked on the same network and call pair_device with device ${JSON.stringify(target.id)} to try again, or connect it by USB once and run node bin/prepare-device.mjs ${target.id}.` };
       this.fail(job, 'ddi', { ...failure, paired: true });
-    }
+    } finally { release?.(); }
   }
   timeout(job) {
     return this.fail(job, 'pairing', { reason: 'timeout', error: `Pairing was not finished on the iPhone within ${Math.round(this.limitMs / 60000)} minutes.`, action: 'Call pair_device again and finish the steps on the iPhone within 10 minutes.' });

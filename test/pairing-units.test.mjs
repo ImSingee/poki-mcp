@@ -30,7 +30,8 @@ setInterval(() => {}, 1000);
   return file;
 }
 
-const waitFor = async (predicate, ms = 5000) => {
+// Generous: these wait for helper processes to start, which a loaded machine can delay.
+const waitFor = async (predicate, ms = 15000) => {
   const deadline = performance.now() + ms;
   while (!predicate()) {
     if (performance.now() > deadline) throw new Error('Timed out');
