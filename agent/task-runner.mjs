@@ -150,7 +150,7 @@ export class PhoneTask extends EventEmitter {
         // Every device tool names its device. Without one given, only a sole listed device is chosen.
         const listed = await this.#call('list_devices', {});
         this.device = (listed.isError ? null : JSON.parse(listed.content.find(item => item.type === 'text')?.text ?? '{}').default) ?? null;
-        if (!this.device) throw Object.assign(new Error('Several devices, or none, are connected, and the task names none. No phone action has run.'), { code: 'phone' });
+        if (!this.device) throw Object.assign(new Error('Several devices, or none, are connected, and the task names none. No phone action has run.'), { code: 'no_device' });
       }
       try {
         const foreground = await this.poki.call('get_foreground_app', { device: this.device });
@@ -221,7 +221,7 @@ export class PhoneTask extends EventEmitter {
       this.snapshot.metrics.modelSetupMilliseconds = performance.now() - modelStarted;
       await this.#startModel(definitions);
     } catch (error) {
-      if (error.code === 'device_setup') this.fail(error);
+      if (error.code === 'device_setup' || error.code === 'no_device') this.fail(error);
       else this.emit('warning', safeModelError(error));
     }
   }

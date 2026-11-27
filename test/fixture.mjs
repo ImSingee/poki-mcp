@@ -12,8 +12,9 @@ import { definitions } from '../src/tools.mjs';
 
 // Every device tool takes device. Tests that are not about choosing a device call through
 // withDevice, which names the fixture's device (the simulator in a simulator-only state, otherwise
-// the phone) wherever a call leaves it out. Tests about device arguments use a client's own callTool.
-const takesDevice = new Set(definitions.filter(([, , schema]) => schema.shape?.device).map(([name]) => name));
+// the phone) wherever a call leaves it out, except cancel_device. Tests about device arguments use a client's own callTool.
+// cancel_device takes device only to narrow what it stops: without one it stops the whole session.
+const takesDevice = new Set(definitions.filter(([name, , schema]) => schema.shape?.device && name !== 'cancel_device').map(([name]) => name));
 export function withDevice(args, name, device) {
   if (name === 'run_code') return args.devices === undefined ? { devices: [device], ...args } : args;
   return takesDevice.has(name) && args.device === undefined ? { device, ...args } : args;
