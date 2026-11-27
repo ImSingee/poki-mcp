@@ -44,14 +44,39 @@ function connect(path) {
   });
 }
 
-async function socketFor(target) {
-  // macOS Unix socket names are limited to 104 bytes, regardless of the state directory's length.
-  if (!target.remote && closing) throw new Error('Local native helpers are shutting down.');
+// macOS Unix socket names are limited to 104 bytes, regardless of the state directory's length.
+async function socketPath(target) {
   const directory = `/tmp/poki-${target.remote ? 'remote' : 'native'}-${process.getuid()}`;
   await mkdir(directory, { mode: 0o700, recursive: true });
   const info = await lstat(directory);
   if (!info.isDirectory() || info.uid !== process.getuid() || (info.mode & 0o077)) throw new Error('Remote socket directory must be private and owned by this user.');
-  const path = join(directory, createHash('sha256').update(target.remote ?? JSON.stringify([root, stateDir, process.pid, target.id])).digest('hex').slice(0, 24) + '.sock');
+  return join(directory, createHash('sha256').update(target.remote ?? JSON.stringify([root, stateDir, process.pid, target.id])).digest('hex').slice(0, 24) + '.sock');
+}
+
+// Asks a running RemotePairing helper to close its tunnel and exit. A helper that is not running is
+// left alone: none is started just to stop it. Resolves { running, disconnected }.
+export async function disconnectRemote(target, { timeoutMs = 10000 } = {}) {
+  const path = await socketPath(target);
+  let socket;
+  try { socket = await connect(path); }
+  catch (error) { if (['ENOENT', 'ECONNREFUSED'].includes(error.code)) return { running: false, disconnected: false }; throw error; }
+  return new Promise(resolve => {
+    const lines = lineReader(socket);
+    let greeted = false, reply;
+    const timer = setTimeout(() => socket.destroy(), timeoutMs);
+    lines.on('line', line => {
+      if (!greeted) { greeted = true; socket.write('{"op":"disconnect"}\n'); return; }
+      try { reply = JSON.parse(line); } catch {}
+      socket.end();
+    });
+    socket.on('error', () => {});
+    socket.once('close', () => { clearTimeout(timer); lines.close(); resolve({ running: true, disconnected: reply?.disconnected === true }); });
+  });
+}
+
+async function socketFor(target) {
+  if (!target.remote && closing) throw new Error('Local native helpers are shutting down.');
+  const path = await socketPath(target);
   try { return { socket: await connect(path), path }; }
   catch (error) { if (!['ENOENT', 'ECONNREFUSED'].includes(error.code)) throw error; }
   if (!starting.has(path)) {
@@ -111,7 +136,9 @@ export async function warmRemote(target) {
   await nativeRequest(target, { op: 'device_info' });
 }
 
-export async function nativeRequest(target, request) {
+// timeoutMs: how long the helper may take to answer (default two minutes). Installing a developer disk
+// image over Wi-Fi takes longer.
+export async function nativeRequest(target, request, { timeoutMs = 120000 } = {}) {
   checkWork();
   const callerSignal = signal();
   const { socket, path } = await phase('native_helper', () => socketFor(target));
@@ -124,7 +151,7 @@ export async function nativeRequest(target, request) {
       socket.destroy();
     };
     const onAbort = () => abort(callerSignal.reason);
-    const timer = setTimeout(() => abort(new DOMException('Remote operation timed out; inspect before retrying input.', 'TimeoutError')), 120000);
+    const timer = setTimeout(() => abort(new DOMException('Remote operation timed out; inspect before retrying input.', 'TimeoutError')), timeoutMs);
     callerSignal?.addEventListener('abort', onAbort, { once: true });
     lines.on('line', line => {
       if (abortReason) return;

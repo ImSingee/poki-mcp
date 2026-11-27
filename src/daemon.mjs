@@ -14,6 +14,7 @@ import { warnIfNativeStale } from './build-info.mjs';
 import { closeLocalHelpers, remoteDevices, warmRemote } from './remote.mjs';
 import { version, codeFingerprint, currentCodeFingerprint, setServiceStart } from './build-info.mjs';
 import { approvalMode } from './human.mjs';
+import { pairingJobs } from './pairing/jobs.mjs';
 import { runningDaemon, alive } from './daemon-launch.mjs';
 
 // --auto: started by a stdio shim (src/daemon-launch.mjs). It takes a free port unless --port says
@@ -97,6 +98,8 @@ const busyReasons = () => {
   if (coordinator.operations.size) reasons.push(`${coordinator.operations.size} tool call(s) in progress`);
   const background = [...sessions.values()].reduce((count, session) => count + (session.backgroundDevices?.size ?? 0), 0);
   if (background) reasons.push(`background work (recording or simulated location) on ${background} device(s)`);
+  // A pairing job outlives the session that started it: the person may still be typing the PIN.
+  if (pairingJobs.busy()) reasons.push('a pairing job in progress');
   return reasons;
 };
 async function pruneSessions() {
@@ -212,6 +215,7 @@ async function stop() {
   stopUpdateChecks();
   const closed = Promise.all(servers.map(server => new Promise(resolve => server.close(resolve))));
   for (const server of servers) server.closeAllConnections();
+  await pairingJobs.close().catch(() => {});
   await Promise.allSettled([...sessions.values()].map(devices => devices.close()));
   await Promise.allSettled([...active].map(server => server.close()));
   await closeLocalHelpers();

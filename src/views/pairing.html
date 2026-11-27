@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>iPhone pairing</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: var(--color-background-primary, light-dark(#ffffff, #17181a));
+    --bg-2: var(--color-background-secondary, light-dark(#f4f5f7, #212327));
+    --text: var(--color-text-primary, light-dark(#17181a, #ececee));
+    --text-2: var(--color-text-secondary, light-dark(#5b5f66, #a3a7ae));
+    --border: var(--color-border-primary, light-dark(#e3e5e8, #34373c));
+    --accent: var(--color-text-info, light-dark(#1f6feb, #5ea0ff));
+    --ok: var(--color-text-success, light-dark(#1a7f37, #4ac26b));
+    --warn: var(--color-text-warning, light-dark(#9a6700, #d9a43a));
+    --danger: var(--color-text-danger, light-dark(#cf222e, #ff7b72));
+    --danger-bg: var(--color-background-danger, light-dark(#ffebe9, #3b1d1f));
+    --radius: var(--border-radius-md, 10px);
+    --radius-sm: var(--border-radius-sm, 6px);
+    --font: var(--font-sans, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif);
+    --mono: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
+  }
+  :root[data-theme="light"] { color-scheme: light; }
+  :root[data-theme="dark"] { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: transparent; }
+  body { font: 14px/1.45 var(--font); color: var(--text); }
+  main { padding: 14px 16px 16px; display: grid; gap: 14px; max-width: 640px; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0; display: flex; align-items: center; gap: 8px; }
+  h2 { font-size: 12px; font-weight: 600; margin: 0 0 6px; color: var(--text-2); text-transform: uppercase; letter-spacing: .04em; }
+  p { margin: 0; }
+  .muted { color: var(--text-2); }
+  .card { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; background: var(--bg); display: grid; gap: 10px; }
+  .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .spacer { flex: 1; }
+  button { font: inherit; font-weight: 500; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-2); color: var(--text); padding: 6px 12px; min-height: 32px; cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--text-2); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button:disabled { opacity: .55; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: light-dark(#fff, #0b1220); }
+  button.danger { color: var(--danger); }
+  button.danger.confirm { background: var(--danger); border-color: var(--danger); color: light-dark(#fff, #1a0b0b); }
+  .steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; }
+  .steps li { font-size: 11px; color: var(--text-2); display: grid; gap: 4px; }
+  .steps li::before { content: ""; height: 3px; border-radius: 2px; background: var(--border); }
+  .steps li.done::before { background: var(--ok); }
+  .steps li.current { color: var(--text); font-weight: 600; }
+  .steps li.current::before { background: var(--accent); }
+  .steps li.failed::before { background: var(--danger); }
+  .pin { display: flex; gap: 6px; justify-content: center; margin: 4px 0; }
+  .pin span { font: 600 clamp(22px, 7vw, 30px)/1 var(--mono); width: clamp(34px, 11vw, 44px); padding: 10px 0; text-align: center; border-radius: var(--radius-sm); background: var(--bg-2); border: 1px solid var(--border); }
+  .instruction { font-size: 14px; }
+  .status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-2); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); flex: none; }
+  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--danger); } .dot.live { background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  @media (prefers-reduced-motion: reduce) { .dot.live { animation: none; } }
+  .alert { border-radius: var(--radius-sm); padding: 8px 10px; background: var(--danger-bg); color: var(--danger); }
+  .devices { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  .device { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .device .info { display: grid; gap: 2px; min-width: 0; flex: 1 1 180px; }
+  .device .name { font-weight: 600; overflow-wrap: anywhere; }
+  code { font: 12px var(--mono); background: var(--bg-2); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+  .note { font-size: 12px; color: var(--text-2); }
+  .empty { color: var(--text-2); font-size: 13px; }
+  [hidden] { display: none !important; }
+  @media (max-width: 380px) {
+    main { padding: 12px; }
+    .steps li span { display: none; }
+    .device button { flex: 1; }
+  }
+</style>
+</head>
+<body>
+<main aria-live="polite">
+  <div class="row"><h1>iPhone pairing</h1><span class="spacer"></span><span class="status" id="host"></span></div>
+  <div class="alert" id="error" role="alert" hidden></div>
+  <section class="card" id="job" hidden></section>
+  <section>
+    <div class="row"><h2>Paired over Wi-Fi</h2><span class="spacer"></span><button id="pair" class="primary" hidden>Pair an iPhone</button></div>
+    <ul class="devices" id="devices"><li class="empty">Loading…</li></ul>
+    <p class="note" id="others" hidden></p>
+  </section>
+</main>
+<!-- poki:ext-apps -->
+<script type="module">
+const { App, PostMessageTransport, applyDocumentTheme, applyHostStyleVariables, applyHostFonts } = globalThis.PokiExtApps;
+const $ = id => document.getElementById(id);
+const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const steps = [
+  ['advertising', 'On iPhone'], ['pin', 'Enter PIN'], ['registering', 'Save'], ['mounting_ddi', 'Developer image'], ['ready', 'Ready'],
+];
+const order = { starting: 0, advertising: 0, pin: 1, paired: 2, registering: 2, mounting_ddi: 3, ready: 4 };
+const state = { job: undefined, devices: [], others: 0, host: undefined, confirm: undefined, unpaired: undefined, loaded: false, canCall: true };
+let poll, confirmTimer;
+
+const app = new App({ name: 'poki-pairing', version: '1.0.0' }, {}, { autoResize: true });
+
+function applyContext(context) {
+  if (!context) return;
+  if (context.theme) applyDocumentTheme(context.theme);
+  if (context.styles?.variables) applyHostStyleVariables(context.styles.variables);
+  if (context.styles?.css?.fonts) applyHostFonts(context.styles.css.fonts);
+  const inset = context.safeAreaInsets;
+  if (inset) document.querySelector('main').style.padding = `${14 + (inset.top ?? 0)}px ${16 + (inset.right ?? 0)}px ${16 + (inset.bottom ?? 0)}px ${16 + (inset.left ?? 0)}px`;
+}
+
+// A tool result's data: structuredContent, or the JSON in its last text block.
+function data(result) {
+  if (result?.structuredContent) return result.structuredContent;
+  const texts = (result?.content ?? []).filter(block => block.type === 'text').map(block => block.text);
+  for (const text of texts.reverse()) { try { return JSON.parse(text); } catch {} }
+  return undefined;
+}
+async function call(name, args = {}) {
+  const result = await app.callServerTool({ name, arguments: args });
+  if (result.isError) throw new Error((result.content ?? []).filter(b => b.type === 'text').map(b => b.text).join('\n') || `${name} failed`);
+  return data(result);
+}
+function showError(error) {
+  const box = $('error');
+  box.hidden = !error;
+  box.textContent = error ? (error.message ?? String(error)) : '';
+}
+
+function adopt(job) {
+  if (!job?.job) return;
+  // A result from an earlier call must not replace a newer state of the same job.
+  if (state.job?.job === job.job && state.job.updated_at && job.updated_at && job.updated_at < state.job.updated_at) return;
+  state.job = job;
+  render();
+  schedule();
+}
+
+async function refreshDevices({ adoptJob = true } = {}) {
+  try {
+    const listed = await call('list_devices');
+    const devices = listed?.devices ?? [];
+    state.devices = devices.filter(device => device.connection === 'RemotePairing');
+    state.others = devices.length - state.devices.length;
+    state.host = listed?.pairing?.host;
+    const jobs = listed?.pairing?.jobs ?? [];
+    if (adoptJob) {
+      const current = state.job && jobs.find(job => job.job === state.job.job);
+      const active = jobs.find(job => !job.terminal);
+      if (current) state.job = current;
+      else if (active) state.job = active;
+      else if (state.job && !state.job.terminal) state.job = undefined; // expired or the service restarted
+      else if (!state.job && jobs.length) state.job = jobs.at(-1);
+    }
+    state.loaded = true;
+    showError();
+  } catch (error) {
+    state.loaded = true;
+    if (/Method not found|not supported|-32601/i.test(error.message)) state.canCall = false;
+    else showError(error);
+  }
+  render();
+  schedule();
+}
+
+function schedule() {
+  clearTimeout(poll);
+  if (!state.job || state.job.terminal || !state.canCall || document.hidden) return;
+  poll = setTimeout(async () => {
+    try {
+      const job = await call('pairing_status', { job: state.job.job });
+      const ended = job?.terminal;
+      adopt(job);
+      showError();
+      if (ended) await refreshDevices({ adoptJob: false });
+    } catch (error) {
+      if (/No pairing job/.test(error.message)) { state.job = undefined; await refreshDevices(); return; }
+      showError(error);
+      schedule();
+    }
+  }, 1500);
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) schedule(); });
+
+async function act(button, work) {
+  button.disabled = true;
+  try { await work(); showError(); }
+  catch (error) { showError(error); }
+  finally { button.disabled = false; }
+}
+
+function renderJob() {
+  const section = $('job');
+  const job = state.job;
+  section.hidden = !job;
+  if (!job) return;
+  const index = order[job.state];
+  const failedAt = job.state === 'failed' ? ({ pairing: 0, registering: 2, ddi: 3 }[job.stage] ?? 0) : undefined;
+  const stepper = job.state === 'cancelled' ? '' : `<ol class="steps" aria-label="Pairing progress">${steps.map(([, label], i) => {
+    const cls = failedAt !== undefined ? (i < failedAt ? 'done' : i === failedAt ? 'failed' : '') : i < index ? 'done' : i === index ? (job.state === 'ready' ? 'done' : 'current') : '';
+    return `<li class="${cls}"${i === index ? ' aria-current="step"' : ''}><span>${label}</span></li>`;
+  }).join('')}</ol>`;
+  const live = !job.terminal;
+  const title = { starting: 'Starting…', advertising: 'Waiting for the iPhone', pin: 'Enter this PIN on the iPhone', paired: 'Paired', registering: 'Saving the pairing', mounting_ddi: 'Preparing developer services', ready: 'Ready', failed: 'Pairing failed', cancelled: 'Pairing cancelled' }[job.state] ?? job.state;
+  const dot = job.state === 'ready' ? 'ok' : job.state === 'failed' ? 'bad' : job.state === 'cancelled' ? '' : 'live';
+  const pin = job.state === 'pin' && job.pin ? `<div class="pin" role="img" aria-label="PIN ${escape(job.pin.split('').join(' '))}">${job.pin.split('').map(d => `<span>${escape(d)}</span>`).join('')}</div>` : '';
+  const device = job.device ? `<p class="muted">${escape(job.device.name)} · <code>${escape(job.device.id)}</code></p>` : '';
+  const detail = job.state === 'failed' && job.error ? `<p class="note">${escape(job.error)}</p>` : '';
+  const note = job.note ? `<p class="note">${escape(job.note)}</p>` : '';
+  section.innerHTML = `
+    <div class="row"><span class="dot ${dot}" aria-hidden="true"></span><strong>${escape(title)}</strong><span class="spacer"></span>
+      ${live ? '<button id="cancel">Cancel</button>' : '<button id="again">Pair again</button>'}</div>
+    ${stepper}${pin}
+    <p class="instruction">${escape(job.instruction ?? '')}</p>${detail}${device}${note}`;
+  const cancel = section.querySelector('#cancel'), again = section.querySelector('#again');
+  if (cancel) { cancel.hidden = !state.canCall; cancel.onclick = () => act(cancel, async () => { adopt(await call('pairing_cancel', { job: job.job })); await refreshDevices({ adoptJob: false }); }); }
+  if (again) { again.hidden = !state.canCall; again.onclick = () => act(again, startPairing); }
+}
+
+function deviceStatus(device) {
+  if (device.blocked) return ['bad', device.blocked];
+  if (device.pairing_job) return ['live', 'Preparing…'];
+  if (device.display_service === false) return ['warn', 'Connected · developer image missing'];
+  if (device.occupied && !device.owned_by_session) return ['warn', 'In use by another session'];
+  return ['ok', device.readiness ? 'Connected' : 'Paired'];
+}
+
+function renderDevices() {
+  const list = $('devices');
+  if (!state.loaded) return;
+  if (!state.canCall) { list.innerHTML = '<li class="empty">This app cannot call Poki tools here. Follow the instructions in the conversation.</li>'; return; }
+  if (!state.devices.length) {
+    list.innerHTML = `<li class="empty">${state.unpaired ? escape(state.unpaired) : 'No iPhone is paired over Wi-Fi yet.'}</li>`;
+  } else {
+    list.innerHTML = state.devices.map(device => {
+      const [dot, status] = deviceStatus(device);
+      const confirming = state.confirm === device.id;
+      return `<li class="device"><span class="dot ${dot}" aria-hidden="true"></span><div class="info">
+        <span class="name">${escape(device.name)}</span>
+        <span class="muted">${escape([device.model, device.osVersion && `iOS ${device.osVersion}`].filter(Boolean).join(' · '))}</span>
+        <span class="status">${escape(status)}</span><code>${escape(device.id)}</code></div>
+        ${confirming ? `<button data-keep="${escape(device.id)}">Keep</button><button class="danger confirm" data-unpair="${escape(device.id)}">Remove pairing</button>` : `<button class="danger" data-ask="${escape(device.id)}">Unpair</button>`}</li>`;
+    }).join('') + (state.unpaired ? `<li class="note">${escape(state.unpaired)}</li>` : '');
+  }
+  for (const button of list.querySelectorAll('[data-ask]')) button.onclick = () => {
+    state.confirm = button.dataset.ask; state.unpaired = undefined; render();
+    clearTimeout(confirmTimer); confirmTimer = setTimeout(() => { state.confirm = undefined; render(); }, 6000);
+    list.querySelector('[data-unpair]')?.focus();
+  };
+  for (const button of list.querySelectorAll('[data-keep]')) button.onclick = () => { state.confirm = undefined; render(); };
+  for (const button of list.querySelectorAll('[data-unpair]')) button.onclick = () => act(button, async () => {
+    const result = await call('unpair_device', { device: button.dataset.unpair });
+    state.confirm = undefined;
+    state.unpaired = result?.phone_cleanup ? `Removed ${result.device?.name ?? button.dataset.unpair}. ${result.phone_cleanup}` : 'Removed.';
+    await refreshDevices({ adoptJob: false });
+  });
+  const others = $('others');
+  others.hidden = !state.others;
+  others.textContent = state.others ? `${state.others} other device${state.others === 1 ? '' : 's'} (USB or simulator) are not managed here.` : '';
+}
+
+function render() {
+  const host = $('host');
+  const advertising = state.host?.advertising;
+  host.innerHTML = state.host ? `<span class="dot ${advertising ? 'live' : ''}" aria-hidden="true"></span>${escape(advertising ? `Advertising as ${state.host.name}` : state.host.name)}` : '';
+  renderJob();
+  renderDevices();
+  const pair = $('pair');
+  pair.hidden = !state.loaded || !state.canCall || Boolean(state.job && !state.job.terminal);
+}
+
+async function startPairing() {
+  const started = await call('pair_device');
+  state.unpaired = undefined;
+  adopt(started?.job ?? started);
+  await refreshDevices({ adoptJob: false });
+}
+$('pair').onclick = () => act($('pair'), startPairing);
+
+// Registered before connect: the host sends the tool result right after initialization, and again
+// whenever it mounts this view anew (an inline view scrolled out and back in).
+app.ontoolresult = params => {
+  const value = data(params);
+  const job = value?.job && typeof value.job === 'object' ? value.job : value?.job ? value : undefined;
+  if (job) adopt(job);
+};
+app.onhostcontextchanged = applyContext;
+app.onteardown = async () => { clearTimeout(poll); return {}; };
+
+try {
+  await app.connect(new PostMessageTransport(window.parent, window.parent));
+  applyContext(app.getHostContext());
+  if (!app.getHostCapabilities()?.serverTools) state.canCall = false;
+} catch (error) {
+  state.canCall = false;
+  showError(new Error(`Could not connect to the host: ${error.message}`));
+}
+if (state.canCall) await refreshDevices();
+else { state.loaded = true; render(); }
+</script>
+</body>
+</html>

@@ -1,4 +1,6 @@
-import { remoteDevices, nativeRequest } from './remote.mjs';
+import { remoteDevices, nativeRequest, disconnectRemote } from './remote.mjs';
+import { pairingJobs, describe as describeJob, view as jobView } from './pairing/jobs.mjs';
+import { unregisterRemote } from './pairing/registry.mjs';
 import { execute, checkWork, deadline, pause, phase, stopped, stoppingReason, timingCount, timingsSince, work } from './work.mjs';
 import { Coordination, managementTools } from './coordination.mjs';
 import { runBatch } from './batch.mjs';
@@ -10,7 +12,7 @@ import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import { root, stateDir, idevice, noUsbDevice } from './config.mjs';
-import { definitions, stepSchema, sessionTools } from './tools.mjs';
+import { definitions, stepSchema, sessionTools, pairingTools } from './tools.mjs';
 import { platformTool, inventorySimulators, simulatorModels, readSettings, closePlatform } from './platform.mjs';
 import { interaction, promptWarning, readScreen, describeScreen, screenChanged, whatMoved, justReadMs, confirmAfterMs, launchWithinMs, launchPollMs } from './interaction.mjs';
 import { askHuman, approvalMode } from './human.mjs';
@@ -22,6 +24,9 @@ import { leavesUnnamedBand, textOutside } from './ocr-supplement.mjs';
 import { version, buildInfo, requireCurrentCode } from './build-info.mjs';
 
 export const text = value => ({ content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] });
+// A result that a view reads as structuredContent: a readable line first, for hosts without MCP Apps,
+// then the same data as JSON for the model.
+const structured = (value, lead) => ({ content: [...(lead ? [{ type: 'text', text: lead }] : []), { type: 'text', text: JSON.stringify(value, null, 2) }], structuredContent: value });
 const usedSimulators = new Set();
 const approvedTools = new Set(['install_app', 'uninstall_app', 'build_and_run', 'open_url', 'download_app_container', 'get_clipboard', 'set_clipboard']);
 const platformTools = new Set(['start_simulator', 'shut_down_simulator', 'start_recording', 'stop_recording', 'set_appearance', 'set_accessibility', 'list_apps', 'launch_app', 'terminate_app', 'install_app', 'uninstall_app', 'open_settings', 'open_url', 'build_and_run', 'set_location', 'clear_location', 'get_clipboard', 'set_clipboard', 'list_crashes', 'get_crash', 'download_app_container']);
@@ -447,6 +452,7 @@ export class DeviceContext {
   // Runs one tool on this device. The call was routed here by its device argument (or it is a step of
   // a batch on this device), so device itself is no longer an argument.
   async dispatch(name, original = {}) {
+    if (pairingTools.has(name)) throw new Error('Call pairing tools directly, not from a batch or run_code.');
     if (sessionTools.has(name)) return this.session.dispatchSession(name, original);
     const schema = stepSchema(name);
     if (!schema) throw new Error(`Unknown tool: ${name}`);
@@ -734,8 +740,15 @@ export class Session {
       try {
         this.access(device);
         if (device.remote) {
+          // A job installing its developer disk image holds the helper; asking it now would wait for that.
+          const preparing = pairingJobs.preparing(device.id);
+          if (preparing) return { ...device, remote: undefined, ...occupancy, pairing_job: preparing.id, readiness: `being prepared by pairing job ${preparing.id} (${preparing.state})` };
           const info = await nativeRequest(device, { op: 'device_info' });
-          return { ...device, remote: undefined, name: info.properties.DeviceName ?? device.name, model: info.properties.ProductType, osVersion: info.properties.ProductVersion, ...occupancy, readiness: 'remote services connected' };
+          // An older helper refuses ddi_status (outcome not_sent); then nothing is reported.
+          const ddi = await nativeRequest(device, { op: 'ddi_status' }).catch(() => undefined);
+          const developer = typeof ddi?.display_service === 'boolean' ? { display_service: ddi.display_service, ddi: ddi.ddi ?? null,
+            ...(ddi.display_service ? {} : { action: `Touch and text input need the developer disk image, which the iPhone drops when it restarts. Call pair_device with device ${JSON.stringify(device.id)} to install it over Wi-Fi.` }) } : {};
+          return { ...device, remote: undefined, name: info.properties.DeviceName ?? device.name, model: info.properties.ProductType, osVersion: info.properties.ProductVersion, ...occupancy, readiness: developer.display_service === false ? 'connected; developer services missing' : 'remote services connected', ...developer };
         }
         const values = await Promise.all(['DeviceName', 'ProductType', 'ProductVersion'].map(async key => {
           const response = await this.run(idevice, ['--udid', device.id, 'lockdown', 'get', key], 8000);
@@ -774,6 +787,9 @@ export class Session {
     if (!definition) throw new Error(`Unknown tool: ${name}`);
     args = definition[2].parse(args);
     if (sessionLevel.has(name)) return { keys: [], run: () => this.dispatchSession(name, args) };
+    // No device keys: a pairing call never waits behind a device's queue, and unpair_device's own
+    // operation is not among the work it stops on that device.
+    if (pairingTools.has(name)) return { keys: [], run: () => this.dispatchPairing(name, args) };
     if (name === 'run_code') {
       const named = args.devices;
       if (!Array.isArray(named) || !named.length) throw new Error('run_code needs devices: the ids from list_devices the script may use.');
@@ -799,6 +815,7 @@ export class Session {
     const contexts = [...new Set(ids)].map(id => this.context(id));
     return {
       dispatch: (tool, toolArgs = {}) => {
+        if (pairingTools.has(tool)) throw new Error('Call pairing tools directly, not from run_code.');
         if (sessionLevel.has(tool)) return this.dispatchSession(tool, toolArgs);
         if (tool === 'start_simulator' && toolArgs.model !== undefined) throw new Error('run_code cannot create a simulator: create it first with start_simulator and name it in devices.');
         const query = tool === 'start_simulator' ? toolArgs.simulator ?? toolArgs.device : toolArgs.device;
@@ -816,8 +833,8 @@ export class Session {
     checkWork();
     if (name === 'poki_mcp_status') {
       const mode = approvalMode();
-      const deviceTools = definitions.filter(([tool]) => !sessionLevel.has(tool) && !managementTools.has(tool)).length;
-      return text({ update: await updateNotice(), implementation: `Poki MCP ${version}`, ...await buildInfo(), registered_device_tools: deviceTools, management_tools: managementTools.size, total_tools: definitions.length, devices: (await this.inventory()).length,
+      const deviceTools = definitions.filter(([tool]) => !sessionLevel.has(tool) && !managementTools.has(tool) && !pairingTools.has(tool)).length;
+      return text({ update: await updateNotice(), implementation: `Poki MCP ${version}`, ...await buildInfo(), registered_device_tools: deviceTools, management_tools: managementTools.size, pairing_tools: pairingTools.size, total_tools: definitions.length, devices: (await this.inventory()).length,
         approval_mode: { allow: 'operator-preapproved', host: 'host', ask: 'ask-human' }[mode], approval_covers: [...approvedTools],
         approval_scope: mode === 'host'
           ? 'Poki shows no dialog. The MCP client decides whether the tools in approval_covers run: they carry destructiveHint/openWorldHint annotations, and a client that runs tools without asking (LobeHub\'s default, for example) runs them unconfirmed. Taps, typing and other input inside apps are not gated.'
@@ -827,6 +844,51 @@ export class Session {
     const devices = await this.describeDevices(args.include_all_simulators);
     // A sole device is the one to name. Several devices, or none, leave the choice to the caller.
     const sole = devices.length === 1 ? { default: devices[0].id, default_note: `The only device listed. Pass device: ${JSON.stringify(devices[0].id)} on every call.` } : {};
-    return text({ devices, ...sole, ...(devices.some(d => d.kind === 'physical') ? {} : { notice: noUsbDevice }), ...(args.include_all_simulators ? { simulator_models: await simulatorModels() } : {}) });
+    const pairing = { host: pairingJobs.host(), jobs: pairingJobs.list() };
+    return structured({ devices, ...sole, pairing, ...(devices.some(d => d.kind === 'physical') ? {} : { notice: noUsbDevice }), ...(args.include_all_simulators ? { simulator_models: await simulatorModels() } : {}) });
+  }
+  async dispatchPairing(name, args) {
+    if (name === 'pair_device') {
+      let device;
+      if (args.device !== undefined) {
+        const matches = (await remoteDevices()).filter(d => d.id === args.device || d.name.toLocaleLowerCase() === args.device.toLocaleLowerCase());
+        if (matches.length !== 1) throw new Error(matches.length ? `Several paired devices match ${JSON.stringify(args.device)}; pass the id.` : `No wirelessly paired device is named ${JSON.stringify(args.device)}. Call pair_device without device to pair a new iPhone.`);
+        [device] = matches;
+      }
+      const { job, existing } = pairingJobs.start({ name: args.name, device });
+      const lead = existing ? 'A pairing is already running on this computer; this is its job.' : 'Pairing started.';
+      return structured({ job, existing }, `${lead} ${describeJob(job)} Call pairing_status with job ${JSON.stringify(job.job)} about every two seconds: it shows the PIN to type on the iPhone, then reports when the iPhone is ready.`);
+    }
+    if (name === 'pairing_status') { const job = jobView(pairingJobs.get(args.job)); return structured(job, describeJob(job)); }
+    if (name === 'pairing_cancel') { const job = await pairingJobs.cancel(args.job); return structured(job, describeJob(job)); }
+    return this.unpair(args.device);
+  }
+  // Removes a RemotePairing device: its pairing job, every session's work and leases on it, its
+  // helper, and its saved pairing. USB devices are not paired by Poki and are refused.
+  async unpair(query) {
+    const registered = await remoteDevices();
+    const matches = registered.filter(d => d.id === query || d.name.toLocaleLowerCase() === query.toLocaleLowerCase());
+    if (!matches.length) {
+      const known = (await this.inventory(true).catch(() => [])).find(d => d.id === query || d.name === query);
+      throw new Error(known ? `${known.name} (${known.id}) is connected over ${known.connection ?? known.kind}, not paired over Wi-Fi by Poki, so unpair_device does not remove it. USB trust is managed on the iPhone and this computer's usbmuxd.` : `No wirelessly paired device is named ${JSON.stringify(query)}. Call list_devices to see the paired ones.`);
+    }
+    if (matches.length > 1) throw new Error(`Several paired devices match ${JSON.stringify(query)}: ${matches.map(d => `${d.name} (${d.id})`).join(', ')}. Pass the id.`);
+    const [target] = matches;
+    await pairingJobs.cancelForDevice(target.id);
+    // Every session's accepted work, recordings, locations and leases on it end, and their cached
+    // state for it goes, so the id no longer resolves anywhere.
+    const sessions = new Set([this, ...(this.peers?.() ?? [])]);
+    const ended = await Promise.allSettled([...sessions].map(async session => {
+      const result = await this.coordinator.end(session, 'unpaired', [target.id]);
+      session.contexts.delete(target.id);
+      return result.cancelled_operations ?? 0;
+    }));
+    const cancelled = ended.reduce((sum, outcome) => sum + (outcome.status === 'fulfilled' ? outcome.value : 0), 0);
+    // Before its config is deleted: the helper's socket is named after that config's path.
+    const helper = await disconnectRemote(target).catch(error => ({ running: undefined, error: error.message }));
+    await unregisterRemote(target.id);
+    const phoneCleanup = 'To remove this computer from the iPhone too, open Settings › Privacy & Security › Developer Mode on the iPhone and remove it from the paired computers there; if your iOS version offers no such list, Settings › Developer › Clear Trusted Computers removes every trusted computer.';
+    return structured({ unpaired: true, device: { id: target.id, name: target.name }, cancelled_operations: cancelled, helper, removed: ['remote-devices.json entry', `remote/${target.id}/ (configuration and pairing record)`], phone_cleanup: phoneCleanup },
+      `Removed ${target.name} (${target.id}) from this computer. It no longer appears in list_devices. ${phoneCleanup}`);
   }
 }

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { version } from './build-info.mjs';
+import { views, toolMeta, readView, RESOURCE_MIME_TYPE } from './views/index.mjs';
 
 const catalog = JSON.parse(readFileSync(new URL('./data/tools.json', import.meta.url), 'utf8'));
 const defaultTools = new Set([
@@ -93,8 +94,14 @@ const extra = [
   ['disconnect_device', 'Close the device\'s remote connection and its local helper. Cellular reconnection may require returning the iPhone to Wi-Fi. Does not undo input.', z.object({ device }), false],
   ['reconnect_device', 'Re-establish the device\'s RemotePairing tunnel. Does not replay input. A new session may require Wi-Fi when iOS closes its remote pairing listener.', z.object({ device }), false],
   ['poki_mcp_status', 'Report Poki MCP version, current Git commit, native bridge build time, tool count, connected-device count, approval mode, and any available Poki update with release notes and the update command.', z.object({}), true],
+  ['pair_device', 'Pair a new iPhone with this computer over Wi-Fi (iOS 27 or newer, same local network; no USB cable). Returns at once with a pairing job: the iPhone then shows "Pair with <name>" in Settings › Privacy & Security › Developer Mode, and a PIN appears in pairing_status for the person to type on the iPhone. After pairing, Poki installs the developer disk image over Wi-Fi, which input needs. Only one pairing runs at a time; a second call returns the running job. Clients with MCP Apps show a pairing view; otherwise relay the instruction and PIN from pairing_status to the person.', z.object({ name: z.string().trim().min(1).max(40).optional().describe('The name the iPhone shows for this computer. Defaults to its host name.'), device: z.string().min(1).optional().describe('An iPhone already paired over Wi-Fi: skip pairing and only install its developer disk image again (an iPhone drops it when it restarts; list_devices then reports display_service false).') }), false],
+  ['pairing_status', 'Report a pairing job from pair_device: its state (starting, advertising, pin, paired, registering, mounting_ddi, ready, failed, cancelled), the PIN to type on the iPhone while the state is pin, the paired device id once known, and for a failure its reason and the action to take. Poll it about every two seconds until terminal is true.', z.object({ job: z.string().min(1).describe('The job id pair_device returned.') }), true],
+  ['pairing_cancel', 'Cancel a pairing job (for the pairing view). The iPhone stops offering this computer, and nothing is saved unless the iPhone had already paired.', z.object({ job: z.string().min(1) }), false],
+  ['unpair_device', 'Remove a wirelessly paired (RemotePairing) iPhone from this computer: stops its pairing job, ends every session\'s work and leases on it, closes its connection and helper, and deletes its saved pairing. It disappears from list_devices at once. USB pairing is not changed. The reply says how to remove this computer on the iPhone too.', z.object({ device }), false],
 ];
-for (const definition of extra) { definitions.push(definition); stepSchemas.set(definition[0], () => definition[0] === 'poki_mcp_status' ? definition[2] : z.object({})); }
+// Pairing tools act on this computer's pairing state, not inside a device's queue (see unqueuedTools).
+export const pairingTools = new Set(['pair_device', 'pairing_status', 'pairing_cancel', 'unpair_device']);
+for (const definition of extra) { definitions.push(definition); if (!pairingTools.has(definition[0])) stepSchemas.set(definition[0], () => definition[0] === 'poki_mcp_status' ? definition[2] : z.object({})); }
 
 // The computer-use profile (POKI_TOOL_PROFILE=cua, cua.mjs): look and do, plus device and status tools.
 for (const [name, description, schema, readOnlyHint] of cua.definitions) { definitions.push([name, description, z.fromJSONSchema(schema), readOnlyHint]); stepSchemas.set(name, () => z.fromJSONSchema(withoutDevice(schema))); }
@@ -108,15 +115,26 @@ export const stepSchema = name => {
 };
 // Tools that act on no device (and so take none), and tools that name several.
 export const sessionTools = new Set(['poki_mcp_status', 'list_devices']);
-const annotationsOf = (name, readOnlyHint) => ({ readOnlyHint, ...approvalHints[name] });
+// Full annotations for the pairing tools. pair_device advertises this computer on the local network;
+// unpair_device deletes a saved pairing.
+const pairingHints = {
+  pair_device: { title: 'Pair an iPhone over Wi-Fi', destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  pairing_status: { title: 'Pairing progress', destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  pairing_cancel: { title: 'Cancel pairing', destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  unpair_device: { title: 'Remove a wireless pairing', destructiveHint: true, idempotentHint: true, openWorldHint: false },
+};
+const annotationsOf = (name, readOnlyHint) => ({ readOnlyHint, ...approvalHints[name], ...pairingHints[name] });
+const metaOf = name => toolMeta[name] ? { _meta: toolMeta[name] } : {};
 const profile = (env = process.env) => env.POKI_TOOL_PROFILE ?? 'default';
-const listedFor = name => (name === 'cua' ? cua.tools : defaultTools);
+// The pairing tools are listed in every profile: a view calls pairing_cancel, and hosts show each
+// tool only to whom its ui.visibility names.
+const listedFor = name => new Set([...(name === 'cua' ? cua.tools : defaultTools), ...pairingTools]);
 
 export function createServer(call) {
   const computerUse = profile() === 'cua', listed = listedFor(profile());
   const server = new McpServer({ name: 'poki-mcp', version }, { instructions: computerUse ? cua.instructions : instructions });
   for (const [name, description, inputSchema, readOnlyHint] of definitions) {
-    server.registerTool(name, { description, inputSchema, annotations: annotationsOf(name, readOnlyHint) }, async (args, extra) => {
+    server.registerTool(name, { description, inputSchema, annotations: annotationsOf(name, readOnlyHint), ...metaOf(name) }, async (args, extra) => {
       try { return await call(name, args, { signal: extra.mcpReq?.signal ?? extra.signal, requestId: extra.mcpReq?._meta?.['poki/request_id'], order: extra.mcpReq?._meta?.['poki/order'] }); }
       catch (error) { return { isError: true, content: [{ type: 'text', text: error.message }] }; }
     });
@@ -125,9 +143,13 @@ export function createServer(call) {
     server.server.setRequestHandler('tools/list', () => ({
       tools: definitions.filter(([name]) => listed.has(name)).map(([name, description, inputSchema, readOnlyHint]) => ({
         name, description, inputSchema: z.toJSONSchema(inputSchema, { io: 'input', target: 'draft-2020-12' }),
-        annotations: annotationsOf(name, readOnlyHint),
+        annotations: annotationsOf(name, readOnlyHint), ...metaOf(name),
       })),
     }));
+  }
+  // MCP Apps views: static files, so whichever process answers (the stdio shim or the daemon) reads them.
+  for (const view of views) {
+    server.registerResource(view.name, view.uri, { title: view.title, description: view.description, mimeType: RESOURCE_MIME_TYPE, _meta: view.meta }, () => readView(view.uri));
   }
   return server;
 }
