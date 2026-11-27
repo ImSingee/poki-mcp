@@ -36,7 +36,7 @@ async function connectDaemon() {
   checkedMode = true;
   // The daemon's environment decides approvals. One started by another client may differ from this one's.
   const own = (() => { try { return approvalMode(); } catch { return undefined; } })();
-  const info = await fetch(new URL('/version', endpoint.url), { headers: { Authorization: `Bearer ${endpoint.token}` }, signal: AbortSignal.timeout(3000) }).then(r => r.json()).catch(() => null);
+  const { info } = endpoint;
   if (own && info?.approval_mode && info.approval_mode !== own) console.error(`Poki MCP: the running service (pid ${info.pid}) uses approval mode ${info.approval_mode}, not ${own} from this client's environment. Its mode applies.`);
 }
 // A 401 or a refused connection means the daemon never ran the request, so sending it once more cannot

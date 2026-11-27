@@ -120,7 +120,7 @@ async function spawnDaemon(deadline) {
     }
     // Ready: ours, or another one that won a race to start (ours then leaves by itself).
     const running = await runningDaemon().catch(() => undefined);
-    if (running && (running.endpoint.pid === child.pid || running.info.auto)) return running.endpoint;
+    if (running && (running.endpoint.pid === child.pid || running.info.auto)) return { ...running.endpoint, info: running.info };
     await sleep(50);
   }
   throw new Error(`Poki MCP did not become ready within ${startTimeoutMs} ms. The end of ${logFile}:\n${logTail()}`);
@@ -145,7 +145,7 @@ export async function runningDaemon() {
   }
 }
 
-// The endpoint of a running daemon that loaded the same code as this shim, started if needed.
+// The endpoint of a running, current daemon (started if needed), with what its /version answered as info.
 export async function ensureDaemon({ timeoutMs = startTimeoutMs } = {}) {
   const deadline = performance.now() + timeoutMs;
   for (;;) {
@@ -156,7 +156,7 @@ export async function ensureDaemon({ timeoutMs = startTimeoutMs } = {}) {
       const { endpoint, info } = running;
       // Older: its own files changed since it started (an update), or it is an earlier release than this
       // shim. A shim that is itself older uses a newer daemon as it is.
-      if (!info.stale && !olderRelease(info.version, version)) return endpoint;
+      if (!info.stale && !olderRelease(info.version, version)) return { ...endpoint, info };
       if (!info.auto) throw new Error(`The Poki MCP service running as pid ${info.pid} was started with npm start and runs older code (${info.version}${info.stale ? ', its files changed since it started' : ''}; this shim is ${version}). Stop it and start it again with npm start, or stop it and let this client start its own.`);
       if (info.busy) throw new Error(`The background Poki MCP (pid ${info.pid}) runs older code (${info.version}${info.stale ? ', its files changed since it started' : ''}; this shim is ${version}) and is still busy: ${info.busy_reasons.join('; ')}. Retry when that work ends, or stop it with kill ${info.pid}.`);
       const response = await fetch(new URL('/shutdown', endpoint.url), { method: 'POST', headers: authorized(endpoint), signal: AbortSignal.timeout(3000) }).catch(() => null);
