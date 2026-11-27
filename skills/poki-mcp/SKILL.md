@@ -18,7 +18,7 @@ Call `list_devices` once and pass one of its ids as `device` on every device too
 
 ## Approval
 
-`poki_mcp_status.approval_mode` says who approves `install_app`, `uninstall_app`, `build_and_run`, `open_url`, `download_app_container`, `get_clipboard` and `set_clipboard`. With `ask-human`, Poki shows a dialog on its host and waits. With `host`, Poki shows no dialog: your client decides, and a client that runs tools without asking runs them unconfirmed. In `host` mode `request_human_action` is refused, so ask the user in the conversation instead. Run these tools only when the user's task calls for them.
+`poki_mcp_status.approval_mode` says who approves `install_app`, `uninstall_app`, `build_and_run`, `open_url`, `download_app_container`, `get_clipboard` and `set_clipboard`. With `ask-human`, Poki shows a dialog on its host and waits. With `host`, Poki shows no dialog: your client decides, and a client that runs tools without asking runs them unconfirmed. In `host` mode call these tools on their own, because `batch_commands` and `run_code` refuse them there, and `request_human_action` is refused, so ask the user in the conversation instead. Run these tools only when the user's task calls for them.
 
 ## Code that decides each step
 

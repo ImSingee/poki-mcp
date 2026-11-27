@@ -35,7 +35,7 @@ The authenticated local HTTP bridge passes the session via the `x-poki-mcp-sessi
 
 A daemon started by a stdio client outlives that client and serves every other client of the state directory, so it receives only what it and the host tools it runs need:
 
-- the `POKI_` settings the daemon reads (the ones in the table above, except `POKI_MCP_TOKEN`);
+- the `POKI_` settings the daemon reads (those in the table above, except the client's own: `POKI_MCP_TOKEN`, `POKI_MCP_SESSION`, `POKI_MCP_AUTOSTART`, `POKI_MCP_HEARTBEAT_MS` and `POKI_DAEMON_ENV`);
 - `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR` (`TMP`, `TEMP`), `LANG`, `LANGUAGE`, `LC_*`, `TZ` and `XDG_*`;
 - for dialogs, Xcode, usbmuxd, certificates and proxies: `DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `DBUS_SESSION_BUS_ADDRESS`, `DEVELOPER_DIR`, `USBMUXD_SOCKET_ADDRESS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`, `NODE_USE_ENV_PROXY`, `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` (either case), and `IDEVICE_TOOLS`;
 - the names listed in `POKI_DAEMON_ENV`.

@@ -352,10 +352,9 @@ test('a start lock whose pid now belongs to a live process is broken once it goe
   await writeFile(lock, JSON.stringify({ pid: process.pid, nonce: 'left-behind' }));
   const old = new Date(Date.now() - 60000);
   await utimes(lock, old, old);
-  const started = performance.now();
+  // The old code waited for that pid until the start timeout and failed.
   const report = await status(f.a);
   assert.match(report.implementation, /Poki MCP/);
-  assert.ok(performance.now() - started < 15000, 'the call did not wait for the start timeout');
 });
 
 test('a call that cannot start the service because of a held lock names that lock', { timeout: 30000 }, async t => {

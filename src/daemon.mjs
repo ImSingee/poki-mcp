@@ -29,7 +29,8 @@ if (!Number.isFinite(idleExitMs) || idleExitMs <= 0) throw new Error('POKI_DAEMO
 const approval = approvalMode();
 if (auto) {
   const other = await runningDaemon().catch(() => undefined);
-  if (other && other.endpoint.pid !== process.pid) {
+  // Not this process: it does not listen yet.
+  if (other) {
     console.log(JSON.stringify({ event: 'already-running', pid: other.endpoint.pid }));
     process.exit(0);
   }
@@ -109,8 +110,9 @@ const silent = (id, session) => {
 async function pruneSessions() {
   for (const [id, session] of [...sessions]) {
     if (!silent(id, session)) continue;
+    const reason = heartbeats.has(id) ? 'heartbeat' : 'idle';
     forget(id);
-    console.log(JSON.stringify({ event: 'session-dropped', session: id, reason: heartbeats.has(id) ? 'heartbeat' : 'idle' }));
+    console.log(JSON.stringify({ event: 'session-dropped', session: id, reason }));
     await session.close().catch(() => {});
   }
 }
@@ -163,7 +165,7 @@ async function handle(req, res) {
   devices.label ??= session;
   // A request still open keeps its session: its client is plainly there.
   open.set(session, (open.get(session) ?? 0) + 1);
-  res.once('close', () => { open.set(session, open.get(session) - 1); if (!open.get(session)) open.delete(session); lastSeen.set(session, performance.now()); });
+  res.once('close', () => { open.set(session, open.get(session) - 1); if (!open.get(session)) open.delete(session); if (sessions.has(session)) lastSeen.set(session, performance.now()); });
   if (req.url === '/session/close') {
     if (req.method !== 'POST') { res.writeHead(405); res.end(); return; }
     await devices.close(); forget(session); res.end('{}'); return;
@@ -208,6 +210,9 @@ const temporary = `${endpointFile}.${process.pid}.tmp`;
 await writeFile(temporary, JSON.stringify(entry, null, 2), { mode: 0o600, flag: 'wx' });
 await rename(temporary, endpointFile);
 await chmod(endpointFile, 0o600);
+// mcp.json names this daemon when it holds this daemon's address and token. Pids are not compared: two
+// daemons in different PID namespaces can have the same one.
+const ours = named => named?.url === entry.url && named?.token === token;
 console.log(JSON.stringify({ event: 'ready', pid: process.pid, url: entry.url, endpointFile, tools: definitions.length, auto, approval_mode: approval }));
 
 const stopUpdateChecks = startUpdateChecks();
@@ -233,8 +238,8 @@ async function stop() {
   await closed;
   // Only our own entry. A daemon that replaces this one is started after this one has exited
   // (daemon-launch.mjs waits for that), so it cannot write its entry between this read and unlink.
-  const entry = await readFile(endpointFile, 'utf8').then(JSON.parse).catch(() => null);
-  if (entry?.pid === process.pid) await unlink(endpointFile).catch(() => {});
+  const named = await readFile(endpointFile, 'utf8').then(JSON.parse).catch(() => null);
+  if (ours(named)) await unlink(endpointFile).catch(() => {});
   // Whatever still holds the event loop (a helper's socket, a pending update check) must not keep a
   // stopped daemon around.
   setTimeout(() => process.exit(0), 2000).unref();
@@ -250,9 +255,9 @@ if (auto) {
     await pruneSessions();
     // Two shims that both started a daemon: the one mcp.json does not name leaves once it has no clients.
     // The other one answers with the token mcp.json names, whatever PID namespace it runs in.
-    const other = !sessions.size && !busyReasons().length && !posting && await readFile(endpointFile, 'utf8').then(JSON.parse).then(entry => entry.pid !== process.pid, () => false);
+    const other = !sessions.size && !busyReasons().length && !posting && await readFile(endpointFile, 'utf8').then(JSON.parse).then(named => !ours(named), () => false);
     const named = other ? await runningDaemon().catch(() => undefined) : undefined;
-    if (named?.info && named.endpoint.pid !== process.pid) {
+    if (named?.info && named.endpoint.url.href !== entry.url) {
       clearInterval(idleCheck);
       console.log(JSON.stringify({ event: 'superseded', by: named.endpoint.pid }));
       await stop();

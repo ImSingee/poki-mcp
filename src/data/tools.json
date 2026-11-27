@@ -1114,7 +1114,7 @@
     },
     {
       "name": "install_app",
-      "description": "Install an application from a local path. Valid Apple signing is required where applicable. Needs approval before it runs: a dialog on the Poki host, or, in host approval mode, the MCP client's own prompt; in host mode call it on its own, because batch_commands and run_code refuse it there.",
+      "description": "Install an application from a local path. Valid Apple signing is required where applicable. Needs approval before it runs, as poki_mcp_status.approval_mode says: a dialog on the Poki host (ask-human), the MCP client's own prompt (host), or nobody because the operator allowed it (operator-preapproved). In host mode call it on its own: batch_commands and run_code refuse it there.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1135,7 +1135,7 @@
     },
     {
       "name": "uninstall_app",
-      "description": "Remove an installed application identified by bundle_id; application data may be removed by the platform. Needs approval before it runs: a dialog on the Poki host, or, in host approval mode, the MCP client's own prompt; in host mode call it on its own, because batch_commands and run_code refuse it there.",
+      "description": "Remove an installed application identified by bundle_id; application data may be removed by the platform. Needs approval before it runs, as poki_mcp_status.approval_mode says: a dialog on the Poki host (ask-human), the MCP client's own prompt (host), or nobody because the operator allowed it (operator-preapproved). In host mode call it on its own: batch_commands and run_code refuse it there.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1214,7 +1214,7 @@
     },
     {
       "name": "open_url",
-      "description": "Ask the device to open a URL; the device chooses the registered handler. Needs approval before it runs: a dialog on the Poki host, or, in host approval mode, the MCP client's own prompt; in host mode call it on its own, because batch_commands and run_code refuse it there.",
+      "description": "Ask the device to open a URL; the device chooses the registered handler. Needs approval before it runs, as poki_mcp_status.approval_mode says: a dialog on the Poki host (ask-human), the MCP client's own prompt (host), or nobody because the operator allowed it (operator-preapproved). In host mode call it on its own: batch_commands and run_code refuse it there.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1235,7 +1235,7 @@
     },
     {
       "name": "build_and_run",
-      "description": "Build an Xcode project or workspace from project_path, install the result, and launch it. scheme may be required for ambiguous projects; configuration defaults to Debug. Platform signing is required when applicable. Needs approval before it runs: a dialog on the Poki host, or, in host approval mode, the MCP client's own prompt; in host mode call it on its own, because batch_commands and run_code refuse it there.",
+      "description": "Build an Xcode project or workspace from project_path, install the result, and launch it. scheme may be required for ambiguous projects; configuration defaults to Debug. Platform signing is required when applicable. Needs approval before it runs, as poki_mcp_status.approval_mode says: a dialog on the Poki host (ask-human), the MCP client's own prompt (host), or nobody because the operator allowed it (operator-preapproved). In host mode call it on its own: batch_commands and run_code refuse it there.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1308,7 +1308,7 @@
     },
     {
       "name": "get_clipboard",
-      "description": "Read clipboard contents supported by the platform; returned contents may be private. Needs approval before it runs: a dialog on the Poki host, or, in host approval mode, the MCP client's own prompt; in host mode call it on its own, because batch_commands and run_code refuse it there.",
+      "description": "Read clipboard contents supported by the platform; returned contents may be private. Needs approval before it runs, as poki_mcp_status.approval_mode says: a dialog on the Poki host (ask-human), the MCP client's own prompt (host), or nobody because the operator allowed it (operator-preapproved). In host mode call it on its own: batch_commands and run_code refuse it there.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1325,7 +1325,7 @@
     },
     {
       "name": "set_clipboard",
-      "description": "Replace the device clipboard with text. Needs approval before it runs: a dialog on the Poki host, or, in host approval mode, the MCP client's own prompt; in host mode call it on its own, because batch_commands and run_code refuse it there.",
+      "description": "Replace the device clipboard with text. Needs approval before it runs, as poki_mcp_status.approval_mode says: a dialog on the Poki host (ask-human), the MCP client's own prompt (host), or nobody because the operator allowed it (operator-preapproved). In host mode call it on its own: batch_commands and run_code refuse it there.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -1407,7 +1407,7 @@
     },
     {
       "name": "download_app_container",
-      "description": "Copy an accessible application container to a local destination, or the service state directory by default. Platform container access is required. Needs approval before it runs: a dialog on the Poki host, or, in host approval mode, the MCP client's own prompt; in host mode call it on its own, because batch_commands and run_code refuse it there.",
+      "description": "Copy an accessible application container to a local destination, or the service state directory by default. Platform container access is required. Needs approval before it runs, as poki_mcp_status.approval_mode says: a dialog on the Poki host (ask-human), the MCP client's own prompt (host), or nobody because the operator allowed it (operator-preapproved). In host mode call it on its own: batch_commands and run_code refuse it there.",
       "inputSchema": {
         "type": "object",
         "properties": {
