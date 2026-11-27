@@ -405,3 +405,47 @@ test('with POKI_MCP_AUTOSTART=0 a call fails instead of starting a service, and 
   await f.startDaemon();
   assert.match((await status(f.a)).implementation, /Poki MCP/);
 });
+
+// A call refused by a service that died is sent again to the new one. It takes its place there before
+// any call made after it, instead of keeping a number from the old service's stream.
+test('a call sent again after the service restarts runs before a call made after it', { timeout: 40000 }, async t => {
+  const f = await fixture(t, { daemon: false });
+  await status(f.a);
+  await f.set({ tapDelayMs: 400 });
+  const first = await endpointOf(f);
+  process.kill(first.pid, 'SIGKILL');
+  await until(() => !alive(first.pid), 5000, 'the service to die');
+  const earlier = f.call('tap', { x: 11, y: 10 });
+  await until(async () => (await readyLines(f)).length === 2, 20000, 'the new service');
+  // By now the shim has found the new service and sent the earlier call there.
+  await sleep(200);
+  const later = f.call('tap', { x: 12, y: 10 });
+  for (const result of await Promise.all([earlier, later])) assert.notEqual(result.isError, true, result.content?.[0]?.text);
+  const starts = (await f.events()).filter(event => event.op === 'tap_start').map(event => event.x);
+  // x arrives scaled to the device's input range, which keeps the order of the two taps.
+  assert.equal(starts.length, 2);
+  assert.ok(starts[0] < starts[1], `the earlier call's tap (x 11) started first: ${starts}`);
+});
+
+// The shared service's approval mode comes from the client that started it. A client that asks for a
+// stricter one explicitly gets its device calls refused, and status says why.
+test('a client asking for a stricter approval mode than the running service gets device calls refused', { timeout: 40000 }, async t => {
+  const f = await fixture(t, { approvalMode: 'allow' });
+  const strict = new Client({ name: 'strict', version: '1' });
+  await strict.connect(new StdioClientTransport({ command: process.execPath, args: [join(f.dir, 'src/stdio.mjs')], env: { ...f.env, POKI_MCP_APPROVAL_MODE: 'ask' } }));
+  t.after(() => strict.close());
+  const tap = await strict.callTool({ name: 'tap', arguments: { device: 'fixture-phone', x: 10, y: 10 } });
+  assert.equal(tap.isError, true);
+  assert.match(tap.content[0].text, /approval mode ask.*uses allow/s);
+  const report = await strict.callTool({ name: 'poki_mcp_status', arguments: {} });
+  assert.notEqual(report.isError, true);
+  assert.match(report.content.at(-1).text, /device tools are refused/);
+  assert.equal((await f.events()).filter(event => event.op === 'tap').length, 0);
+  // A client asking for a looser mode runs under the service's stricter one, and status says so.
+  const g = await fixture(t, { approvalMode: 'host' });
+  const loose = new Client({ name: 'loose', version: '1' });
+  await loose.connect(new StdioClientTransport({ command: process.execPath, args: [join(g.dir, 'src/stdio.mjs')], env: { ...g.env, POKI_MCP_APPROVAL_MODE: 'allow' } }));
+  t.after(() => loose.close());
+  assert.notEqual((await loose.callTool({ name: 'tap', arguments: { device: 'fixture-phone', x: 10, y: 10 } })).isError, true);
+  assert.match((await loose.callTool({ name: 'poki_mcp_status', arguments: {} })).content.at(-1).text, /The service's mode applies\./);
+});
