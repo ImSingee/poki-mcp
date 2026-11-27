@@ -5,8 +5,14 @@
 import { screens as defaultScreens } from './hub.mjs';
 import { iceServers, answer } from './rtc.mjs';
 import { nativeRequest } from '../remote.mjs';
+import { work } from '../work.mjs';
 export { screenTools, screenDefinitions, screenToolMeta, INPUT_WAIT_MS, TAKEOVER_TTL_SECONDS } from './catalog.mjs';
 import { INPUT_WAIT_MS, TAKEOVER_TTL_SECONDS } from './catalog.mjs';
+
+// Lease checks made outside the calling tool's operation. Coordination.access records the device on
+// the current operation, and a screen tool's operation deliberately names no device: recorded, it
+// would count as another owner's work on the device, and a takeover would refuse itself.
+const outsideCall = fn => work.run(undefined, fn);
 
 const result = (value, summary) => ({ content: [{ type: 'text', text: summary ?? JSON.stringify(value) }], structuredContent: value });
 const failure = (error, extra = {}) => ({ isError: true, content: [{ type: 'text', text: error }], structuredContent: { error, ...extra } });
@@ -64,7 +70,7 @@ export async function screenInput(session, viewer, args, { signal, native = nati
   const request = nativeInput(args);
   const taken = viewer.takeover && coordinator.leases.get(target.id)?.lease_id === viewer.takeover.lease_id;
   const owner = taken ? viewer.owner : session;
-  try { coordinator.access(owner, target); }
+  try { outsideCall(() => coordinator.access(owner, target)); }
   catch { return failure('The agent is using this iPhone (it holds the device). Take over to control it from here.', { reason: 'busy' }); }
   let release;
   try { release = await coordinator.inputLock.acquire([target.id], { session: owner.label, tool: 'screen_input' }, signal, { waitMs: INPUT_WAIT_MS }); }
@@ -89,7 +95,7 @@ export async function takeOver(session, viewer) {
   const lease = coordinator.leases.get(target.id);
   if (lease && lease.owner !== viewer.owner) owners.add(lease.owner);
   await Promise.all([...owners].map(owner => coordinator.end(owner, 'taken_over', [target.id])));
-  if (coordinator.leases.get(target.id)?.owner !== viewer.owner) viewer.takeover = await coordinator.acquire(viewer.owner, target, TAKEOVER_TTL_SECONDS);
+  if (coordinator.leases.get(target.id)?.owner !== viewer.owner) viewer.takeover = await outsideCall(() => coordinator.acquire(viewer.owner, target, TAKEOVER_TTL_SECONDS));
   const end = viewer.close.bind(viewer);
   viewer.close = () => { if (viewer.takeover) void coordinator.end(viewer.owner, 'released', [target.id]).catch(() => {}); viewer.takeover = undefined; end(); };
   return result({ taken_over: true, device: target.id, stopped_sessions: owners.size, expires_at: viewer.takeover.expires_at });

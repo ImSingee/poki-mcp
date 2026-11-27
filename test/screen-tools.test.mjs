@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createHmac } from 'node:crypto';
 import { Coordination } from '../src/coordination.mjs';
+import { work } from '../src/work.mjs';
 import { Session } from '../src/device.mjs';
 import { Screens } from '../src/stream/hub.mjs';
 import { nativeInput, screenInput, takeOver, INPUT_WAIT_MS } from '../src/stream/tools.mjs';
@@ -112,4 +113,25 @@ test('RTC packets carry the codec, sequence, key flag and config, in chunks the 
   const jpeg = packet('jpeg', { seq: 3, key: true, data: Buffer.from([0xff, 0xd8]) });
   assert.equal(jpeg.readUInt32BE(0), MAGIC.jpeg);
   assert.equal(jpeg.length, 10);
+});
+
+// The takeover runs as a tool call: its own operation must not count as another owner's work on the
+// device, or the takeover refuses itself ("Device has an active operation").
+test('screen_takeover called as a tool takes the device, and the agent is then refused', async t => {
+  const { coordinator, agent, view, viewer, sent, native } = await setup(t);
+  const op = { owner: view, controller: new AbortController(), devices: new Set(), timings: [] };
+  coordinator.operations.add(op);
+  const taken = await work.run({ operation: op, signal: op.controller.signal, timings: op.timings }, () => takeOver(view, viewer));
+  coordinator.operations.delete(op);
+  assert.equal(taken.structuredContent?.taken_over, true, JSON.stringify(taken));
+  assert.equal(coordinator.leases.get(target.id).owner, viewer.owner);
+  assert.throws(() => coordinator.access(agent, target), /occupied/);
+  assert.throws(() => coordinator.access(view, target), /occupied/, 'the MCP session the view calls on is kept off too');
+  // The view's own gestures, also made as tool calls, go through.
+  const input = { owner: view, controller: new AbortController(), devices: new Set(), timings: [] };
+  coordinator.operations.add(input);
+  const reply = await work.run({ operation: input, signal: input.controller.signal, timings: input.timings }, () => screenInput(view, viewer, { kind: 'tap', x: 0.5, y: 0.5 }, { native }));
+  coordinator.operations.delete(input);
+  assert.equal(reply.structuredContent.sent, true, JSON.stringify(reply));
+  assert.equal(sent.length, 1);
 });

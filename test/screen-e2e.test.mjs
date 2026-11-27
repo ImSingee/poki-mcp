@@ -52,6 +52,28 @@ test('show_screen, a stream, a tap and its end reach the phone through the daemo
   await until(async () => (await host.commands()).some(c => c.remote === 'media_unsubscribed'));
 });
 
+test("a confirmed takeover through the daemon stops the agent's batch and keeps the agent off the phone", { timeout: 60000 }, async t => {
+  const host = await viewHost(t);
+  const opened = (await host.call('screen_open', { device: 'lab-iphone', codecs: ['hevc'] })).structuredContent;
+  const started = Date.now();
+  const batch = host.call('batch_commands', { device: 'lab-iphone', commands: [{ tool: 'wait', arguments: { seconds: 15 } }] });
+  await delay(500);
+  // The agent holds the input lock: the view's gesture comes back busy, and nothing reaches the phone.
+  const busy = await host.call('screen_input', { stream: opened.stream, kind: 'tap', x: 0.5, y: 0.5 });
+  assert.equal(busy.structuredContent.reason, 'busy', JSON.stringify(busy));
+  const taken = await host.call('screen_takeover', { stream: opened.stream, confirm: true });
+  assert.equal(taken.structuredContent?.taken_over, true, JSON.stringify(taken));
+  const stopped = await batch;
+  assert.ok(Date.now() - started < 10000, 'the batch ran on after the takeover');
+  assert.match(JSON.stringify(stopped.content), /taken_over/, JSON.stringify(stopped));
+  const refused = await host.call('tap', { device: 'lab-iphone', x: 10, y: 10 });
+  assert.equal(refused.isError, true);
+  assert.match(refused.content[0].text, /occupied/);
+  assert.equal((await host.call('screen_input', { stream: opened.stream, kind: 'tap', x: 0.1, y: 0.2 })).structuredContent.sent, true);
+  const taps = (await host.commands()).filter(c => c.remote === 'tap');
+  assert.deepEqual(taps.map(c => [c.request.x, c.request.y]), [[6554, 13107]], 'only the view\'s tap after the takeover reached the phone');
+});
+
 const browserReady = chromium && (existsSync(chromium.executablePath()) || ['/Applications/Google Chrome.app', '/usr/bin/google-chrome'].some(existsSync));
 test('the view host page shows the live screen after the agent calls show_screen', { timeout: 60000, skip: !browserReady && !process.env.CI && 'no browser for Playwright' }, async t => {
   const host = await viewHost(t);
