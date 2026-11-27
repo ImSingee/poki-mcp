@@ -329,12 +329,24 @@ async function poll(generation, lane) {
 }
 
 // Transport A: WebRTC DataChannels, if ICE connects within rtcTimeoutMs.
+// The whole attempt, signaling included, must succeed within rtcTimeoutMs; otherwise the peer is
+// closed and the view goes on over tool calls.
 async function tryRtc(generation) {
+  let pc, timer;
+  const deadline = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('WebRTC did not connect in time')), settings.rtcTimeoutMs + 1500); });
+  deadline.catch(() => {});
+  const attempt = { cancelled: false, track: created => { pc = created; } };
+  try { return await Promise.race([attemptRtc(generation, attempt), deadline]); }
+  catch { attempt.cancelled = true; pc?.close(); if (rtc?.pc === pc) rtc = undefined; return false; }
+  finally { clearTimeout(timer); }
+}
+async function attemptRtc(generation, attempt) {
   let pc;
   try {
     const config = await call('screen_rtc_config', { stream: state.stream });
     if (!config?.enabled) return false;
     pc = new RTCPeerConnection({ iceServers: config.ice_servers ?? [] });
+    attempt.track(pc);
     const media = pc.createDataChannel('media', { ordered: true }), control = pc.createDataChannel('control', { ordered: true });
     media.binaryType = 'arraybuffer';
     let frame, offset = 0;
@@ -351,6 +363,7 @@ async function tryRtc(generation) {
     };
     const opened = new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('ICE did not connect')), settings.rtcTimeoutMs);
+      pc.addEventListener('connectionstatechange', () => { if (pc.connectionState === 'closed') { clearTimeout(timer); reject(new Error('closed')); } });
       control.onmessage = event => {
         let message; try { message = JSON.parse(event.data); } catch { return; }
         if (message.type === 'ready') { clearTimeout(timer); if (message.codec_string) { state.codecString = message.codec_string; decoder?.reconfigure(message.codec_string); } resolve(); }
@@ -359,6 +372,7 @@ async function tryRtc(generation) {
       };
       pc.onconnectionstatechange = () => { if (['failed', 'closed'].includes(pc.connectionState)) { clearTimeout(timer); reject(new Error('ICE failed')); } };
     });
+    opened.catch(() => {});
     await pc.setLocalDescription(await pc.createOffer());
     await new Promise(resolve => {
       if (pc.iceGatheringState === 'complete') return resolve();
@@ -367,8 +381,11 @@ async function tryRtc(generation) {
       setTimeout(resolve, 1500);
     });
     const answer = await call('screen_rtc_offer', { stream: state.stream, sdp: pc.localDescription.sdp });
+    if (attempt.cancelled) return false;
     await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
     await opened;
+    // Given up meanwhile: tool calls carry the stream now.
+    if (attempt.cancelled) { pc.close(); return false; }
     if (generation !== state.generation) { pc.close(); return true; }
     rtc = { pc, send: value => { if (control.readyState === 'open') control.send(JSON.stringify(value)); } };
     state.transport = 'webrtc';

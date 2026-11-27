@@ -101,7 +101,11 @@ export async function screenInput(session, viewer, args, { signal, native = nati
 export async function takeOver(session, viewer) {
   const coordinator = session.coordinator, target = viewer.hub.target;
   viewer.owner ??= new ViewerOwner(viewer);
+  // acquire() checks every session's background work on the device, as it does for any lease.
+  viewer.owner.peers = () => session.peers?.() ?? [session];
   const owners = new Set([...coordinator.operations].filter(op => op.devices.has(target.id) && op.owner !== viewer.owner).map(op => op.owner));
+  // A recording or simulated location runs on without a call in flight or a lease: it stops too.
+  for (const peer of viewer.owner.peers()) if (peer !== viewer.owner && peer.backgroundDevices?.has(target.id)) owners.add(peer);
   const lease = coordinator.leases.get(target.id);
   if (lease && lease.owner !== viewer.owner) owners.add(lease.owner);
   await Promise.all([...owners].map(owner => coordinator.end(owner, 'taken_over', [target.id])));

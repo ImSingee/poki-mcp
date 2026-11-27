@@ -18,6 +18,8 @@ const RETRY_MS = [1000, 2000, 5000];
 // A transcoded track's encoder is restarted for a new bitrate at most this often, and only when
 // the bitrate moved by at least a fifth.
 const RETUNE_MS = 5000;
+// An encoder that exits on its own is restarted at most this often a minute.
+const ENCODER_RESTARTS = 3;
 
 export const CODECS = ['hevc', 'h264', 'jpeg'];
 export const MAX_VIEWERS = 8;
@@ -82,7 +84,18 @@ class ScreenHub {
       const transcoder = new Transcoder(codec, {
         bitrate: this.bitrate(codec), spawn: this.deps.spawn,
         onFrame: frame => { track.push({ ...frame, seq: ++seq, at: performance.now() }); this.pushed(codec); },
-        onExit: ({ closed }) => { if (!closed) { track.reset(); seq++; } },
+        onExit: ({ closed }) => {
+          if (closed) return;
+          track.reset(); seq++;
+          // It died on its own: start a new one on the cached HEVC chain (a still screen sends no
+          // new key frame), at most ENCODER_RESTARTS times a minute.
+          const now = performance.now();
+          transcoder.exits = (transcoder.exits ?? []).filter(at => now - at < 60000);
+          transcoder.exits.push(now);
+          if (transcoder.exits.length > ENCODER_RESTARTS) { this.error = `The ${codec} encoder keeps stopping; showing the screen in another codec may help.`; return; }
+          const timer = setTimeout(() => { if (this.transcoders.get(codec) === transcoder && !transcoder.closed) this.feedChain(transcoder); }, 500);
+          timer.unref?.();
+        },
       });
       this.tracks.set(codec, track); this.transcoders.set(codec, transcoder);
       this.feedChain(transcoder);
@@ -223,8 +236,14 @@ export class Screens {
     const viewer = new Viewer(this, hub, codec);
     hub.viewers.add(viewer); this.viewers.set(viewer.id, viewer);
     this.sweep();
+    // A cold start can take longer than the lease (the helper may open a tunnel and the media
+    // session first): the lease starts once the stream is open.
+    viewer.opening = true;
     try { await hub.start(signal); }
     catch (error) { viewer.close(); throw error; }
+    finally { viewer.opening = false; }
+    if (viewer.closed) throw Object.assign(new Error('This screen stream has ended. Open it again.'), { code: 'stream_closed' });
+    viewer.renew();
     hub.track(codec);
     return viewer;
   }
@@ -251,7 +270,7 @@ export class Screens {
     if (this.sweeper) return;
     this.sweeper = setInterval(() => {
       const now = performance.now();
-      for (const viewer of [...this.viewers.values()]) if (now >= viewer.expires) viewer.close();
+      for (const viewer of [...this.viewers.values()]) if (!viewer.opening && now >= viewer.expires) viewer.close();
     }, Math.min(500, this.ttlMs / 4));
     this.sweeper.unref?.();
   }

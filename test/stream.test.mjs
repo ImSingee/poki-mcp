@@ -294,3 +294,36 @@ test('a restarted encoder\'s late output never reaches the new chain', () => {
   assert.deepEqual(pictures, [2]);
   transcoder.close();
 });
+
+test('a stream that takes longer to open than the viewer lease still opens', async t => {
+  const native = fakeNative();
+  const slow = { ...native, subscribe: async (...args) => { await delay(500); return native.subscribe(...args); } };
+  const screens = new Screens({ ...slow, ffmpeg: noFfmpeg, ttlMs: 200 });
+  t.after(() => screens.closeAll());
+  const viewer = await screens.open(target, { codecs: ['hevc'] });
+  assert.equal(viewer.closed, undefined, 'screen_open returned a stream that had already expired');
+  assert.equal(screens.active, 1);
+  native.subscriptions[0].send(sampleFrames()[0]);
+  assert.equal((await viewer.read({ wait_ms: 0 })).frames.length, 1);
+});
+
+test('an encoder that exits on its own is restarted on the cached chain', async t => {
+  const native = fakeNative();
+  const children = [];
+  const spawnFake = () => {
+    const stdin = new PassThrough(), child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), stdin, kill() {}, written: 0 });
+    stdin.on('data', () => { child.written++; });
+    children.push(child); return child;
+  };
+  const screens = new Screens({ ...native, spawn: spawnFake, ffmpeg: async () => true });
+  t.after(() => screens.closeAll());
+  await screens.open(target, { codecs: ['hevc'] });
+  const [key, delta] = sampleFrames();
+  native.subscriptions[0].send(key); native.subscriptions[0].send({ ...delta, seq: 2 });
+  await screens.open(target, { codecs: ['jpeg'] });
+  assert.equal(children.length, 1);
+  await until(() => children[0].written > 0);
+  // ffmpeg dies; the screen stays still, so no new key frame comes from the phone.
+  children[0].emit('close', 1);
+  await until(() => children.length === 2 && children[1].written > 0, 3000);
+});

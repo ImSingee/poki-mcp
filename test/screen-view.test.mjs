@@ -294,3 +294,12 @@ test('a decoder that fails while WebRTC is still connecting falls back to the ne
   await until(async () => (await h.screen()).codec === 'jpeg', 30000);
   await until(() => painted(h.frame()));
 });
+
+test('a WebRTC offer that never gets an answer falls back to tool calls', { skip, timeout: 60000 }, async t => {
+  const h = await open(t, { settings: { rtc: true, codecs: (await ffmpegAvailable()) ? ['jpeg'] : undefined }, backendOptions: { rtcOffer: () => new Promise(() => {}) } });
+  const started = Date.now();
+  await h.mount(showResult);
+  await until(async () => (await h.screen()).transport === 'tool-calls', 15000);
+  assert.ok(Date.now() - started < 10000, `fell back after ${Date.now() - started} ms`);
+  await until(() => painted(h.frame()));
+});

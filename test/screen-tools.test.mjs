@@ -169,3 +169,15 @@ test('a device another session holds can still be watched', async t => {
   assert.equal(shown.structuredContent?.device, 'fixture-phone', JSON.stringify(shown));
   await coordinator.end(agent, 'released', [phone.id]);
 });
+
+test('a takeover also stops another session\'s recording or simulated location on the device', async t => {
+  const { coordinator, agent, view, viewer } = await setup(t);
+  // The agent started a recording earlier; no call is in flight and it holds no lease.
+  agent.backgroundDevices.set(target.id, new Set(['recording']));
+  let cleaned;
+  agent.cleanup = async devices => { cleaned = [...devices]; agent.backgroundDevices.delete(target.id); return { recordings: [], locations: [] }; };
+  view.peers = () => [agent, view];
+  const taken = await takeOver(view, viewer);
+  assert.equal(taken.structuredContent?.taken_over, true, JSON.stringify(taken));
+  assert.deepEqual(cleaned, [target.id], 'the recording kept running under the takeover');
+});
