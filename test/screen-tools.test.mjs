@@ -11,6 +11,7 @@ import { iceServers, packet, chunks, RTC_CHUNK_BYTES, MAGIC } from '../src/strea
 import { fakeNative } from './stream-fixture.mjs';
 
 const target = { id: 'fixture-phone', kind: 'physical' };
+const until = async (predicate, ms = 5000) => { const end = Date.now() + ms; while (!predicate()) { if (Date.now() > end) throw new Error('Timed out'); await delay(5); } };
 
 async function setup(t) {
   const coordinator = new Coordination();
@@ -134,4 +135,37 @@ test('screen_takeover called as a tool takes the device, and the agent is then r
   coordinator.operations.delete(input);
   assert.equal(reply.structuredContent.sent, true, JSON.stringify(reply));
   assert.equal(sent.length, 1);
+});
+
+test('a gesture that waited for the lock is refused if a lease was taken meanwhile, and no lease is taken while one is sent', async t => {
+  const { coordinator, agent, view, viewer, sent, native } = await setup(t);
+  const release = await coordinator.inputLock.acquire([target.id], { session: 'agent', tool: 'tap' });
+  const waiting = screenInput(view, viewer, { kind: 'tap', x: 0.5, y: 0.5 }, { native });
+  await delay(100);
+  await coordinator.acquire(agent, target, 120);
+  release();
+  assert.equal((await waiting).structuredContent.reason, 'busy');
+  assert.deepEqual(sent, [], 'the gesture landed during the agent\'s lease');
+  await coordinator.end(agent, 'released', [target.id]);
+  // While a gesture is on its way to the phone, the device cannot be leased from under it.
+  let finish;
+  const slow = (device, request) => new Promise(resolve => { sent.push(request); finish = () => resolve({ sent: true }); });
+  const sending = screenInput(view, viewer, { kind: 'tap', x: 0.1, y: 0.1 }, { native: slow });
+  await until(() => sent.length === 1);
+  await assert.rejects(coordinator.acquire(agent, target, 120), /active operation/);
+  finish();
+  assert.equal((await sending).structuredContent.sent, true);
+  await coordinator.acquire(agent, target, 120);
+});
+
+test('a device another session holds can still be watched', async t => {
+  const coordinator = new Coordination();
+  const agent = new Session(coordinator), view = new Session(coordinator);
+  const phone = { id: 'fixture-phone', kind: 'physical', name: 'Lab iPhone' };
+  for (const session of [agent, view]) session.inventory = async () => [phone];
+  await coordinator.acquire(agent, phone, 120);
+  const route = await view.route('show_screen', { device: 'fixture-phone' });
+  const shown = await route.run();
+  assert.equal(shown.structuredContent?.device, 'fixture-phone', JSON.stringify(shown));
+  await coordinator.end(agent, 'released', [phone.id]);
 });

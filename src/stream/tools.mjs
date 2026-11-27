@@ -78,12 +78,22 @@ export async function screenInput(session, viewer, args, { signal, native = nati
     if (error.name !== 'InputLockTimeout') throw error;
     return failure(`The agent is using this iPhone right now. ${error.message.replace(/ Waited.*$/, '')} Take over to control it from here.`, { reason: 'busy' });
   }
+  // Recorded as work on the device while it is sent, so no lease can be taken from under it.
+  const dispatch = { owner, devices: new Set([target.id]), controller: new AbortController(), timings: [] };
   try {
-    if (taken) coordinator.renew(viewer.owner, viewer.takeover.lease_id, TAKEOVER_TTL_SECONDS);
-    const reply = await native(target, request);
-    coordinator.changed(target.id);
-    if (reply?.isError) return failure(reply.error ?? 'The input was not sent.', { outcome: reply.outcome });
-    return result({ sent: reply?.sent !== false, kind: args.kind });
+    // Someone may have taken the device's lease while this gesture waited for the lock.
+    try { outsideCall(() => coordinator.access(owner, target)); }
+    catch { return failure('The agent is using this iPhone (it holds the device). Take over to control it from here.', { reason: 'busy' }); }
+    let finished;
+    dispatch.done = new Promise(resolve => { finished = resolve; });
+    coordinator.operations.add(dispatch);
+    try {
+      if (taken) coordinator.renew(viewer.owner, viewer.takeover.lease_id, TAKEOVER_TTL_SECONDS);
+      const reply = await native(target, request);
+      coordinator.changed(target.id);
+      if (reply?.isError) return failure(reply.error ?? 'The input was not sent.', { outcome: reply.outcome });
+      return result({ sent: reply?.sent !== false, kind: args.kind });
+    } finally { coordinator.operations.delete(dispatch); finished(); }
   } finally { release(); }
 }
 
@@ -114,7 +124,7 @@ export async function runScreenTool(session, name, args, { resolve, signal, scre
     const target = await resolve(args.device);
     if (target.kind !== 'physical' || target.wda) return failure('The live screen is available for iPhones only.');
     try {
-      const viewer = await screens.open(target, { codecs: args.codecs });
+      const viewer = await screens.open(target, { codecs: args.codecs, signal });
       return result({ ...viewer.describe(), rtc: (await weriftAvailable()) && process.env.POKI_SCREEN_RTC !== '0' });
     } catch (error) { return failure(error.message, error.reason ? { reason: error.reason } : {}); }
   }

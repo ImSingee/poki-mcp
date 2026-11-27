@@ -244,3 +244,34 @@ test('a device takes at most eight viewers', async t => {
   await screens.open(target, { codecs: ['hevc'] });
   assert.equal(native.subscriptions.length, 1);
 });
+
+test('frames that arrive before the subscription resolves keep their chain', async t => {
+  const frames = sampleFrames();
+  let deliver;
+  const screens = new Screens({
+    ffmpeg: noFfmpeg, keyframe: async () => ({}),
+    // The helper's reply and its first frames came in one chunk: the frames are delivered first.
+    subscribe: async (target, onFrame) => { deliver = onFrame; onFrame(frames[0]); onFrame(frames[1]); return { reply: { subscribed: true }, closed: new Promise(() => {}), close() {} }; },
+  });
+  t.after(() => screens.closeAll());
+  const viewer = await screens.open(target, { codecs: ['hevc'] });
+  deliver(frames[2]);
+  const read = await viewer.read({ wait_ms: 0 });
+  assert.deepEqual(read.frames.map(f => [f.seq, f.key]), [[1, true], [2, false], [3, false]], 'a delta after the reply broke the cached chain');
+});
+
+test('a resync gives back the credit of frames a lost transport never delivered', () => {
+  const track = new Track('hevc');
+  const flow = new Flow();
+  const limits = { maxBytes: 64 * 1024 * 1024, maxFrames: 64 };
+  const [key, delta] = sampleFrames();
+  track.push({ ...key, seq: 1, at: 0 });
+  for (let seq = 2; seq <= 60; seq++) track.push({ ...delta, seq, at: 0 });
+  let sent = 0;
+  for (let i = 0; i < 10; i++) sent += flow.take(track, 0, { credit: 64, ...limits }).frames.length;
+  assert.equal(sent, 48, 'the window holds 48 unacknowledged frames');
+  // The peer that carried them is gone; the view asks again over tool calls.
+  flow.resync();
+  track.push({ ...key, seq: 61, at: 0 });
+  assert.deepEqual(flow.take(track, 0, { credit: 64, ...limits }).frames.map(f => [f.seq, f.key]), [[61, true]]);
+});

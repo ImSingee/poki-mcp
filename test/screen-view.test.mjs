@@ -55,7 +55,7 @@ const hostPage = `<!doctype html><html><head><meta charset="utf-8"><style>body{m
 </script></body></html>`;
 
 // Poki's stream tools over a stand-in phone that sends the sample stream in a loop, 10 frames a second.
-function backend({ busy = false, garbleHevc = false, rtcOffer } = {}) {
+function backend({ busy = false, garbleHevc = false, rtcOffer, inputDelayMs = 0, devices = [{ id: 'fixture-phone', name: 'Lab iPhone', kind: 'physical', connection: 'RemotePairing' }] } = {}) {
   const native = fakeNative();
   const screens = new Screens({ subscribe: native.subscribe, keyframe: native.keyframe });
   const session = { coordinator: new Coordination(), label: 'view session' };
@@ -71,14 +71,14 @@ function backend({ busy = false, garbleHevc = false, rtcOffer } = {}) {
   }, 100);
   const handle = async (name, args) => {
     calls.push({ name, args, at: Date.now() });
-    if (name === 'list_devices') return { content: [{ type: 'text', text: '{}' }], structuredContent: { devices: [{ id: 'fixture-phone', name: 'Lab iPhone', kind: 'physical', connection: 'RemotePairing' }] } };
+    if (name === 'list_devices') return { content: [{ type: 'text', text: '{}' }], structuredContent: { devices } };
     if (name === 'screen_rtc_offer' && rtcOffer) return rtcOffer(args);
     if (name === 'screen_input' && busy) { inputs.push(args); return { isError: true, content: [{ type: 'text', text: 'The agent is using this iPhone right now.' }], structuredContent: { reason: 'busy', error: 'The agent is using this iPhone right now.' } }; }
     inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
     try {
       const result = await runScreenTool(session, name, args, {
         screens, resolve: async id => ({ id, kind: 'physical' }),
-        native: async (target, request) => { inputs.push({ ...args, request }); return { sent: true }; },
+        native: async (target, request) => { inputs.push({ ...args, device: target.id, request }); if (inputDelayMs) await delay(inputDelayMs); return { sent: true }; },
       });
       // Through the bridge, as JSON: a Buffer would not survive.
       return JSON.parse(JSON.stringify(result));
@@ -246,4 +246,20 @@ test('a remounted view opens its stream again, and a narrow inline view stays wi
   await until(() => painted(h.frame()));
   await until(() => h.poki.count('screen_open') === 2);
   assert.notEqual((await h.screen()).stream, first);
+});
+
+test('a gesture still queued when the person switches iPhones is dropped, not sent to the other one', { skip, timeout: 60000 }, async t => {
+  const devices = [{ id: 'phone-a', name: 'Phone A', kind: 'physical', connection: 'RemotePairing' }, { id: 'phone-b', name: 'Phone B', kind: 'physical', connection: 'RemotePairing' }];
+  const h = await open(t, { settings: { rtc: false, codecs: (await ffmpegAvailable()) ? ['jpeg'] : undefined }, backendOptions: { devices, inputDelayMs: 1500 } });
+  await h.mount({ content: [{ type: 'text', text: 'shown' }], structuredContent: { device: 'phone-a' } });
+  await until(() => painted(h.frame()));
+  const box = await h.view.locator('#screen').boundingBox();
+  // The first tap takes 1.5 s to reach the phone; the second waits behind it.
+  await h.page.mouse.click(box.x + box.width * 0.3, box.y + box.height * 0.3);
+  await until(() => h.poki.inputs.length === 1);
+  await h.page.mouse.click(box.x + box.width * 0.6, box.y + box.height * 0.6);
+  await h.view.locator('#device').selectOption('phone-b');
+  await until(async () => h.poki.calls.some(c => c.name === 'screen_open' && c.args.device === 'phone-b'));
+  await delay(2500);
+  assert.deepEqual(h.poki.inputs.map(i => i.device), ['phone-a'], `a queued gesture went to ${JSON.stringify(h.poki.inputs.map(i => i.device))}`);
 });

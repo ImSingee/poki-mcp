@@ -36,8 +36,10 @@ export class Flow {
   feedbackAt; feedbackCount = 0; slowFeedback = 0; feedbackBytes = 0; minFeedback = Infinity; lastAck = 0; lastTune = 0;
   constructor({ latestOnly = false } = {}) { this.latestOnly = latestOnly; }
 
-  // Resume at the next key frame: after a gap, a decoder error, or a backlog.
-  resync() { this.waitingKey = true; }
+  // Resume at the next key frame: after a gap, a decoder error, a backlog, or a transport lost with
+  // frames on it. Whatever was sent and not acknowledged is abandoned with it, so its credit comes
+  // back: the viewer cannot acknowledge frames it never received.
+  resync() { this.waitingKey = true; this.inFlight.clear(); this.acked = this.sent; }
 
   inFlightBytes() { let n = 0; for (const f of this.inFlight.values()) n += f.bytes; return n; }
 

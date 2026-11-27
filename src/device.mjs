@@ -792,6 +792,15 @@ export class Session {
     if (this.coordinator.unavailable.has(matches[0].id)) throw new Error(this.coordinator.unavailable.get(matches[0].id));
     return matches[0].id;
   }
+  // The device a screen panel shows. Watching needs no lease, so a person can see what the agent does
+  // with a device it holds and take over from there; screen_input checks the lease for each gesture.
+  async screenTarget(query) {
+    const id = await this.resolveDevice(query);
+    if (this.coordinator.unavailable?.has(id)) throw new Error(this.coordinator.unavailable.get(id));
+    const target = (await this.inventory(true)).find(device => device.id === id);
+    if (!target) throw new Error(`Device ${id} is not connected. Use list_devices to see the devices available now.`);
+    return target;
+  }
   // Which devices a call acts on and how to run it. Called in arrival order (Coordination.call).
   async route(name, args) {
     const definition = definitions.find(d => d[0] === name);
@@ -803,7 +812,7 @@ export class Session {
     if (pairingTools.has(name)) return { keys: [], run: () => this.dispatchPairing(name, args) };
     // No device keys either: a view's reads must not keep other sessions from taking a lease, and
     // screen_input takes the device's lease and input lock itself.
-    if (screenTools.has(name)) return { keys: [], run: () => runScreenTool(this, name, args, { signal: signal(), resolve: async query => this.context(await this.resolveDevice(query)).target(false) }) };
+    if (screenTools.has(name)) return { keys: [], run: () => runScreenTool(this, name, args, { signal: signal(), resolve: query => this.screenTarget(query) }) };
     if (name === 'run_code') {
       const named = args.devices;
       if (!Array.isArray(named) || !named.length) throw new Error('run_code needs devices: the ids from list_devices the script may use.');

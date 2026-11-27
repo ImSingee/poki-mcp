@@ -32,16 +32,18 @@ class ScreenHub {
   }
 
   // Subscribes on the first viewer. Rejects when the phone cannot stream (no displayservice).
-  async start() {
+  async start(signal) {
     if (this.subscription) return;
     this.starting ??= (async () => {
       try {
-        const subscription = await this.deps.subscribe(this.target, frame => this.receive(frame));
+        // A new subscription numbers its frames afresh; the track must see a gap before them. Reset
+        // before subscribing: the first frames can arrive in the same chunk as the reply, before
+        // subscribe() resolves.
+        this.nativeBase = undefined;
+        const subscription = await this.deps.subscribe(this.target, frame => this.receive(frame), { signal });
         if (this.stopped) { subscription.close(); return; }
         this.subscription = subscription; this.retry = 0; this.error = undefined;
         this.reply = subscription.reply;
-        // A new subscription numbers its frames afresh; the track must see a gap before them.
-        this.nativeBase = undefined;
         subscription.closed.then(() => { if (this.subscription === subscription) { this.subscription = undefined; this.reconnect(); } });
       } finally { this.starting = undefined; }
     })();
@@ -210,7 +212,7 @@ export class Screens {
   async codecs() { return (await this.deps.ffmpeg()) ? CODECS : ['hevc']; }
 
   // A new viewer of target's screen in the first of `codecs` this host serves.
-  async open(target, { codecs = CODECS } = {}) {
+  async open(target, { codecs = CODECS, signal } = {}) {
     const served = await this.codecs();
     const codec = codecs.find(c => served.includes(c));
     if (!codec) throw new Error(`None of the codecs ${codecs.join(', ')} can be served here${served.length === 1 ? ' (ffmpeg with libx264 is not installed, so only HEVC is available)' : ''}.`);
@@ -221,7 +223,7 @@ export class Screens {
     const viewer = new Viewer(this, hub, codec);
     hub.viewers.add(viewer); this.viewers.set(viewer.id, viewer);
     this.sweep();
-    try { await hub.start(); }
+    try { await hub.start(signal); }
     catch (error) { viewer.close(); throw error; }
     hub.track(codec);
     return viewer;

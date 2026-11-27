@@ -78,6 +78,8 @@ export async function answer(viewer, sdp, { onInput, servers = iceServers() } = 
     if (closing) return closing;
     clearTimeout(expiry);
     for (const unsubscribe of subscriptions) unsubscribe();
+    // Frames still on the closed channel never arrive: the view goes on over tool calls from a key frame.
+    if (viewer.rtc?.close === close && viewer.rtc.started) viewer.flow.resync();
     viewer.rtc = undefined;
     closing = pc.close().catch(() => {});
     return closing;

@@ -401,18 +401,22 @@ function stop(closeStream = true) {
 // ---- Input: pointer gestures become screen_input calls, one per gesture, in order. -------------
 const inputReplies = new Map();
 let inputQueue = Promise.resolve(), inputId = 0;
+// A gesture belongs to the stream (and peer) shown when it was made: one still queued when the
+// person switches to another iPhone, or the stream is replaced, is dropped, never sent elsewhere.
 function sendInput(args) {
   if (!state.stream) return;
+  const made = { stream: state.stream, generation: state.generation, peer: state.transport === 'webrtc' ? rtc : undefined };
   inputQueue = inputQueue.then(async () => {
+    if (made.generation !== state.generation || made.stream !== state.stream) return;
     try {
       let reply;
-      if (state.transport === 'webrtc' && rtc) {
+      if (made.peer && made.peer === rtc) {
         const id = ++inputId;
-        reply = await new Promise(resolve => { inputReplies.set(id, resolve); rtc.send({ type: 'input', id, ...args }); setTimeout(() => resolve({ isError: true, error: 'No reply' }), 15000); });
+        reply = await new Promise(resolve => { inputReplies.set(id, resolve); made.peer.send({ type: 'input', id, ...args }); setTimeout(() => resolve({ isError: true, error: 'No reply' }), 15000); });
         inputReplies.delete(id);
         if (reply.isError && reply.reason !== 'busy') throw new Error(reply.error);
       } else {
-        reply = await call('screen_input', { stream: state.stream, ...args }).catch(error => ({ isError: true, ...(error.data ?? {}), error: error.message }));
+        reply = await call('screen_input', { stream: made.stream, ...args }).catch(error => ({ isError: true, ...(error.data ?? {}), error: error.message }));
       }
       if (reply?.reason === 'busy') { $('takeover').hidden = false; notice(reply.error ?? 'The agent is using this iPhone.', { label: 'Take over', run: askTakeover }); }
       else if (reply?.isError) notice(reply.error);
