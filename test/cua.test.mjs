@@ -69,7 +69,7 @@ class JotPhone extends Devices {
       else if (this.restoreStatus === 'restored') this.clipboard = before;
       return { sent: true, clipboard_restore_status: this.restoreStatus ?? 'unavailable' };
     }
-    if (request.op === 'drag') { const dy = (request.y2 - request.y1) / 65535 * (H - 1); this.app.offset = Math.max(-30 * 40 + 260, Math.min(0, this.app.offset + Math.round(dy))); return { sent: true }; }
+    if (request.op === 'drag') { (this.drags ??= []).push(request); const dy = (request.y2 - request.y1) / 65535 * (H - 1); this.app.offset = Math.max(-30 * 40 + 260, Math.min(0, this.app.offset + Math.round(dy))); return { sent: true }; }
     return { sent: true };
   }
   async captureFrame() {
@@ -187,6 +187,30 @@ test('scroll_to gives each accessibility read the time it waits for it', { timeo
   await phone.call('do', { actions: [{ scroll_to: 'Item 9' }] });
   assert.ok(phone.axRequests.length > 1, 'scroll_to read the screen between swipes');
   for (const request of phone.axRequests) assert.ok(Number.isFinite(request.wait_ms) && request.wait_ms >= 100 && request.wait_ms <= 2500, JSON.stringify(request));
+});
+
+// A container number inside swipe or scroll_to is checked with the others, before anything is sent.
+test('a stale container number in swipe or scroll_to refuses the whole call before any input', { timeout: 20000 }, async () => {
+  for (const action of [{ swipe: { direction: 'up', in: 999 } }, { scroll_to: { text: 'Item 9', in: 999 } }]) {
+    const phone = new JotPhone();
+    await phone.call('look', {});
+    const done = await phone.call('do', { actions: [{ tap: [45, 105] }, action] });
+    assert.equal(done.isError, true, JSON.stringify(action));
+    assert.match(text(done), /element 999 is not in the latest read; nothing was sent/, JSON.stringify(action));
+    assert.deepEqual(phone.sent, [], 'not even the tap before it was sent');
+  }
+});
+
+// A size kept from another device (one observed before select_device switched) must not shape a
+// gesture on this one.
+test('do builds gestures from the current device size, not one cached for another device', { timeout: 20000 }, async () => {
+  const phone = new JotPhone();
+  await phone.call('look', {});
+  phone.size = { device: 'another-phone', width: 1000, height: 600 };
+  await phone.call('do', { actions: [{ swipe: 'up' }] });
+  const drag = phone.drags.at(-1);
+  const x = drag.x1 / 65535 * (W - 1);
+  assert.ok(Math.abs(x - W / 2) < 2, `the swipe starts at the middle of this ${W}-point screen, not at x ${x}`);
 });
 
 test('long_press, drag and pinch take element numbers or points, with defaults', { timeout: 20000 }, async () => {

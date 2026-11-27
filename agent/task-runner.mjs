@@ -549,6 +549,10 @@ export class PhoneTask extends EventEmitter {
       this.shots.set(shot, { mimeType: image.mimeType, data: image.data });
       this.lastShot = shot;
       for (const entry of this.snapshot.timeline) if (entry.kind === 'tool' && !entry.shot && entry.step === this.snapshot.currentStep) entry.shot = shot;
+    } else if (!observations.has(tool) && parsed?.sent !== false) {
+      // An input may have changed the screen, so an earlier screenshot no longer shows it and must
+      // not go out as the result; a read without a picture leaves the result without one.
+      this.lastShot = null;
     }
     this.#mark({ kind: 'tool', tool, args: shown, ok: !result.isError, observe: observations.has(tool), sent: parsed?.sent ?? null, screenChanged: parsed?.screen_change_verified ?? null, elapsedMilliseconds: Math.round(this.calls.at(-1)?.elapsedMilliseconds ?? 0), raw: image ? '' : raw, shot });
   }

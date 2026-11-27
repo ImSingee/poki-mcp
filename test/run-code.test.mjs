@@ -114,6 +114,19 @@ test('run_code runs in a process that may not read files or start programs', asy
   assert.deepEqual(JSON.parse(probe.stdout), { fs: 'ERR_ACCESS_DENIED', exec: 'ERR_ACCESS_DENIED' }, probe.stderr);
 });
 
+// Logs are kept in the daemon, outside the sandbox's memory limit, so what is kept is bounded: a script
+// logging without end gets the first lines and a count of the rest.
+test('run_code keeps a bounded amount of log output', async t => {
+  const f = await fixture(t);
+  const summary = summaryOf(await runCode(f, `async () => { const chunk = 'x'.repeat(100000); for (let i = 0; i < 300; i++) console.log(i, chunk); return 'done'; }`));
+  assert.equal(summary.result, 'done');
+  assert.ok(summary.logs.length <= 200, `kept ${summary.logs.length} lines`);
+  assert.ok(summary.logs.reduce((n, line) => n + line.length, 0) <= 64 * 1024, 'kept at most 64 KiB');
+  assert.ok(summary.logs.every(line => line.length <= 2001), 'each line is cut');
+  assert.ok(summary.logs_dropped > 0, JSON.stringify({ kept: summary.logs.length, dropped: summary.logs_dropped }));
+  assert.match(summary.logs[0], /^0 x+/);
+});
+
 // A return value JSON cannot carry ends as a script error that keeps the call list, not a parse failure.
 test('run_code reports a return value that is not JSON as a script error and keeps its calls', async t => {
   const f = await fixture(t);

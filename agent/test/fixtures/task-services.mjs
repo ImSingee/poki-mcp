@@ -27,7 +27,7 @@ function respond(res, tool, index, opening, finalText = 'Finished the local fixt
   res.end();
 }
 
-export async function taskServices(directory, { route = false, appSearch = false, pendingModel = false, beforeVerification, beforeFinalResponse, execution, scrollResults = [], beforeDeviceCall, devices = [], postActionObservation = false } = {}) {
+export async function taskServices(directory, { route = false, appSearch = false, pendingModel = false, beforeVerification, beforeFinalResponse, execution, scrollResults = [], beforeDeviceCall, devices = [], postActionObservation = false, screenshots = false } = {}) {
   const fixture = { modelRequests: [], deviceCalls: [], events: [], foreground: { bundle_id: 'org.example.channel-fixture', name: 'Channel fixture' }, value: '', observations: 0 };
   let executionIndex = 0, scrollIndex = 0;
   const model = http.createServer(async (req, res) => {
@@ -130,10 +130,13 @@ export async function taskServices(directory, { route = false, appSearch = false
         ],
       };
       else if (['scroll', 'swipe'].includes(name) && scrollResults[scrollIndex]) result = scrollResults[scrollIndex++];
+      else if (screenshots && name === 'tap') result = { sent: true, screen_change_verified: false };
       else if (name === 'handle_alert') result = { isError: true, error: 'Device locked: fixture prompt still visible. Inspect and choose another approach.' };
       else if (name === 'list_elements') result = { foreground: fixture.foreground, elements: [{ ref: 'e1', label: 'Fixture ready.', value: 'Fixture ready.', role: 'text' }] };
       else throw new Error(`Unexpected fixture device call: ${name}`);
-      return { ...(result.isError ? { isError: true } : {}), content: [{ type: 'text', text: JSON.stringify(result) }] };
+      // With screenshots, an observation carries a picture as the daemon's observe_device does.
+      const picture = screenshots && name === 'observe_device' ? [{ type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' }] : [];
+      return { ...(result.isError ? { isError: true } : {}), content: [{ type: 'text', text: JSON.stringify(result) }, ...picture] };
     };
     const server = createServer(dispatch);
     const transport = new NodeStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });

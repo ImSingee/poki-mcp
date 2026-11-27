@@ -550,7 +550,7 @@ export class Devices {
           const target = await this.target();
           // CUA's numbered screen elements belong to the device that was just observed.
           // Switching phones must invalidate those refs before another input can use them.
-          if (this.selected !== target.id) this.cua = undefined;
+          if (this.selected !== target.id) { this.cua = undefined; this.size = undefined; }
           this.selected = target.id; this.frame = undefined; this.elements = [];
           return text({ selected: target.id, name: target.name });
         }

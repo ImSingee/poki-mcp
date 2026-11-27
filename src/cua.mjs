@@ -152,7 +152,8 @@ function refsIn(action) {
   if (action.ref !== undefined) add(action.ref);
   if (action.in !== undefined) add(action.in);
   if (action.drag && !Array.isArray(action.drag)) { add(action.drag.from); add(action.drag.to); }
-  if (action.scroll_to && typeof action.scroll_to === 'object' && action.scroll_to.ref !== undefined) add(action.scroll_to.ref);
+  if (action.scroll_to && typeof action.scroll_to === 'object') { if (action.scroll_to.ref !== undefined) add(action.scroll_to.ref); if (action.scroll_to.in !== undefined) add(action.scroll_to.in); }
+  if (action.swipe && typeof action.swipe === 'object' && action.swipe.in !== undefined) add(action.swipe.in);
   return refs;
 }
 
@@ -382,7 +383,9 @@ export async function act(ctx, args = {}) {
   if (stale.length) return { isError: true, ...await readAndReply(ctx, { full: true, error: `element ${[...new Set(stale)].join(', ')} is not in the latest read; nothing was sent. The current elements are below.` }) };
   let error, last, failedDelivery;
   const started = performance.now(), until = started + actionCapMs;
-  const size = ctx.size ?? await ctx.screenSize();
+  // A size cached for another device (the one observed before select_device) would shape these
+  // gestures for the wrong screen; screenSize answers for the device the input goes to.
+  const size = ctx.size && ctx.size.device === (await ctx.target()).id ? ctx.size : await ctx.screenSize();
   ctx.beginInputGroup?.();
   try {
     for (const [index, action] of actions.entries()) {

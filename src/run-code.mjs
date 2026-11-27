@@ -23,6 +23,7 @@ const stopAdvice = {
   expired: 'The device lease expired, so the script stopped. Check the screen before continuing.',
 };
 const json = value => ({ type: 'text', text: JSON.stringify(value, null, 2) });
+const logLines = 200, logBytes = 64 * 1024;
 const cap = text => typeof text === 'string' && text.length > 2000 ? `${text.slice(0, 2000)}…` : text;
 
 // Buffers every sandbox event so none is lost in the gap between handling one tool call and waiting
@@ -64,8 +65,16 @@ async function drive(ctx, code, input, maxCalls) {
   const post = message => { if (worker.connected) worker.send(message, () => {}); };
   post({ type: 'start', code, inputJson: JSON.stringify(input ?? null) });
   const calls = [];
+  // Logs live in the daemon, outside the sandbox's memory limit, so only the first ones are kept:
+  // at most logLines lines and logBytes characters, each line cut like a receipt; the rest are counted.
   const logs = [];
-  const base = () => ({ completed_calls: calls.length, calls, ...(logs.length ? { logs } : {}) });
+  let logChars = 0, logsDropped = 0;
+  const keepLog = line => {
+    const text = cap(String(line));
+    if (logs.length >= logLines || logChars + text.length > logBytes) { logsDropped++; return; }
+    logs.push(text); logChars += text.length;
+  };
+  const base = () => ({ completed_calls: calls.length, calls, ...(logs.length ? { logs } : {}), ...(logsDropped ? { logs_dropped: logsDropped } : {}) });
   const reply = (id, payload) => post({ type: 'result', id, resultJson: JSON.stringify(payload) });
   // A failed call is listed and its error thrown inside the script, which may catch it.
   const failed = (id, call, error) => { calls.push({ call: calls.length + 1, ...call }); reply(id, { error }); };
@@ -87,7 +96,7 @@ async function drive(ctx, code, input, maxCalls) {
       catch (error) { summary = cancelled(error); break; }
       if (event.dead) { summary = { ...base(), stop_reason: 'sandbox_exited', error: 'The sandbox stopped before returning, which can happen when it exceeds its memory limit. The daemon is unaffected.' }; break; }
       const message = event.message;
-      if (message.type === 'log') { logs.push(message.line); continue; }
+      if (message.type === 'log') { keepLog(message.line); continue; }
       if (message.type === 'done') { summary = message.error === undefined ? { ...base(), result: JSON.parse(message.resultJson) } : { ...base(), script_error: message.error }; break; }
       if (message.type !== 'call') continue;
       if (calls.length >= maxCalls) { summary = { ...base(), stop_reason: 'max_tool_calls', next: `The script made more than ${maxCalls} tool calls. Narrow the task or raise max_tool_calls (up to 60).` }; break; }
