@@ -1,7 +1,7 @@
 import { remoteDevices, nativeRequest, disconnectRemote } from './remote.mjs';
 import { pairingJobs, describe as describeJob, view as jobView } from './pairing/jobs.mjs';
 import { unregisterRemote } from './pairing/registry.mjs';
-import { execute, checkWork, deadline, pause, phase, stopped, stoppingReason, timingCount, timingsSince, work } from './work.mjs';
+import { execute, checkWork, deadline, pause, phase, signal, stopped, stoppingReason, timingCount, timingsSince, work } from './work.mjs';
 import { Coordination, managementTools } from './coordination.mjs';
 import { runBatch } from './batch.mjs';
 import { runCode } from './run-code.mjs';
@@ -12,7 +12,9 @@ import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import { root, stateDir, idevice, noUsbDevice } from './config.mjs';
-import { definitions, stepSchema, sessionTools, pairingTools } from './tools.mjs';
+import { definitions, stepSchema, sessionTools, pairingTools, screenTools } from './tools.mjs';
+import { runScreenTool } from './stream/tools.mjs';
+import { screens } from './stream/hub.mjs';
 import { platformTool, inventorySimulators, simulatorModels, readSettings, closePlatform } from './platform.mjs';
 import { interaction, promptWarning, readScreen, describeScreen, screenChanged, whatMoved, justReadMs, confirmAfterMs, launchWithinMs, launchPollMs } from './interaction.mjs';
 import { askHuman, approvalMode } from './human.mjs';
@@ -453,6 +455,7 @@ export class DeviceContext {
   // a batch on this device), so device itself is no longer an argument.
   async dispatch(name, original = {}) {
     if (pairingTools.has(name)) throw new Error('Call pairing tools directly, not from a batch or run_code.');
+    if (screenTools.has(name)) throw new Error('The screen tools are for the screen view, not for a batch or run_code.');
     if (sessionTools.has(name)) return this.session.dispatchSession(name, original);
     const schema = stepSchema(name);
     if (!schema) throw new Error(`Unknown tool: ${name}`);
@@ -790,6 +793,9 @@ export class Session {
     // No device keys: a pairing call never waits behind a device's queue, and unpair_device's own
     // operation is not among the work it stops on that device.
     if (pairingTools.has(name)) return { keys: [], run: () => this.dispatchPairing(name, args) };
+    // No device keys either: a view's reads must not keep other sessions from taking a lease, and
+    // screen_input takes the device's lease and input lock itself.
+    if (screenTools.has(name)) return { keys: [], run: () => runScreenTool(this, name, args, { signal: signal(), resolve: async query => this.context(await this.resolveDevice(query)).target(false) }) };
     if (name === 'run_code') {
       const named = args.devices;
       if (!Array.isArray(named) || !named.length) throw new Error('run_code needs devices: the ids from list_devices the script may use.');
@@ -816,6 +822,7 @@ export class Session {
     return {
       dispatch: (tool, toolArgs = {}) => {
         if (pairingTools.has(tool)) throw new Error('Call pairing tools directly, not from run_code.');
+        if (screenTools.has(tool)) throw new Error('The screen tools are for the screen view, not for run_code.');
         if (sessionLevel.has(tool)) return this.dispatchSession(tool, toolArgs);
         if (tool === 'start_simulator' && toolArgs.model !== undefined) throw new Error('run_code cannot create a simulator: create it first with start_simulator and name it in devices.');
         const query = tool === 'start_simulator' ? toolArgs.simulator ?? toolArgs.device : toolArgs.device;
@@ -833,8 +840,8 @@ export class Session {
     checkWork();
     if (name === 'poki_mcp_status') {
       const mode = approvalMode();
-      const deviceTools = definitions.filter(([tool]) => !sessionLevel.has(tool) && !managementTools.has(tool) && !pairingTools.has(tool)).length;
-      return text({ update: await updateNotice(), implementation: `Poki MCP ${version}`, ...await buildInfo(), registered_device_tools: deviceTools, management_tools: managementTools.size, pairing_tools: pairingTools.size, total_tools: definitions.length, devices: (await this.inventory()).length,
+      const deviceTools = definitions.filter(([tool]) => !sessionLevel.has(tool) && !managementTools.has(tool) && !pairingTools.has(tool) && !screenTools.has(tool)).length;
+      return text({ update: await updateNotice(), implementation: `Poki MCP ${version}`, ...await buildInfo(), registered_device_tools: deviceTools, management_tools: managementTools.size, pairing_tools: pairingTools.size, screen_tools: screenTools.size, total_tools: definitions.length, devices: (await this.inventory()).length,
         approval_mode: { allow: 'operator-preapproved', host: 'host', ask: 'ask-human' }[mode], approval_covers: [...approvedTools],
         approval_scope: mode === 'host'
           ? 'Poki shows no dialog. The MCP client decides whether the tools in approval_covers run: they carry destructiveHint/openWorldHint annotations, and a client that runs tools without asking (LobeHub\'s default, for example) runs them unconfirmed. Taps, typing and other input inside apps are not gated.'
@@ -875,6 +882,8 @@ export class Session {
     if (matches.length > 1) throw new Error(`Several paired devices match ${JSON.stringify(query)}: ${matches.map(d => `${d.name} (${d.id})`).join(', ')}. Pass the id.`);
     const [target] = matches;
     await pairingJobs.cancelForDevice(target.id);
+    // An open screen panel of it ends too, which releases the phone's camera and microphone.
+    screens.closeDevice(target.id);
     // Every session's accepted work, recordings, locations and leases on it end, and their cached
     // state for it goes, so the id no longer resolves anywhere.
     const sessions = new Set([this, ...(this.peers?.() ?? [])]);

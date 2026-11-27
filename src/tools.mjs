@@ -4,6 +4,7 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { version } from './build-info.mjs';
 import { views, toolMeta, readView, RESOURCE_MIME_TYPE } from './views/index.mjs';
+import { screenTools, screenDefinitions } from './stream/catalog.mjs';
 
 const catalog = JSON.parse(readFileSync(new URL('./data/tools.json', import.meta.url), 'utf8'));
 const defaultTools = new Set([
@@ -102,6 +103,9 @@ const extra = [
 // Pairing tools act on this computer's pairing state, not inside a device's queue (see unqueuedTools).
 export const pairingTools = new Set(['pair_device', 'pairing_status', 'pairing_cancel', 'unpair_device']);
 for (const definition of extra) { definitions.push(definition); if (!pairingTools.has(definition[0])) stepSchemas.set(definition[0], () => definition[0] === 'poki_mcp_status' ? definition[2] : z.object({})); }
+// The live screen (src/stream): show_screen for the model, the screen_* tools for the screen view.
+for (const definition of screenDefinitions) definitions.push(definition);
+export { screenTools };
 
 // The computer-use profile (POKI_TOOL_PROFILE=cua, cua.mjs): look and do, plus device and status tools.
 for (const [name, description, schema, readOnlyHint] of cua.definitions) { definitions.push([name, description, z.fromJSONSchema(schema), readOnlyHint]); stepSchemas.set(name, () => z.fromJSONSchema(withoutDevice(schema))); }
@@ -122,13 +126,17 @@ const pairingHints = {
   pairing_status: { title: 'Pairing progress', destructiveHint: false, idempotentHint: true, openWorldHint: false },
   pairing_cancel: { title: 'Cancel pairing', destructiveHint: false, idempotentHint: true, openWorldHint: false },
   unpair_device: { title: 'Remove a wireless pairing', destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  show_screen: { title: 'Show the iPhone screen', destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  screen_input: { title: 'Touch the iPhone screen', destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  screen_takeover: { title: 'Take over the iPhone', destructiveHint: true, idempotentHint: true, openWorldHint: false },
 };
 const annotationsOf = (name, readOnlyHint) => ({ readOnlyHint, ...approvalHints[name], ...pairingHints[name] });
 const metaOf = name => toolMeta[name] ? { _meta: toolMeta[name] } : {};
 const profile = (env = process.env) => env.POKI_TOOL_PROFILE ?? 'default';
 // The pairing tools are listed in every profile: a view calls pairing_cancel, and hosts show each
 // tool only to whom its ui.visibility names.
-const listedFor = name => new Set([...(name === 'cua' ? cua.tools : defaultTools), ...pairingTools]);
+// So are the screen tools: show_screen for the agent, the others for the screen view.
+const listedFor = name => new Set([...(name === 'cua' ? cua.tools : defaultTools), ...pairingTools, ...screenTools]);
 
 export function createServer(call) {
   const computerUse = profile() === 'cua', listed = listedFor(profile());

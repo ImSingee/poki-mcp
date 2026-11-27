@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { work, checkWork, stoppingReason } from './work.mjs';
 import { inputLockFromEnv } from './input-lock.mjs';
-import { definitions, pairingTools } from './tools.mjs';
+import { definitions, pairingTools, screenTools } from './tools.mjs';
 
 const readOnlyTools = new Set(definitions.filter(d => d[3]).map(d => d[0]));
 
@@ -12,7 +12,9 @@ export const managementTools = new Set(['acquire_device', 'renew_device', 'relea
 // frames, a pairing job's progress) or feed a view's own input channel, where waiting behind a
 // long batch would stall the view. The pairing tools are such calls: they change this computer's
 // pairing state, and unpair_device ends a device's queued work itself.
-export const unqueuedTools = new Set(pairingTools);
+// The screen tools too: a view's frame reads and gestures must not wait behind an agent's batch
+// (screen_input takes the device's lease and input lock itself, with a short wait).
+export const unqueuedTools = new Set([...pairingTools, ...screenTools]);
 
 const text = value => ({ content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] });
 const failure = error => ({ isError: true, ...text(error.message), _meta: { stop_reason: error.name === 'TimeoutError' ? 'timeout' : error.name === 'AbortError' ? stoppingReason(error) : 'error' } });
