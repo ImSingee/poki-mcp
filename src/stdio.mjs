@@ -13,9 +13,10 @@ import { approvalMode } from './human.mjs';
 let endpoint;
 const session = process.env.POKI_MCP_SESSION ?? randomUUID();
 // Calls travel to the daemon as separate HTTP requests, which may arrive out of order. Each carries
-// its place in this shim's order, and the daemon queues them on their devices in that order.
-const stream = randomUUID();
-let sequence = 0;
+// its place in this shim's order, and the daemon queues them on their devices in that order. The
+// numbering starts again at 1 for every daemon this shim reaches.
+let stream = randomUUID(), sequence = 0;
+const nextOrder = () => ({ stream, seq: ++sequence });
 const send = (path, init) => {
   const headers = new Headers(init?.headers);
   headers.set('Authorization', `Bearer ${endpoint.token}`);
@@ -28,7 +29,9 @@ const refused = error => error.cause?.code === 'ECONNREFUSED';
 const lost = error => error.name === 'TypeError' && error.cause ? new Error('The connection to Poki MCP was lost during this call. The device may already have acted, so look at the screen before retrying.') : error;
 let checkedMode = false;
 async function connectDaemon() {
+  const previous = endpoint?.pid;
   endpoint = await ensureDaemon();
+  if (endpoint.pid !== previous) { stream = randomUUID(); sequence = 0; }
   if (checkedMode) return;
   checkedMode = true;
   // The daemon's environment decides approvals. One started by another client may differ from this one's.
@@ -56,9 +59,11 @@ async function request(path, init) {
   await response.body?.cancel();
   throw new Error(`The running Poki MCP rejected the token in ${endpointFile}. Stop it; the next call starts it again.`);
 }
+// Closing a session or cancelling a call is sent once, to the daemon this shim knows: when that one
+// is gone there is nothing to close or cancel, and starting a new daemon for it would be wasted.
 const controls = new Set();
 const control = (path, extra = {}) => {
-  const result = request(path, { method: 'POST', headers: extra, signal: AbortSignal.timeout(35000) });
+  const result = send(path, { method: 'POST', headers: extra, signal: AbortSignal.timeout(35000) }).then(response => response.body?.cancel());
   controls.add(result); result.finally(() => controls.delete(result)).catch(() => {});
   return result;
 };
@@ -71,20 +76,21 @@ const remoteClient = () => remote ??= (async () => {
   return client;
 })().catch(error => { remote = undefined; throw error; });
 const server = createServer(async (name, args, extra) => {
-  const id = randomUUID(), order = { stream, seq: ++sequence };
+  const id = randomUUID();
   const cancel = () => { if (endpoint) void control('/request/cancel', { 'x-poki-request': id }).catch(() => {}); };
   extra.signal.addEventListener('abort', cancel, { once: true });
   try {
     extra.signal.throwIfAborted();
     const client = await remoteClient();
-    const send = () => client.callTool({ name, arguments: args, _meta: { 'poki/request_id': id, 'poki/order': order } }, { timeout: 3700000, signal: extra.signal });
-    const result = await send();
+    // Numbered once connected, in the order the calls came in: they resume from this await in that order.
+    const call = () => client.callTool({ name, arguments: args, _meta: { 'poki/request_id': id, 'poki/order': nextOrder() } }, { timeout: 3700000, signal: extra.signal });
+    const result = await call();
     // A service this kind of shim started, refusing the call before it touched a device because its
     // files changed (an update): replace it, as a new shim would, and send the call once more.
     if (!(result.isError && result._meta?.stale_code === 'auto')) return result;
     try { await connectDaemon(); }
     catch (error) { return { isError: true, content: [{ type: 'text', text: error.message }] }; }
-    return send();
+    return call();
   } finally { extra.signal.removeEventListener('abort', cancel); }
 });
 const transport = new StdioServerTransport();

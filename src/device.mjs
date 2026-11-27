@@ -658,9 +658,13 @@ export class Session {
     else this.backgroundDevices.clear();
     return { recordings, locations };
   }
-  close() { return this.coordinator.end(this, 'session_closed'); }
+  // A closed session takes no more calls: the daemon has dropped it, so work started on it would have
+  // no owner that could release or stop it.
+  close() { this.closed = true; return this.coordinator.end(this, 'session_closed'); }
   async call(name, args = {}, requestSignal, requestId, order) {
+    if (this.closed) throw new Error('This MCP session was closed. Start a new one.');
     if (managementTools.has(name) && name !== 'acquire_device') {
+      this.placed(order);
       const parsed = definitions.find(d => d[0] === name)[2].parse(args);
       if (name === 'renew_device') return text(this.coordinator.renew(this, parsed.lease_id, parsed.ttl_seconds ?? 120));
       if (name === 'release_device') return text(await this.coordinator.end(this, 'released', [this.coordinator.require(this, parsed.lease_id).device]));
@@ -678,8 +682,7 @@ export class Session {
   inOrder(order) {
     if (!order || typeof order.stream !== 'string' || !Number.isInteger(order.seq)) return Promise.resolve();
     const streams = this.streams ??= new Map();
-    const entry = streams.get(order.stream) ?? { placed: order.seq - 1, waiters: [] };
-    streams.set(order.stream, entry);
+    const entry = this.stream(order.stream);
     if (order.seq <= entry.placed + 1) return Promise.resolve();
     return new Promise(resolve => {
       const waiter = { seq: order.seq, resolve };
@@ -687,9 +690,17 @@ export class Session {
       setTimeout(() => { entry.placed = Math.max(entry.placed, order.seq - 1); this.wakeStream(entry); }, orderWaitMs).unref();
     });
   }
+  // A shim numbers its calls from 1 for each daemon it reaches (stdio.mjs).
+  stream(id) {
+    const streams = this.streams ??= new Map();
+    if (!streams.has(id)) streams.set(id, { placed: 0, waiters: [] });
+    return streams.get(id);
+  }
+  // Also called for calls that take no place on a queue (lease management, a call cancelled before it
+  // arrived), so the calls after them do not wait for them.
   placed(order) {
-    const entry = order && this.streams?.get(order.stream);
-    if (!entry) return;
+    if (!order || typeof order.stream !== 'string' || !Number.isInteger(order.seq)) return;
+    const entry = this.stream(order.stream);
     entry.placed = Math.max(entry.placed, order.seq);
     this.wakeStream(entry);
   }
@@ -705,6 +716,12 @@ export class Session {
       physical.set(device.id, { ...device, kind: 'physical', name: this.physicalNames.get(device.id) ?? device.id });
     }
     for (const remote of await remoteDevices()) physical.set(remote.id, remote);
+    // With the WebDriverAgent backend and no iPhone this host can see, the phone WDA drives is named
+    // by its address, so look and do can still name a device.
+    if (!physical.size && process.env.POKI_CUA_BACKEND === 'wda' && process.env.POKI_WDA_URL) {
+      const id = `wda:${process.env.POKI_WDA_URL}`;
+      physical.set(id, { id, kind: 'physical', name: 'WebDriverAgent', connection: 'WebDriverAgent', wda: true });
+    }
     const simulators = await inventorySimulators().catch(() => []);
     return [...physical.values(), ...simulators.filter(d => all || d.state === 'Booted' || usedSimulators.has(d.id))];
   }
@@ -713,6 +730,7 @@ export class Session {
     return Promise.all(devices.map(async device => {
       const occupancy = this.coordinator.status(device.id, this);
       if (device.kind === 'simulator' || occupancy.occupied && !occupancy.owned_by_session) return { ...device, ...occupancy };
+      if (device.wda) return { ...device, ...occupancy, readiness: 'reached through WebDriverAgent at POKI_WDA_URL; only look and do drive it' };
       try {
         this.access(device);
         if (device.remote) {

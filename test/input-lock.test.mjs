@@ -237,3 +237,43 @@ test('a stop on one device also stops a call to it that was still finding its de
   await coordinator.call(a, 'tap', { device: 'phone-a' });
   assert.deepEqual(log, ['a:tap@phone-a:start', 'a:tap@phone-a:end']);
 });
+
+// The real Session's ordering of one client's calls, with routing stubbed.
+async function stubbedSession(log) {
+  const { Session } = await import('../src/device.mjs');
+  const coordinator = new Coordination(); coordinator.inputLock = lockWith();
+  const s = new Session(coordinator);
+  s.label = 'real';
+  s.route = async (name, args) => ({ keys: [args.device], run: async () => { log.push(`${args.tag}:start`); await sleep(20); log.push(`${args.tag}:end`); return { content: [{ type: 'text', text: 'ok' }] }; } });
+  return s;
+}
+
+test('calls of one client keep their order on a device even when the later one reaches the daemon first', async () => {
+  const log = [], s = await stubbedSession(log);
+  const second = s.call('tap', { device: 'phone-y', tag: 'seq2' }, undefined, 'r2', { stream: 'shim', seq: 2 });
+  await sleep(30);
+  const first = s.call('tap', { device: 'phone-y', tag: 'seq1' }, undefined, 'r1', { stream: 'shim', seq: 1 });
+  await Promise.all([first, second]);
+  assert.deepEqual(log, ['seq1:start', 'seq1:end', 'seq2:start', 'seq2:end']);
+});
+
+test('a lease-management call fills its place, so the next call does not wait for it', async () => {
+  const log = [], s = await stubbedSession(log);
+  await s.call('cancel_device', {}, undefined, 'r1', { stream: 'shim', seq: 1 });
+  const started = performance.now();
+  await s.call('tap', { device: 'phone-y', tag: 'after' }, undefined, 'r2', { stream: 'shim', seq: 2 });
+  assert.ok(performance.now() - started < 300, `waited ${Math.round(performance.now() - started)} ms`);
+});
+
+test('a closed session stops the calls still being routed and refuses new ones', async () => {
+  const log = [], s = await stubbedSession(log);
+  const route = s.route;
+  s.route = async (...args) => { await sleep(80); return route(...args); };
+  const pending = s.call('tap', { device: 'phone-y', tag: 'late' });
+  await sleep(10);
+  await s.close();
+  await assert.rejects(pending, /session_closed/);
+  await sleep(100);
+  await assert.rejects(s.call('tap', { device: 'phone-y', tag: 'new' }), /session was closed/);
+  assert.deepEqual(log, []);
+});

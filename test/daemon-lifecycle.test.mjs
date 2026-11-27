@@ -8,7 +8,10 @@ import { once } from 'node:events';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { fixture, value } from './fixture.mjs';
-import { olderRelease } from '../src/daemon-launch.mjs';
+import { olderRelease, removeIf } from '../src/daemon-launch.mjs';
+import { createServer } from 'node:http';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 
 const endpointOf = f => readFile(join(f.dir, 'state/mcp.json'), 'utf8').then(JSON.parse).catch(() => null);
 const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
@@ -185,4 +188,45 @@ test('a connected client whose automatic service turns out to run older code get
   const current = await endpointOf(f);
   assert.notEqual(current.pid, old.pid);
   await until(() => !alive(old.pid), 10000, 'the old service to stop');
+});
+
+test('a service from before 0.2.0, which has no /version, is reported at once as one to restart', { timeout: 30000 }, async t => {
+  const f = await fixture(t);
+  await f.daemon.stop();
+  // Answers like an old daemon: every unknown path is 404.
+  const old = createServer((req, res) => { res.writeHead(404); res.end(); });
+  old.listen(0, '127.0.0.1'); await once(old, 'listening');
+  t.after(() => old.close());
+  // A live process stands in for the old daemon's pid (the fixture's cleanup kills that pid).
+  const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  t.after(() => holder.kill('SIGKILL'));
+  await writeFile(join(f.dir, 'state/mcp.json'), JSON.stringify({ url: `http://127.0.0.1:${old.address().port}/mcp`, port: old.address().port, token: 'a'.repeat(64), enabled: true, pid: holder.pid }));
+  const started = performance.now();
+  const result = await f.a.callTool({ name: 'poki_mcp_status', arguments: {} });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /started with npm start and runs older code \(before 0\.2\.0/);
+  assert.ok(performance.now() - started < 10000);
+});
+
+test('a shim that exits after its service died does not start another one to close its session', { timeout: 30000 }, async t => {
+  const f = await fixture(t, { daemon: false });
+  await status(f.a);
+  const { pid } = await endpointOf(f);
+  process.kill(pid, 'SIGKILL');
+  await until(() => !alive(pid), 5000, 'the service to die');
+  await f.a.close();
+  await sleep(1000);
+  assert.equal((await readyLines(f)).length, 1, 'no service was started for the close');
+});
+
+test('removeIf removes only the content it was asked about, and puts anything else back', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'poki-remove-if-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, 'lock');
+  await writeFile(file, 'theirs');
+  assert.equal(await removeIf(file, content => content === 'mine'), false);
+  assert.equal(await readFile(file, 'utf8'), 'theirs');
+  assert.equal(await removeIf(file, content => content === 'theirs'), true);
+  assert.equal(await readFile(file, 'utf8').catch(() => null), null);
+  assert.equal(await removeIf(file, () => true), false, 'a missing file is not an error');
 });

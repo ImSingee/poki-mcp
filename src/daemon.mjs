@@ -14,7 +14,7 @@ import { warnIfNativeStale } from './build-info.mjs';
 import { closeLocalHelpers, remoteDevices, warmRemote } from './remote.mjs';
 import { version, codeFingerprint, currentCodeFingerprint, setServiceStart } from './build-info.mjs';
 import { approvalMode } from './human.mjs';
-import { runningDaemon, alive } from './daemon-launch.mjs';
+import { runningDaemon, alive, removeIf } from './daemon-launch.mjs';
 
 // --auto: started by a stdio shim (src/daemon-launch.mjs). It takes a free port unless --port says
 // otherwise, leaves when another daemon already serves this state directory, and exits once it has
@@ -79,6 +79,8 @@ const tls = tlsCert ? { cert: await readFile(tlsCert), key: await readFile(tlsKe
 const validHost = hostAllow.length ? hostHeaderValidation(hostAllow) : localhostHostValidation();
 const validOrigin = localhostOriginValidation();
 const active = new Set();
+// MCP requests (POST /mcp) still being read or answered. A client's open GET stream is not one.
+let posting = 0;
 // Each session's shim sends its pid, so a shim that died without closing its session (a pool that
 // reaps idle stdio processes with SIGKILL) does not keep the session, or this daemon, alive forever.
 // A session without one is dropped after being idle for as long as an automatic daemon waits.
@@ -129,6 +131,8 @@ async function handle(req, res) {
     // Only an automatic daemon with nothing to lose stops this way; it is how a newer shim replaces it.
     await pruneSessions();
     const reasons = busyReasons();
+    // Another client's request still being read or answered counts too.
+    if (posting) reasons.push(`${posting} request(s) in progress`);
     if (!auto || reasons.length) { res.writeHead(409, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ stopped: false, auto, busy_reasons: reasons })); return; }
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ stopped: true }));
     console.log(JSON.stringify({ event: 'replaced' }));
@@ -160,12 +164,14 @@ async function handle(req, res) {
     res.end('{}'); return;
   }
   const server = createServer((name, args, extra) => {
-    if (devices.cancelledRequests?.delete(extra?.requestId)) throw new DOMException('Request cancelled', 'AbortError');
+    if (devices.cancelledRequests?.delete(extra?.requestId)) { devices.placed(extra?.order); throw new DOMException('Request cancelled', 'AbortError'); }
     return withCallLog(session, name, () => devices.call(name, args, extra?.signal, extra?.requestId, extra?.order));
   });
   const transport = new NodeStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
   active.add(server);
-  res.once('close', () => { active.delete(server); void server.close(); });
+  const post = req.method === 'POST';
+  if (post) posting++;
+  res.once('close', () => { active.delete(server); if (post) posting--; void server.close(); });
   try {
     await server.connect(transport);
     await transport.handleRequest(req, res);
@@ -207,8 +213,8 @@ async function stop() {
   await Promise.allSettled([...active].map(server => server.close()));
   await closeLocalHelpers();
   await closed;
-  const entry = await readFile(endpointFile, 'utf8').then(JSON.parse).catch(() => null);
-  if (entry?.pid === process.pid) await unlink(endpointFile).catch(() => {});
+  // Only our own entry: a daemon that replaced this one may have written its own already.
+  await removeIf(endpointFile, content => { try { return JSON.parse(content).pid === process.pid; } catch { return false; } });
   // Whatever still holds the event loop (a helper's socket, a pending update check) must not keep a
   // stopped daemon around.
   setTimeout(() => process.exit(0), 2000).unref();
@@ -222,7 +228,15 @@ if (auto) {
   let idleSince = performance.now();
   const idleCheck = setInterval(async () => {
     await pruneSessions();
-    if (sessions.size || busyReasons().length || active.size) { idleSince = performance.now(); return; }
+    // Two shims that both started a daemon: the one mcp.json does not name leaves once it has no clients.
+    const named = await readFile(endpointFile, 'utf8').then(JSON.parse).catch(() => null);
+    if (named && named.pid !== process.pid && alive(named.pid) && !sessions.size && !busyReasons().length && !posting) {
+      clearInterval(idleCheck);
+      console.log(JSON.stringify({ event: 'superseded', by: named.pid }));
+      await stop();
+      return;
+    }
+    if (sessions.size || busyReasons().length || posting) { idleSince = performance.now(); return; }
     if (performance.now() - Math.max(idleSince, lastActivity) >= idleExitMs) {
       clearInterval(idleCheck);
       console.log(JSON.stringify({ event: 'idle-exit', idle_ms: idleExitMs }));

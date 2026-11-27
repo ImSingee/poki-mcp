@@ -75,7 +75,8 @@ export class Coordination {
     for (const lease of leases) { lease.state = 'releasing'; clearTimeout(lease.timer); }
     const operations = [...this.operations].filter(op => op.owner === session && overlaps(op));
     // A call accepted before this stop that is still finding its device is stopped when it gets there.
-    if (scope) { session.stoppedAt ??= new Map(); for (const id of scope) session.stoppedAt.set(id, { at: performance.now(), reason }); }
+    session.stoppedAt ??= new Map();
+    for (const id of scope ?? ['*']) session.stoppedAt.set(id, { at: performance.now(), reason });
     for (const op of operations) op.controller.abort(Object.assign(new DOMException(`Session work ${reason}; dispatched input is not undone`, 'AbortError'), { stopReason: reason }));
     const entry = { scope };
     entry.promise = (async () => {
@@ -107,7 +108,7 @@ export class Coordination {
     // routed: so two calls to one device cannot swap places while their device names are looked up.
     const place = route => {
       for (const id of route.keys) op.devices.add(id);
-      const stop = route.keys.map(id => session.stoppedAt?.get(id)).find(stop => stop && stop.at >= op.accepted);
+      const stop = [...route.keys, '*'].map(id => session.stoppedAt?.get(id)).find(stop => stop && stop.at >= op.accepted);
       if (stop) throw Object.assign(new DOMException(`Session work ${stop.reason}; dispatched input is not undone`, 'AbortError'), { stopReason: stop.reason });
       if ([...session.endings].some(entry => !entry.scope || route.keys.some(id => entry.scope.has(id)))) throw new Error('Session cleanup is in progress.');
       const bypass = this.unqueued.has(name);

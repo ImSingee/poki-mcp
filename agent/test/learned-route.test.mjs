@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
 import { createServer } from '../../src/tools.mjs';
+import { daemonVersion } from './fixtures/task-services.mjs';
 import { RouteStore } from '../routes.mjs';
 import { recorded, settingsPhone } from './fixtures/settings-phone.mjs';
 
@@ -63,6 +64,7 @@ async function phone(directory, stack) {
 async function serve(directory, dispatch) {
   const server = http.createServer(async (req, res) => {
     if (req.headers.authorization !== 'Bearer local-mcp-fixture') { res.writeHead(401).end(); return; }
+    if (req.url === '/version') { res.end(daemonVersion()); return; }
     if (req.url !== '/mcp') { res.end('{}'); return; }
     const mcp = createServer(dispatch);
     const transport = new NodeStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
@@ -72,7 +74,7 @@ async function serve(directory, dispatch) {
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  await writeFile(join(directory, 'mcp.json'), JSON.stringify({ url: `http://127.0.0.1:${server.address().port}/mcp`, token: 'local-mcp-fixture', enabled: true }), { mode: 0o600 });
+  await writeFile(join(directory, 'mcp.json'), JSON.stringify({ url: `http://127.0.0.1:${server.address().port}/mcp`, token: 'local-mcp-fixture', enabled: true, pid: process.pid }), { mode: 0o600 });
   return { close: () => { server.closeAllConnections(); return new Promise(done => server.close(done)); } };
 }
 
