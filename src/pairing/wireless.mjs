@@ -27,6 +27,13 @@ export async function stagePairing({ stateDir = defaultStateDir } = {}) {
   return { directory, pairing: join(directory, 'pairing.plist'), hostState: join(remoteRoot, 'host') };
 }
 
+// poki-native reports a failure as one JSON line on stderr ({"error": ...}); anything else is shown as is.
+export function helperError(stderr) {
+  const last = stderr.trim().split('\n').at(-1) ?? '';
+  try { const parsed = JSON.parse(last); if (typeof parsed?.error === 'string') return parsed.error; } catch {}
+  return stderr.trim();
+}
+
 // Starts the helper. `events` emits each parsed NDJSON line as 'event' and by its own name;
 // `done` resolves with the paired event, or rejects with an Error whose `signal`, `code`,
 // `cancelled` and `stderr` say how the helper ended.
@@ -50,7 +57,7 @@ export function startPairHost({ name, hostState, output, native = pokiNative }) 
       if (code === 0 && paired) return resolve(paired);
       const message = signal ? `Wireless pairing stopped with ${signal}.`
         : cancelled ? 'Wireless pairing was cancelled.'
-        : stderr.trim() || `Wireless pairing did not complete (exit ${code}).`;
+        : helperError(stderr) || `Wireless pairing did not complete (exit ${code}).`;
       reject(Object.assign(new Error(message), { code, signal, cancelled: cancelled || Boolean(signal), stderr: stderr.trim() }));
     });
   });

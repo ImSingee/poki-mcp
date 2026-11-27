@@ -10,6 +10,7 @@ import { createInterface } from 'node:readline';
 import { PairingJobs } from '../src/pairing/jobs.mjs';
 import { downloadImage, resolveImage, ddiFailure, ensureDeveloperImage } from '../src/pairing/ddi.mjs';
 import { registerRemote, unregisterRemote } from '../src/pairing/registry.mjs';
+import { helperError } from '../src/pairing/wireless.mjs';
 import { root } from '../src/config.mjs';
 
 async function scratch(t) {
@@ -176,4 +177,21 @@ test('poki-native --pair-host stops on SIGTERM and says it was cancelled', { ski
   assert.notEqual(code, 0);
   assert.ok(events.some(e => e.event === 'cancelled'), JSON.stringify(events));
   await assert.rejects(stat(output), { code: 'ENOENT' });
+});
+
+test('a helper failure reads as its message, not as the JSON line poki-native prints', () => {
+  assert.equal(helperError('{"error":"The iPhone rejected the pairing request.","screen_change_verified":false}\n'), 'The iPhone rejected the pairing request.');
+  assert.equal(helperError('plain failure\n'), 'plain failure');
+});
+
+test('an image listed as installed without displayservice is installed again once, by force', async () => {
+  const requests = [];
+  const request = async body => {
+    requests.push(body);
+    if (body.op === 'ddi_status') return { display_service: false };
+    return body.force ? { installed: true, display_service: true, ddi: { version: '27B52' } } : { installed: true, already: true, display_service: false };
+  };
+  const prepared = await ensureDeveloperImage('p', request, { resolve: async () => ({ source: 'test', directory: '/x' }) });
+  assert.equal(prepared.ready, true);
+  assert.deepEqual(requests.map(r => [r.op, Boolean(r.force)]), [['ddi_status', false], ['install_ddi', false], ['install_ddi', true]]);
 });

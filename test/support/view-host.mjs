@@ -5,6 +5,7 @@
 // real Poki stdio server (src/stdio.mjs) through MCP.
 //
 //   node test/support/view-host.mjs [--port 4790] [--stub]
+//   GET /calls lists every tools/call with its time, its source (agent, view, direct) and the job state.
 //
 // --stub runs Poki from a temporary copy of this checkout with a stand-in poki-native
 // (test/support/pairing-native.mjs) and one iPhone already paired, so pairing can be walked through
@@ -40,6 +41,8 @@ if (options.stub) {
     pairHost: [{ event: 'advertising', port: 53124 }, { event: 'connected', peer: '192.0.2.27' }, { event: 'pin', pin: '482916' }, { await: 'accept' },
       { event: 'paired', device: { udid: 'new-iphone', name: 'New iPhone', model: 'iPhone17,1' }, peer: '192.0.2.27' }],
     names: { 'lab-iphone': 'Lab iPhone', 'new-iphone': 'New iPhone' },
+    // Long enough to see the view's "Preparing developer services" step.
+    remote: { installDelayMs: 4000 },
   }));
   const labConfig = join(stubDir, 'state/remote/lab-iphone/config.json');
   await writeFile(labConfig, JSON.stringify({ id: 'lab-iphone', host: '192.0.2.10', port: 49152, pairing_file: join(stubDir, 'state/remote/lab-iphone/pairing.plist') }));
@@ -94,7 +97,7 @@ const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta n
     slot.append(frame);
     const theme = document.getElementById('theme').value;
     bridge = new MockHost.AppBridge(null, { name: 'poki-view-host', version: '1' }, { serverTools: {} }, { hostContext: { theme, displayMode: 'inline', platform: 'web' } });
-    bridge.oncalltool = async params => { log('view → ' + params.name + ' ' + JSON.stringify(params.arguments ?? {})); return post('/call', params); };
+    bridge.oncalltool = async params => { log('view → ' + params.name + ' ' + JSON.stringify(params.arguments ?? {})); return post('/call', { ...params, source: 'view' }); };
     bridge.onsizechange = ({ height }) => { if (height) frame.style.height = height + 'px'; };
     bridge.oninitialized = () => { if (lastResult) bridge.sendToolResult(lastResult); };
     await bridge.connect(new MockHost.PostMessageTransport(frame.contentWindow, frame.contentWindow));
@@ -102,7 +105,7 @@ const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta n
   }
   document.getElementById('call').onclick = async () => {
     log('agent → pair_device');
-    lastResult = await post('/call', { name: 'pair_device', arguments: {} });
+    lastResult = await post('/call', { name: 'pair_device', arguments: {}, source: 'agent' });
     document.getElementById('text').textContent = (lastResult.content ?? []).filter(b => b.type === 'text').map(b => b.text)[0] ?? '';
     await mount();
   };
@@ -113,14 +116,25 @@ const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta n
   window.mountView = mount;
 </script></body></html>`;
 
+// Every tools/call with its time (ms), who made it (agent, view, direct) and the job state it returned:
+// GET /calls.
+const calls = [];
 const body = request => new Promise(resolve => { let data = ''; request.on('data', chunk => { data += chunk; }); request.on('end', () => resolve(data ? JSON.parse(data) : {})); });
 const json = (response, value, status = 200) => { response.writeHead(status, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(value)); };
 const server = http.createServer(async (request, response) => {
   try {
     if (request.method === 'GET' && request.url === '/') { response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); response.end(page); return; }
+    if (request.method === 'GET' && request.url === '/calls') return json(response, calls);
     if (request.method !== 'POST') { response.writeHead(404); response.end(); return; }
     const input = await body(request);
-    if (request.url === '/call') return json(response, await client.callTool({ name: input.name, arguments: input.arguments ?? {} }));
+    if (request.url === '/call') {
+      const entry = { at: new Date().toISOString(), source: input.source ?? 'direct', name: input.name, arguments: input.arguments ?? {} };
+      calls.push(entry);
+      const result = await client.callTool({ name: input.name, arguments: input.arguments ?? {} });
+      entry.ms = Date.parse(new Date().toISOString()) - Date.parse(entry.at);
+      entry.state = result.structuredContent?.state ?? result.structuredContent?.job?.state;
+      return json(response, result);
+    }
     if (request.url === '/resource') return json(response, await client.readResource({ uri: input.uri }));
     if (request.url === '/stub/accept' && stubDir) { await writeFile(join(stubDir, 'accept'), ''); return json(response, { accepted: true }); }
     response.writeHead(404); response.end();

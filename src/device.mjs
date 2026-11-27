@@ -745,9 +745,9 @@ export class Session {
           if (preparing) return { ...device, remote: undefined, ...occupancy, pairing_job: preparing.id, readiness: `being prepared by pairing job ${preparing.id} (${preparing.state})` };
           const info = await nativeRequest(device, { op: 'device_info' });
           // An older helper refuses ddi_status (outcome not_sent); then nothing is reported.
-          const ddi = await nativeRequest(device, { op: 'ddi_status' }).catch(() => undefined);
+          const ddi = await nativeRequest(device, { op: 'ddi_status', services_only: true }, { timeoutMs: 10000 }).catch(() => undefined);
           const developer = typeof ddi?.display_service === 'boolean' ? { display_service: ddi.display_service, ddi: ddi.ddi ?? null,
-            ...(ddi.display_service ? {} : { action: `Touch and text input need the developer disk image, which the iPhone drops when it restarts. Call pair_device with device ${JSON.stringify(device.id)} to install it over Wi-Fi.` }) } : {};
+            ...(ddi.display_service ? {} : { action: `Touch and text input need displayservice, which the developer disk image provides, and this iPhone offers none now. Call pair_device with device ${JSON.stringify(device.id)} to install it over Wi-Fi.` }) } : {};
           return { ...device, remote: undefined, name: info.properties.DeviceName ?? device.name, model: info.properties.ProductType, osVersion: info.properties.ProductVersion, ...occupancy, readiness: developer.display_service === false ? 'connected; developer services missing' : 'remote services connected', ...developer };
         }
         const values = await Promise.all(['DeviceName', 'ProductType', 'ProductVersion'].map(async key => {
@@ -887,7 +887,7 @@ export class Session {
     // Before its config is deleted: the helper's socket is named after that config's path.
     const helper = await disconnectRemote(target).catch(error => ({ running: undefined, error: error.message }));
     await unregisterRemote(target.id);
-    const phoneCleanup = 'To remove this computer from the iPhone too, open Settings › Privacy & Security › Developer Mode on the iPhone and remove it from the paired computers there; if your iOS version offers no such list, Settings › Developer › Clear Trusted Computers removes every trusted computer.';
+    const phoneCleanup = 'The iPhone may still list this computer as paired. To remove it there too, look in Settings › Privacy & Security › Developer Mode, or in the Developer settings for Clear Trusted Computers (which removes every trusted computer), depending on what your iOS version offers.';
     return structured({ unpaired: true, device: { id: target.id, name: target.name }, cancelled_operations: cancelled, helper, removed: ['remote-devices.json entry', `remote/${target.id}/ (configuration and pairing record)`], phone_cleanup: phoneCleanup },
       `Removed ${target.name} (${target.id}) from this computer. It no longer appears in list_devices. ${phoneCleanup}`);
   }

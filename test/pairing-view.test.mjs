@@ -10,7 +10,8 @@ import { readView } from '../src/views/index.mjs';
 let chromium;
 try { ({ chromium } = await import('playwright')); } catch {}
 const browserReady = chromium && existsSync(chromium.executablePath());
-const skip = !browserReady && 'Playwright Chromium is not installed (npx playwright install chromium)';
+// Skipped locally without Chromium; in CI a missing browser is a failure, never a silent skip.
+const skip = !browserReady && !process.env.CI && 'Playwright Chromium is not installed (npx playwright install chromium)';
 
 const bridgeBundle = skip ? '' : (await build({
   stdin: { contents: "export { AppBridge, PostMessageTransport } from '@modelcontextprotocol/ext-apps/app-bridge';", resolveDir: process.cwd(), loader: 'js' },

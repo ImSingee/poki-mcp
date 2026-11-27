@@ -50,10 +50,16 @@ fn installed_json(installed: &Option<InstalledCryptex>) -> Value {
         .unwrap_or(Value::Null)
 }
 
-pub async fn status(provider: &mut impl RsdProvider, rsd: &mut RsdHandshake) -> Value {
+/// With `services_only`, answers from the handshake's service list alone, without asking cryptexd
+/// (a round trip to the phone) which image is installed.
+pub async fn status(
+    provider: &mut impl RsdProvider,
+    rsd: &mut RsdHandshake,
+    services_only: bool,
+) -> Value {
     let display_service = rsd.services.contains_key(DISPLAY_SERVICE);
     let cryptexd = rsd.services.contains_key(CRYPTEXD_SERVICE);
-    let installed = if cryptexd {
+    let installed = if cryptexd && !services_only {
         installed_ddi(provider, rsd)
             .await
             .map_err(|e| e.to_string())

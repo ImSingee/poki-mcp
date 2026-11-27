@@ -41,9 +41,9 @@ test('POKI_MCP_TOOLS=all lists the same _meta', { timeout: 30000 }, async t => {
   assert.equal((await all.listResources()).resources.length, views.length);
 });
 
-test('the bundle rewrite publishes the named exports and refuses anything it would drop', () => {
-  assert.equal(exportsAsGlobal('const a=1,b=2;export{a as App,b};', 'X'), 'const a=1,b=2;globalThis.X=Object.freeze({"App":a,"b":b});');
-  assert.throws(() => exportsAsGlobal('export default 1;'), /Unexpected export form/);
-  assert.throws(() => exportsAsGlobal('export{a}from"./x.js";'), /Unexpected export form/);
-  assert.throws(() => exportsAsGlobal('const a="</script>";export{a};'), /<\/script/);
+test('the bundle rewrite publishes the named exports and refuses anything it would drop', async () => {
+  assert.equal(await exportsAsGlobal('const a=1,b=2;export{a as App,b};', 'X'), 'const a=1,b=2;globalThis.X=Object.freeze({"App":a,"b":b});');
+  await assert.rejects(exportsAsGlobal('export default 1;'), /Unexpected export form/);
+  await assert.rejects(exportsAsGlobal('export{a}from"./x.js";'), /Unexpected export form/);
+  await assert.rejects(exportsAsGlobal('const a="</script>";export{a};'), /<\/script/);
 });

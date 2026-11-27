@@ -34,7 +34,7 @@ For LAN-only use, see [LAN addresses that change with DHCP](#lan-addresses-that-
 
    In every mode the pairing key remains in the private state directory. Ordinary operations never trigger a new pairing flow.
 
-   **Developer disk image.** Touch and text input need displayservice, which the developer disk image (DDI) provides. `pair_device` installs it through cryptexd over the RemotePairing tunnel; after an iPhone restart, call `pair_device` with `device` set to its id to install it again. Over the tunnel the computer needs internet access for Apple's personalization (`gs.apple.com`). When the iPhone refuses the installation over the tunnel, connect USB once and run `node bin/prepare-device.mjs DEVICE_ID`.
+   **Developer disk image.** Touch and text input need displayservice, which the developer disk image (DDI) provides. `pair_device` installs it through cryptexd over the RemotePairing tunnel; when `list_devices` later reports `display_service: false` for the device, call `pair_device` with `device` set to its id to install it again. Over the tunnel the computer needs internet access for Apple's personalization (`gs.apple.com`). When the iPhone refuses the installation over the tunnel, connect USB once and run `node bin/prepare-device.mjs DEVICE_ID`.
 4. Use Poki with the same state directory. Call `take_screenshot` with this device's ID as `device` while Wi-Fi is connected. Confirm the actual screen before disconnecting USB or leaving the LAN.
 5. For a cellular/Tailscale route, disconnect Wi-Fi from Control Center, leaving the Wi-Fi setting enabled, Tailscale connected, and the phone unlocked. Verify the phone is using cellular data.
 

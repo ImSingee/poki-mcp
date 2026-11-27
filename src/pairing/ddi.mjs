@@ -110,7 +110,9 @@ export async function ensureDeveloperImage(device, request, { resolve = resolveI
   try { image = await resolve({ signal }); }
   catch (error) { throw Object.assign(new Error(error.message), { failure: ddiFailure('image', error, device) }); }
   onPhase('install');
-  const reply = await request({ op: 'install_ddi', restore_dir: image.directory }, { timeoutMs: 16 * 60000 });
+  let reply = await request({ op: 'install_ddi', restore_dir: image.directory }, { timeoutMs: 16 * 60000 });
+  // An image is listed as installed, yet the phone offers no displayservice: install it again once.
+  if (reply.installed && reply.already && !reply.display_service) reply = await request({ op: 'install_ddi', restore_dir: image.directory, force: true }, { timeoutMs: 16 * 60000 });
   if (!reply.installed) throw Object.assign(new Error(reply.error ?? 'Installing the developer disk image failed.'), { failure: ddiFailure(reply.stage, reply.error, device) });
   if (!reply.display_service) throw Object.assign(new Error('The developer disk image is installed, but the iPhone still offers no displayservice.'), { failure: ddiFailure('install', 'The developer disk image is installed, but the iPhone still offers no displayservice. It may be older than this iOS version needs.', device) });
   return { ready: true, already: Boolean(reply.already), ddi: reply.ddi ?? null, source: image.source };

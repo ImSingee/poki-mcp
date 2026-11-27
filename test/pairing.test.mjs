@@ -208,3 +208,20 @@ test('unpair_device removes the pairing, disconnects its helper, ends other sess
   assert.equal(usb.isError, true);
   assert.match(usb.content[0].text, /not paired over Wi-Fi by Poki/);
 });
+
+test('unpair_device stops a helper that is busy installing the DDI and does not answer', { timeout: 60000 }, async t => {
+  const { f, data, call, until, release } = await pairingFixture(t, { remote: { hangInstall: true } });
+  const { job } = data(await call('pair_device')).job;
+  await release('accept');
+  await until(job, j => j.state === 'mounting_ddi');
+  await f.until(log => log.includes('"remote":"install_ddi"'));
+  const helperPid = (await f.events()).find(e => e.helper === '--remote-server').pid;
+  const result = data(await call('unpair_device', { device: 'wireless-27' }));
+  assert.equal(result.helper.disconnected, false);
+  assert.equal(result.helper.stopped, true, JSON.stringify(result.helper));
+  assert.equal(result.helper.pid, helperPid);
+  assert.throws(() => process.kill(helperPid, 0), { code: 'ESRCH' }, 'the busy helper was stopped, not left holding the tunnel');
+  assert.deepEqual(await registry(f), []);
+  const ended = data(await call('pairing_status', { job }));
+  assert.equal(ended.state, 'cancelled');
+});

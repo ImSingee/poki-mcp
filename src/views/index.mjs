@@ -10,7 +10,6 @@
 import { readFile, stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { Parser } from 'acorn';
 
 export const RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
 const marker = '<!-- poki:ext-apps -->';
@@ -39,8 +38,10 @@ export const toolMeta = {
 // Rewrites the bundle's final `export { local as Name, ... }` into an assignment to globalThis, so it
 // runs as an inline module script that later scripts can use. Any other export form is refused: the
 // rewrite would silently drop it.
-export function exportsAsGlobal(source, name = 'PokiExtApps') {
+// acorn is loaded here, not at import: every stdio process imports this module, few read a view.
+export async function exportsAsGlobal(source, name = 'PokiExtApps') {
   if (/<\/script|<!--/i.test(source)) throw new Error('The ext-apps bundle contains </script or <!--, which would end an inline script early.');
+  const { Parser } = await import('acorn');
   const program = Parser.parse(source, { ecmaVersion: 'latest', sourceType: 'module' });
   const exports = program.body.filter(node => node.type.startsWith('Export'));
   if (exports.length !== 1 || exports[0].type !== 'ExportNamedDeclaration' || exports[0].declaration || exports[0].source) throw new Error('Unexpected export form in the ext-apps bundle.');
@@ -53,7 +54,7 @@ let bundle;
 async function appBundle() {
   const file = require.resolve('@modelcontextprotocol/ext-apps/app-with-deps');
   const { mtimeMs } = await stat(file);
-  if (bundle?.mtimeMs !== mtimeMs) bundle = { mtimeMs, script: exportsAsGlobal(await readFile(file, 'utf8')) };
+  if (bundle?.mtimeMs !== mtimeMs) bundle = { mtimeMs, script: await exportsAsGlobal(await readFile(file, 'utf8')) };
   return bundle.script;
 }
 

@@ -9,6 +9,9 @@ import { root, stateDir } from './config.mjs';
 import { checkWork, signal, phase } from './work.mjs';
 
 const starting = new Map();
+// The pid each RemotePairing helper greeted with, by socket path: a helper busy with one long request
+// (a developer disk image installation) answers no one else, so disconnectRemote may have to stop it.
+const helperPids = new Map();
 const localHelpers = new Map();
 const readOnly = new Set(['ax_tree', 'screenshot', 'device_info', 'display_info', 'panels', 'list_apps']);
 let closing = false;
@@ -54,18 +57,48 @@ async function socketPath(target) {
 }
 
 // Asks a running RemotePairing helper to close its tunnel and exit. A helper that is not running is
-// left alone: none is started just to stop it. Resolves { running, disconnected }.
-export async function disconnectRemote(target, { timeoutMs = 10000 } = {}) {
+// left alone: none is started just to stop it. One that does not confirm in time (busy with another
+// request) is stopped with SIGTERM when this daemon knows its pid. Resolves { running, disconnected,
+// stopped? }.
+export async function disconnectRemote(target, { timeoutMs = 5000 } = {}) {
   const path = await socketPath(target);
   let socket;
   try { socket = await connect(path); }
   catch (error) { if (['ENOENT', 'ECONNREFUSED'].includes(error.code)) return { running: false, disconnected: false }; throw error; }
+  const result = await askToDisconnect(socket, path, timeoutMs);
+  if (result.disconnected) { helperPids.delete(path); return result; }
+  const pid = helperPids.get(path);
+  if (!pid) return { ...result, stopped: false, note: 'The helper did not confirm and its process is unknown to this service; it ends when its tunnel closes or the computer restarts.' };
+  const stopped = await stopProcess(pid);
+  helperPids.delete(path);
+  if (stopped) await unlink(path).catch(() => {});
+  return { ...result, stopped, pid };
+}
+
+// SIGTERM, then SIGKILL after two seconds. Resolves whether the process is gone.
+async function stopProcess(pid) {
+  const gone = () => { try { process.kill(pid, 0); return false; } catch (error) { return error.code === 'ESRCH'; } };
+  try { process.kill(pid, 'SIGTERM'); } catch (error) { return error.code === 'ESRCH'; }
+  for (let waited = 0; waited < 4000; waited += 50) {
+    if (gone()) return true;
+    if (waited === 2000) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  return gone();
+}
+
+function askToDisconnect(socket, path, timeoutMs) {
   return new Promise(resolve => {
     const lines = lineReader(socket);
     let greeted = false, reply;
     const timer = setTimeout(() => socket.destroy(), timeoutMs);
     lines.on('line', line => {
-      if (!greeted) { greeted = true; socket.write('{"op":"disconnect"}\n'); return; }
+      if (!greeted) {
+        greeted = true;
+        try { const { pid } = JSON.parse(line); if (Number.isSafeInteger(pid) && pid > 1) helperPids.set(path, pid); } catch {}
+        socket.write('{"op":"disconnect"}\n');
+        return;
+      }
       try { reply = JSON.parse(line); } catch {}
       socket.end();
     });
@@ -166,6 +199,7 @@ export async function nativeRequest(target, request, { timeoutMs = 120000 } = {}
       if (!pid) {
         if (!Number.isSafeInteger(value.pid) || value.pid <= 1) { abort(new Error('Invalid remote helper identity.')); return; }
         pid = value.pid;
+        if (target.remote) helperPids.set(path, pid);
         if (callerSignal?.aborted) { abort(callerSignal.reason); return; }
         socket.write(JSON.stringify(request) + '\n');
       } else { outcome = value; socket.end(); }

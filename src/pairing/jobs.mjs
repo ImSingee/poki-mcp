@@ -55,7 +55,7 @@ export class PairingJobs {
   }
   // Starts a job, or returns the one already running on this host.
   // With `device` (a registered RemotePairing target), only prepares that phone again: after a
-  // restart the iPhone has dropped its developer disk image, and pairing again is not needed.
+  // phone that no longer offers displayservice needs its developer disk image again, not a new pairing.
   start({ name, device } = {}) {
     this.prune();
     const running = this.active();

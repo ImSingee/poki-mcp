@@ -89,8 +89,9 @@ iPhone on the same LAN, select the host in Settings › Privacy & Security
 › Developer Mode on the phone, and type the six-digit PIN. Poki then
 installs the DeveloperDiskImage through the new RemotePairing tunnel
 (cryptexd, personalized by Apple, so the host needs internet access);
-pymobiledevice3 is not involved on this path. After an iPhone restart,
-`pair_device` with `device` installs the image again. `unpair_device`
+pymobiledevice3 is not involved on this path. When `list_devices`
+later reports `display_service: false` for the phone, `pair_device`
+with `device` installs the image again. `unpair_device`
 removes a pairing without restarting anything. See
 [docs/tools.md](docs/tools.md#pair-iphones-over-wi-fi).
 

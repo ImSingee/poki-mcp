@@ -1,5 +1,5 @@
 // A stand-in for build/poki-native in both modes the pairing flow starts, for tests and for the
-// view harness (test/harness/view-host.mjs). Its behavior comes from pairing.json next to
+// view harness (test/support/view-host.mjs). Its behavior comes from pairing.json next to
 // FIXTURE_STATE; every helper start and request is logged to FIXTURE_LOG.
 // --pair-host: plays `pairHost`, waiting at each `await` step until that file exists next to
 //   FIXTURE_STATE; on SIGTERM prints a cancelled event and exits 1, as pair_host.rs does.
@@ -25,20 +25,28 @@ if (mode === '--pair-host') {
   process.exit(0);
 }
 if (mode === '--remote-server') {
-  let installed = false;
+  let installed = false, busy = false;
   const server = createServer(socket => {
+    // Like the Rust helper, which serves one request at a time: while busy, nobody is greeted.
+    if (busy) return;
     socket.write(JSON.stringify({ pid: process.pid }) + '\\n');
     createInterface({ input: socket }).once('line', line => {
       const request = JSON.parse(line);
       log({ remote: request.op, request });
       const remote = config().remote ?? {};
+      // hangInstall: an installation that never finishes and keeps the helper busy.
+      if (request.op === 'install_ddi' && remote.hangInstall) { busy = true; return; }
       const reply = request.op === 'disconnect' ? { disconnected: true }
         : request.op === 'device_info' ? { properties: { DeviceName: config().names?.[JSON.parse(readFileSync(process.argv[3], 'utf8')).id] ?? 'Wireless iPhone', ProductType: 'iPhone17,1', ProductVersion: '27.0' } }
         : request.op === 'ddi_status' ? { display_service: installed || Boolean(remote.displayService), cryptexd: true, ddi: installed ? { identifier: 'com.apple.MobileAsset.DDI', version: '27B52' } : null }
         : request.op === 'install_ddi' ? (remote.install ?? (installed = true, { installed: true, display_service: true, ddi: { identifier: 'com.apple.MobileAsset.DDI', version: '27B52' } }))
         : { transport_error: true, error: 'Unexpected native request ' + request.op };
-      socket.end(JSON.stringify(reply) + '\\n');
-      if (request.op === 'disconnect') server.close(() => process.exit(0));
+      // installDelayMs: a slow installation, so the view's "Preparing developer services" step lasts.
+      const delay = request.op === 'install_ddi' ? Number(remote.installDelayMs ?? 0) : 0;
+      setTimeout(() => {
+        socket.end(JSON.stringify(reply) + '\\n');
+        if (request.op === 'disconnect') server.close(() => process.exit(0));
+      }, delay);
     });
   });
   server.listen(process.argv[4], () => console.log(JSON.stringify({ ready: true })));

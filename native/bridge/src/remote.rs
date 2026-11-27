@@ -333,7 +333,8 @@ impl Session {
         }
         let Connection { adapter, rsd, .. } = self.connection.as_mut().unwrap();
         if !install {
-            return Ok(super::ddi::status(adapter, rsd).await);
+            let services_only = request["services_only"].as_bool().unwrap_or(false);
+            return Ok(super::ddi::status(adapter, rsd, services_only).await);
         }
         let mut reply = tokio::time::timeout(
             Duration::from_secs(15 * 60),
@@ -1206,10 +1207,36 @@ mod tests {
     async fn ddi_status_reports_displayservice_without_opening_a_phone_service() {
         let (connection, _phone) = tunnel();
         let mut session = session_with(connection);
-        let reply = session.request(json!({"op":"ddi_status"})).await.unwrap();
-        assert_eq!(reply["display_service"], true, "{reply}");
-        assert_eq!(reply["cryptexd"], false, "{reply}");
-        assert_eq!(reply["ddi"], Value::Null, "{reply}");
+        for request in [
+            json!({"op":"ddi_status"}),
+            json!({"op":"ddi_status","services_only":true}),
+        ] {
+            let reply = session.request(request).await.unwrap();
+            assert_eq!(reply["display_service"], true, "{reply}");
+            assert_eq!(reply["cryptexd"], false, "{reply}");
+            assert_eq!(reply["ddi"], Value::Null, "{reply}");
+        }
+        // With cryptexd listed, services_only still answers from the service list: this fake phone
+        // never answers a cryptexd request, so asking it would hang.
+        let cryptexd = session.connection.as_ref().unwrap().rsd.services
+            [crate::Hid::rsd_service_name().as_ref()]
+        .clone();
+        session
+            .connection
+            .as_mut()
+            .unwrap()
+            .rsd
+            .services
+            .insert("com.apple.security.cryptexd.remote".into(), cryptexd);
+        let reply = tokio::time::timeout(
+            Duration::from_secs(5),
+            session.request(json!({"op":"ddi_status","services_only":true})),
+        )
+        .await
+        .expect("services_only must not ask the phone")
+        .unwrap();
+        assert_eq!(reply["cryptexd"], true, "{reply}");
+        assert_eq!(reply["ddi_error"], Value::Null, "{reply}");
     }
 
     #[tokio::test]
