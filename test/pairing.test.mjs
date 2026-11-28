@@ -51,6 +51,16 @@ async function pairingFixture(t, { pairHost = happyPath, remote = {}, approvalMo
   return { f, data, call, until, ddiDir, release: name => writeFile(join(f.dir, name), '') };
 }
 
+// A stopped process can stay a zombie until its parent reaps it: wait for that, briefly.
+async function waitGone(pid, message) {
+  const deadline = performance.now() + 3000;
+  while (true) {
+    try { process.kill(pid, 0); } catch (error) { assert.equal(error.code, 'ESRCH'); return; }
+    if (performance.now() > deadline) assert.fail(message);
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+}
+
 const registry = async f => JSON.parse(await readFile(join(f.dir, 'state/remote-devices.json'), 'utf8').catch(() => '[]'));
 
 test('a pairing job advances in order, shows its PIN, registers the iPhone and installs the DDI over the tunnel', { timeout: 60000 }, async t => {
@@ -233,7 +243,8 @@ test('unpair_device stops a helper that is busy installing the DDI and does not 
   assert.equal(result.helper.disconnected, false);
   assert.equal(result.helper.stopped, true, JSON.stringify(result.helper));
   assert.equal(result.helper.pid, helperPid);
-  assert.throws(() => process.kill(helperPid, 0), { code: 'ESRCH' }, 'the busy helper was stopped, not left holding the tunnel');
+  // Stopped; its parent (the service) reaps it a moment later.
+  await waitGone(helperPid, 'the busy helper was stopped, not left holding the tunnel');
   assert.deepEqual(await registry(f), []);
   const ended = data(await call('pairing_status', { job }));
   assert.equal(ended.state, 'cancelled');
@@ -371,7 +382,7 @@ test('pairing a registered iPhone again stops its old helper, so the next call u
   assert.equal(done.state, 'ready', JSON.stringify(done));
   const events = await f.events();
   assert.ok(events.some(e => e.remote === 'disconnect'), 'the old helper was told to disconnect');
-  assert.throws(() => process.kill(old, 0), { code: 'ESRCH' });
+  await waitGone(old, 'the helper was stopped');
   assert.ok((await helpers()).length >= 2, 'a new helper serves the new pairing');
 });
 
@@ -384,7 +395,7 @@ test('unpair_device stops a helper that was still starting, instead of leaving i
   await listing;
   await new Promise(resolve => setTimeout(resolve, 500));
   const pid = (await f.events()).find(e => e.helper === '--remote-server').pid;
-  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, 'no helper left serving a deleted pairing');
+  await waitGone(pid, 'the helper was stopped');
 });
 
 test('unpair_device asks a person in ask mode, and refuses when they decline', { timeout: 60000 }, async t => {
