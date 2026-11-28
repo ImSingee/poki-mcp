@@ -24,7 +24,7 @@ test('frames, acknowledgements and gestures cross a WebRTC peer; closing the vie
   const frames = sampleFrames();
   for (const frame of frames.slice(0, 3)) native.subscriptions[0].send(frame);
 
-  const browser = new RTCPeerConnection({ iceServers: [] });
+  const browser = new RTCPeerConnection({ iceServers: [], iceUseDefaultStunServer: false });
   t.after(() => browser.close());
   const media = browser.createDataChannel('media', { ordered: true });
   const control = browser.createDataChannel('control', { ordered: true });
@@ -79,7 +79,7 @@ test('an offer without the two ordered channels is refused', { timeout: 30000 },
   t.after(() => screens.closeAll());
   const viewer = await screens.open(target, { codecs: ['hevc'] });
   await assert.rejects(answer(viewer, 'x'.repeat(70000), { servers: [] }), /Invalid offer/);
-  const browser = new RTCPeerConnection({ iceServers: [] });
+  const browser = new RTCPeerConnection({ iceServers: [], iceUseDefaultStunServer: false });
   t.after(() => browser.close());
   browser.createDataChannel('media', { ordered: false });
   await browser.setLocalDescription(await browser.createOffer());
@@ -98,7 +98,7 @@ test('a gesture the phone refuses stays an error over WebRTC', { timeout: 30000 
   t.after(() => screens.closeAll());
   const session = { coordinator: new Coordination(), label: 'view' };
   const opened = (await runScreenTool(session, 'screen_open', { device: target.id, codecs: ['hevc'] }, { screens, resolve: async () => target })).structuredContent;
-  const browser = new RTCPeerConnection({ iceServers: [] });
+  const browser = new RTCPeerConnection({ iceServers: [], iceUseDefaultStunServer: false });
   t.after(() => browser.close());
   browser.createDataChannel('media', { ordered: true });
   const control = browser.createDataChannel('control', { ordered: true });
@@ -125,7 +125,7 @@ test('a second offer for a viewer replaces its peer, and the old peer closing le
   t.after(() => screens.closeAll());
   const viewer = await screens.open(target, { codecs: ['hevc'] });
   const offer = async () => {
-    const browser = new RTCPeerConnection({ iceServers: [] });
+    const browser = new RTCPeerConnection({ iceServers: [], iceUseDefaultStunServer: false });
     t.after(() => browser.close());
     browser.createDataChannel('media', { ordered: true }); browser.createDataChannel('control', { ordered: true });
     await browser.setLocalDescription(await browser.createOffer());
@@ -158,7 +158,7 @@ test('a resync over WebRTC sends a still screen\'s latest JPEG again', { timeout
   native.subscriptions[0].send(sampleFrames()[0]);
   await until(() => viewer.track.frames.length === 1);
 
-  const browser = new RTCPeerConnection({ iceServers: [] });
+  const browser = new RTCPeerConnection({ iceServers: [], iceUseDefaultStunServer: false });
   t.after(() => browser.close());
   const media = browser.createDataChannel('media', { ordered: true });
   const control = browser.createDataChannel('control', { ordered: true });
@@ -182,7 +182,7 @@ test('with STUN turned off the answer carries no server-reflexive candidate (wer
   const screens = new Screens({ ...native, ffmpeg: async () => false });
   t.after(() => screens.closeAll());
   const viewer = await screens.open(target, { codecs: ['hevc'] });
-  const browser = new RTCPeerConnection({ iceServers: [] });
+  const browser = new RTCPeerConnection({ iceServers: [], iceUseDefaultStunServer: false });
   t.after(() => browser.close());
   browser.createDataChannel('media', { ordered: true }); browser.createDataChannel('control', { ordered: true });
   await browser.setLocalDescription(await browser.createOffer());
@@ -200,7 +200,7 @@ test('gestures on the control channel are checked like screen_input and run one 
   t.after(() => screens.closeAll());
   const session = { coordinator: new Coordination(), label: 'view' };
   const opened = (await runScreenTool(session, 'screen_open', { device: target.id, codecs: ['hevc'] }, { screens, resolve: async () => target })).structuredContent;
-  const browser = new RTCPeerConnection({ iceServers: [] });
+  const browser = new RTCPeerConnection({ iceServers: [], iceUseDefaultStunServer: false });
   t.after(() => browser.close());
   browser.createDataChannel('media', { ordered: true });
   const control = browser.createDataChannel('control', { ordered: true });
@@ -240,7 +240,7 @@ test('cancel_device also stops the gestures still queued on the control channel'
   const session = new Session(new Coordination());
   session.label = 'view';
   const opened = (await runScreenTool(session, 'screen_open', { device: target.id, codecs: ['hevc'] }, { screens, resolve: async () => target })).structuredContent;
-  const browser = new RTCPeerConnection({ iceServers: [] });
+  const browser = new RTCPeerConnection({ iceServers: [], iceUseDefaultStunServer: false });
   t.after(() => browser.close());
   browser.createDataChannel('media', { ordered: true });
   const control = browser.createDataChannel('control', { ordered: true });
@@ -264,4 +264,54 @@ test('cancel_device also stops the gestures still queued on the control channel'
   assert.deepEqual(reached, [Math.round(0.1 * 65535)], 'a gesture queued before cancel_device reached the phone after it');
   const results = messages.filter(m => m.type === 'input-result').sort((a, b) => a.id - b.id);
   assert.deepEqual(results.slice(1).map(r => r.reason), ['stopped', 'stopped']);
+});
+
+test('gestures queued longer than the input lock wait are all sent, one after another', { timeout: 60000 }, async t => {
+  const { runScreenTool, INPUT_WAIT_MS } = await import('../src/stream/tools.mjs');
+  const { Coordination } = await import('../src/coordination.mjs');
+  const native = fakeNative();
+  const screens = new Screens({ ...native, ffmpeg: async () => false });
+  t.after(() => screens.closeAll());
+  const session = { coordinator: new Coordination(), label: 'view' };
+  const opened = (await runScreenTool(session, 'screen_open', { device: target.id, codecs: ['hevc'] }, { screens, resolve: async () => target })).structuredContent;
+  const browser = new RTCPeerConnection({ iceServers: [], iceUseDefaultStunServer: false });
+  t.after(() => browser.close());
+  browser.createDataChannel('media', { ordered: true });
+  const control = browser.createDataChannel('control', { ordered: true });
+  const messages = [];
+  control.onMessage.subscribe(message => messages.push(JSON.parse(message)));
+  await browser.setLocalDescription(await browser.createOffer());
+  await until(() => browser.iceGatheringState === 'complete');
+  process.env.POKI_STUN_URL = '';
+  t.after(() => { delete process.env.POKI_STUN_URL; });
+  // Each gesture takes 800 ms: four of them queue for longer than a gesture waits for the input lock.
+  const reached = [];
+  const slow = async (device, request) => { reached.push(request.x); await delay(800); return { sent: true }; };
+  const answered = await runScreenTool(session, 'screen_rtc_offer', { stream: opened.stream, sdp: browser.localDescription.sdp }, { screens, native: slow });
+  await browser.setRemoteDescription({ type: 'answer', sdp: answered.structuredContent.sdp });
+  await until(() => messages.some(m => m.type === 'ready'));
+  assert.ok(4 * 800 > INPUT_WAIT_MS);
+  for (let id = 1; id <= 4; id++) control.send(JSON.stringify({ type: 'input', id, kind: 'tap', x: id / 10, y: 0.5 }));
+  await until(() => messages.filter(m => m.type === 'input-result').length === 4, 15000);
+  const results = messages.filter(m => m.type === 'input-result').sort((a, b) => a.id - b.id);
+  assert.deepEqual(results.map(r => r.reason ?? 'sent'), ['sent', 'sent', 'sent', 'sent'], `a queued gesture timed out on the input lock: ${JSON.stringify(results)}`);
+  assert.deepEqual(reached, [0.1, 0.2, 0.3, 0.4].map(x => Math.round(x * 65535)));
+});
+
+test('POKI_RTC_ADDRESSES binds the peer to that address alone', { timeout: 30000 }, async t => {
+  const native = fakeNative();
+  const screens = new Screens({ ...native, ffmpeg: async () => false });
+  t.after(() => screens.closeAll());
+  const viewer = await screens.open(target, { codecs: ['hevc'] });
+  process.env.POKI_RTC_ADDRESSES = '127.0.0.1';
+  t.after(() => { delete process.env.POKI_RTC_ADDRESSES; });
+  const browser = new RTCPeerConnection({ iceServers: [], iceUseDefaultStunServer: false });
+  t.after(() => browser.close());
+  browser.createDataChannel('media', { ordered: true }); browser.createDataChannel('control', { ordered: true });
+  await browser.setLocalDescription(await browser.createOffer());
+  await until(() => browser.iceGatheringState === 'complete');
+  const { sdp } = await answer(viewer, browser.localDescription.sdp, { servers: [] });
+  const addresses = [...sdp.matchAll(/a=candidate:\S+ \d+ \S+ \d+ (\S+) \d+ typ/g)].map(m => m[1]);
+  assert.ok(addresses.length, sdp);
+  assert.deepEqual([...new Set(addresses)], ['127.0.0.1'], `the answer listed other addresses: ${[...new Set(addresses)]}`);
 });

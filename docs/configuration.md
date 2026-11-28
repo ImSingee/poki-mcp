@@ -15,6 +15,7 @@ The daemon reads its settings from its own environment. A daemon started automat
 | `POKI_SCREEN_READ_MAX_BYTES`, `POKI_SCREEN_READ_MAX_FRAMES` | Most bytes (default 262144, 16 KiB to 4 MiB) and frames (default 16) one `screen_read` reply carries. See [the live screen](tools.md#live-screen). |
 | `POKI_SCREEN_H264_BITRATE` | Starting bitrate of the H.264 transcoding for the screen view, in bit/s (default 1500000, 300000 to 4000000). |
 | `POKI_SCREEN_RTC=0` | Never use WebRTC for the screen view; it streams over tool calls only. |
+| `POKI_SCREEN_JPEG_FPS` | Most JPEG pictures a second a screen view reads over tool calls (default 10; 0 for no limit). The newest picture always goes, so a still screen's last picture is shown. |
 | `POKI_SCREEN_IDLE_MINUTES` | Minutes with no input in the screen panel and no tool call on its iPhone before its stream is paused (the panel offers Resume). Default 20; 0 never pauses. |
 | `POKI_STUN_URL` | STUN server(s) for the screen view's WebRTC, comma-separated. Default Google's `stun:stun.l.google.com:19302`, which then learns this computer's public address; empty for host candidates only, with no STUN server contacted. |
 | `POKI_RTC_ADDRESSES` | One IPv4 and/or one IPv6 address (comma-separated) the screen view's WebRTC binds to and lists; by default every interface's address is listed. |

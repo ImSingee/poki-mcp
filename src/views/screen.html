@@ -4,6 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>iPhone screen</title>
+<!--
+  Parts of this view are adapted from Lody's device preview viewer
+  (https://github.com/ImSingee/Lody at 7ae04272dd8cb19598929ca16553f387e3a3fe87,
+  apps/cli/src/device-preview/viewer-webrtc.ts, viewer-h264.ts, viewer-media.ts and viewer.ts,
+  Apache License 2.0; see THIRD_PARTY_NOTICES.md): the WebRTC peer with ordered media and control
+  DataChannels and its chunk reassembly, the WebCodecs decoder with its three-second progress
+  watchdog, three recoveries before falling back and one retained picture drawn on an animation
+  frame, and acknowledging what was decoded. Modified for Poki: an MCP Apps view whose signaling
+  and frames go through tool calls (with WebRTC as an upgrade), HEVC and Annex-B input, JPEG,
+  batch reordering, gestures and keys as screen_input, takeover, and pausing while hidden.
+-->
 <style>
   :root {
     color-scheme: light dark;
@@ -327,6 +338,14 @@ async function startStream({ reconnect = false } = {}) {
   stop();
   if (!state.device) return;
   showError(); notice(''); sourceDown = false;
+  // A panel mounted hidden (at zero size, say, until the host gives it room) opens nothing yet:
+  // a stream would take the iPhone's camera and microphone for a panel nobody sees.
+  if (hidden()) {
+    $('placeholder').textContent = 'Waiting to be shown';
+    await shown();
+    if (generation !== state.generation) return;
+    $('placeholder').textContent = 'Connecting…';
+  }
   const codecs = (await supportedCodecs()).filter(codec => !state.unavailable.has(codec));
   if (!codecs.length) { notice('This browser cannot show the screen.'); return; }
   let opened;

@@ -157,7 +157,7 @@ export const daemonSettings = new Set(['POKI_ALLOW_PLAINTEXT_BIND', 'POKI_BIND_H
   // The live screen (src/stream). POKI_TURN_SECRET is the daemon's own: it derives the expiring TURN
   // credentials it hands to a screen view, as a TURN server's shared secret is meant to be used. It
   // is named here, never taken through POKI_DAEMON_ENV.
-  'POKI_SCREEN_READ_MAX_BYTES', 'POKI_SCREEN_READ_MAX_FRAMES', 'POKI_SCREEN_H264_BITRATE', 'POKI_SCREEN_RTC', 'POKI_SCREEN_IDLE_MINUTES',
+  'POKI_SCREEN_READ_MAX_BYTES', 'POKI_SCREEN_READ_MAX_FRAMES', 'POKI_SCREEN_H264_BITRATE', 'POKI_SCREEN_RTC', 'POKI_SCREEN_IDLE_MINUTES', 'POKI_SCREEN_JPEG_FPS',
   'POKI_STUN_URL', 'POKI_RTC_ADDRESSES', 'POKI_TURN_URL', 'POKI_TURN_SECRET', 'POKI_TURN_TTL_SECONDS']);
 // Never passed, even when POKI_DAEMON_ENV names them: the client's secrets and the shim's own
 // variables (POKI_PARENT_PID would make the detached daemon stop on its parent check).

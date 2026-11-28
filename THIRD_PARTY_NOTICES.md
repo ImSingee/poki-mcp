@@ -24,7 +24,15 @@ Poki MCP's simulator helper is a local implementation using these protocol refer
 
 ## Lody
 
-The screen panel's flow control ([src/stream/flow.mjs](src/stream/flow.mjs): credit by acknowledgement, dropping a backlog to the next key frame, at most one key frame request a second, adaptive H.264 bitrate) and its WebRTC packet format ([src/stream/rtc.mjs](src/stream/rtc.mjs): the `LAVC`/`LODY` packets and their chunking) are adapted from [ImSingee/Lody](https://github.com/ImSingee/Lody) `apps/cli/src/device-preview` at commit `7ae04272dd8cb19598929ca16553f387e3a3fe87`, licensed under the Apache License 2.0. Its complete text is retained in [third_party/LICENSE.lody](third_party/LICENSE.lody); Lody has no NOTICE file. Poki's versions are modified (an HEVC packet variant, Annex-B payloads, the long-poll transport), as the files' own headers say.
+Three files of the screen panel are adapted from [ImSingee/Lody](https://github.com/ImSingee/Lody)'s device preview (`apps/cli/src/device-preview`) at commit `7ae04272dd8cb19598929ca16553f387e3a3fe87`, licensed under the Apache License 2.0. Its complete text is retained in [third_party/LICENSE.lody](third_party/LICENSE.lody); Lody has no NOTICE file. Each file's header names its sources and says what Poki changed.
+
+| Poki file | Adapted from | What it takes |
+| --- | --- | --- |
+| [src/stream/flow.mjs](src/stream/flow.mjs) | `h264-flow.ts`, `frame-flow.ts` | Credit by acknowledgement, dropping a backlog to the next key frame, at most one key frame request a second, adaptive H.264 bitrate |
+| [src/stream/rtc.mjs](src/stream/rtc.mjs) | `webrtc.ts`, `webrtc-protocol.ts` | The `LAVC`/`LODY` packets, their 16 KB chunking, the ICE server URL check, the two ordered DataChannels |
+| [src/views/screen.html](src/views/screen.html) | `viewer-webrtc.ts`, `viewer-h264.ts`, `viewer-media.ts`, `viewer.ts` | The browser peer and chunk reassembly, the WebCodecs decoder's progress watchdog and recovery limit, one retained picture drawn on an animation frame, acknowledging decoded frames |
+
+The rest of the screen panel (the native video hub, the daemon's hub, tracks, transcoding and tools) is Poki's own.
 
 ## BlueBubbles Server
 

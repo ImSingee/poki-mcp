@@ -360,3 +360,46 @@ test('a takeover lasts while the panel keeps its stream, beyond the takeover lea
   viewer.onRenew(performance.now() + 6000);
   assert.ok(coordinator.leases.get(target.id).until > until, 'the takeover was not renewed by the panel\'s reads');
 });
+
+test('a long tool call on a device counts as activity until it ends', async t => {
+  const coordinator = new Coordination();
+  const session = new Session(coordinator);
+  const phone = { id: 'fixture-phone', kind: 'physical', name: 'Lab iPhone' };
+  session.inventory = async () => [phone];
+  const route = await session.route('wait', { device: phone.id, seconds: 0.6 });
+  const started = performance.now();
+  await route.run();
+  const ended = performance.now();
+  const active = coordinator.activeAt.get(phone.id);
+  assert.ok(active >= ended - 100 && active - started >= 500, `activity stamped ${Math.round(active - started)} ms into a ${Math.round(ended - started)} ms call`);
+});
+
+test('in ask mode a takeover through the MCP route asks on this computer, and a declined dialog takes nothing', async t => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const { tmpdir } = await import('node:os');
+  const { screens } = await import('../src/stream/hub.mjs');
+  // The dialog: osascript on macOS, zenity on Linux; both answer "cancelled".
+  const bin = await mkdtemp(join(tmpdir(), 'poki-dialog-'));
+  t.after(() => rm(bin, { recursive: true, force: true }));
+  await writeFile(join(bin, 'osascript'), '#!/bin/sh\necho cancelled\n', { mode: 0o755 });
+  await writeFile(join(bin, 'zenity'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  const saved = { PATH: process.env.PATH, POKI_MCP_APPROVAL_MODE: process.env.POKI_MCP_APPROVAL_MODE, DISPLAY: process.env.DISPLAY };
+  Object.assign(process.env, { PATH: `${bin}:${process.env.PATH}`, POKI_MCP_APPROVAL_MODE: 'ask', DISPLAY: ':0' });
+  t.after(() => { for (const [name, value] of Object.entries(saved)) value === undefined ? delete process.env[name] : process.env[name] = value; });
+  const native = fakeNative();
+  const deps = screens.deps;
+  screens.deps = { ...deps, ...native, ffmpeg: async () => false };
+  t.after(() => { screens.closeAll(); screens.deps = deps; });
+  const coordinator = new Coordination();
+  const agent = new Session(coordinator), view = new Session(coordinator);
+  const phone = { id: 'fixture-phone', kind: 'physical', name: 'Lab iPhone' };
+  for (const session of [agent, view]) session.inventory = async () => [phone];
+  await coordinator.acquire(agent, phone, 120);
+  const opened = (await (await view.route('screen_open', { device: phone.id, codecs: ['hevc'] })).run()).structuredContent;
+  const busy = (await (await view.route('screen_input', { stream: opened.stream, kind: 'tap', x: 0.5, y: 0.5 })).run()).structuredContent;
+  assert.ok(busy.takeover_token, JSON.stringify(busy));
+  const taken = await (await view.route('screen_takeover', { stream: opened.stream, token: busy.takeover_token })).run();
+  assert.equal(taken.structuredContent?.reason, 'not_approved', JSON.stringify(taken));
+  assert.equal(coordinator.leases.get(phone.id).owner, agent, 'a takeover nobody approved ended the agent\'s lease');
+});

@@ -13,6 +13,9 @@ import { Transcoder, ffmpegCodecs } from './transcode.mjs';
 
 export const VIEWER_TTL_MS = 10_000;
 export const KEYFRAME_INTERVAL_MS = 1000;
+// How long an encoder waits for the phone to answer a key frame request, and how often it asks.
+export const KEYFRAME_ANSWER_MS = 2000;
+const KEYFRAME_ASKS = 3;
 export const MAX_WAIT_MS = 1000;
 const RETRY_MS = [1000, 2000, 5000];
 // A transcoded track's encoder is restarted for a new bitrate at most this often, and only when
@@ -23,6 +26,8 @@ const ENCODER_RESTARTS = 3;
 
 export const CODECS = ['hevc', 'h264', 'jpeg'];
 export const MAX_VIEWERS = 8;
+// Pictures a second a JPEG viewer reads over tool calls (POKI_SCREEN_JPEG_FPS, 0 for no limit).
+export const jpegFps = (env = process.env) => { const value = Number(env.POKI_SCREEN_JPEG_FPS ?? 10); return Number.isFinite(value) && value >= 0 ? value : 10; };
 // Minutes without input in the panel or a tool call on the device before a stream is paused
 // (POKI_SCREEN_IDLE_MINUTES, 0 to never pause).
 export const idleMinutes = (env = process.env) => { const value = Number(env.POKI_SCREEN_IDLE_MINUTES ?? 20); return Number.isFinite(value) && value >= 0 ? value : 20; };
@@ -31,7 +36,7 @@ const RTC_ENDED_CLOSE_MS = 250;
 
 class ScreenHub {
   viewers = new Set(); tracks = new Map(); transcoders = new Map(); failed = new Map();
-  subscription; starting; stopped = false; lastKeyframe = -Infinity; retry = 0; retryTimer;
+  subscription; starting; stopped = false; lastKeyframe = -Infinity; retry = 0; retryTimer; keyframeAsks = 0; keyframeAnswer;
   localSeq = 0; nativeBase; error;
   constructor(target, deps) {
     this.target = target; this.deps = deps;
@@ -111,6 +116,8 @@ class ScreenHub {
     // A media restart (native.reset) begins with a key frame, which starts a new chain anyway.
     const frame = { seq, key: native.key, pts_us: native.pts_us, config: native.config, data: native.data, at: performance.now() };
     this.tracks.get('hevc').push(frame);
+    // The key frame asked for came: no need to ask again.
+    if (frame.key) { clearTimeout(this.keyframeAnswer); this.keyframeAnswer = undefined; this.keyframeAsks = 0; }
     this.pushed('hevc');
     for (const transcoder of this.transcoders.values()) transcoder.write(frame);
   }
@@ -172,10 +179,38 @@ class ScreenHub {
   askSourceKeyframe() {
     if (this.stopped || this.chainKeyframeTimer) return;
     const wait = (this.chainKeyframeAt ?? -Infinity) + KEYFRAME_INTERVAL_MS - performance.now();
-    const ask = () => { this.chainKeyframeTimer = undefined; if (this.stopped) return; this.chainKeyframeAt = performance.now(); this.deps.keyframe(this.target).catch(() => {}); };
+    const ask = () => {
+      this.chainKeyframeTimer = undefined;
+      if (this.stopped) return;
+      this.chainKeyframeAt = performance.now();
+      // A failed request is a failed attempt: the answer check below asks again.
+      this.deps.keyframe(this.target).catch(() => {});
+      this.awaitKeyframe();
+    };
     if (wait <= 0) { ask(); return; }
     this.chainKeyframeTimer = setTimeout(ask, wait);
     this.chainKeyframeTimer.unref?.();
+  }
+
+  // An encoder waiting for the phone's next key frame (after a start, a restart or a stall) asks
+  // again when none came within KEYFRAME_ANSWER_MS, KEYFRAME_ASKS times in all. Past that (the
+  // helper restarts the media session for an overdue key frame itself, so this is a last resort),
+  // each waiting encoder is fed the cached chain once: an older picture catching up, rather than
+  // none at all.
+  awaitKeyframe() {
+    if (this.keyframeAnswer) return;
+    this.keyframeAnswer = setTimeout(() => {
+      this.keyframeAnswer = undefined;
+      const waiting = [...this.transcoders.values()].filter(transcoder => !transcoder.closed && !transcoder.feeding);
+      if (this.stopped || !waiting.length) { this.keyframeAsks = 0; return; }
+      if (++this.keyframeAsks < KEYFRAME_ASKS) { this.askSourceKeyframe(); return; }
+      this.keyframeAsks = 0;
+      const hevc = this.tracks.get('hevc'), key = hevc.latestKey();
+      const chain = key ? hevc.since(key.seq - 1) ?? [] : [];
+      if (!chain.length) { this.askSourceKeyframe(); return; }
+      for (const transcoder of waiting) for (const frame of chain) transcoder.write(frame);
+    }, KEYFRAME_ANSWER_MS);
+    this.keyframeAnswer.unref?.();
   }
 
   // A backed-up encoder caught up: it resumes at the newest key frame if that is the screen now,
@@ -227,7 +262,7 @@ class ScreenHub {
   }
 
   stop() {
-    this.stopped = true; clearTimeout(this.retryTimer); clearTimeout(this.chainKeyframeTimer);
+    this.stopped = true; clearTimeout(this.retryTimer); clearTimeout(this.chainKeyframeTimer); clearTimeout(this.keyframeAnswer);
     this.startup?.controller.abort(new DOMException('The screen stream ended', 'AbortError'));
     this.subscription?.close(); this.subscription = undefined;
     for (const transcoder of this.transcoders.values()) transcoder.close();
@@ -281,7 +316,13 @@ class Viewer {
       // Several reads may be in flight and their replies may arrive out of order: `after` says
       // which frame a batch continues, so the view can put batches back in order.
       const after = this.flow.sent;
-      const taken = this.take({ credit, ...limits });
+      // JPEG over tool calls: at most jpegFps() pictures a second cross the relay, however fast the
+      // phone sends. The track keeps only the newest, so the last picture of a still screen still
+      // goes, once the interval is over.
+      const spacing = this.codec === 'jpeg' && jpegFps() ? (this.jpegNextAt ?? 0) - now() : 0;
+      if (spacing > 0 && now() < deadline && !signal?.aborted) { await new Promise(resolve => setTimeout(resolve, Math.min(spacing, deadline - now()))); continue; }
+      const taken = spacing > 0 ? { frames: [] } : this.take({ credit, ...limits });
+      if (taken.frames.length && this.codec === 'jpeg' && jpegFps()) this.jpegNextAt = now() + 1000 / jpegFps();
       if (taken.frames.length || now() >= deadline || signal?.aborted) {
         return { ...this.describe(), after, ...(taken.discontinuity ? { discontinuity: true } : {}), ...(this.hub.error && !this.hub.subscription ? { source_error: this.hub.error } : {}), flow: this.flow.snapshot(now()),
           frames: taken.frames.map(frame => ({ seq: frame.seq, key: frame.key, pts_us: frame.pts_us, ...(frame.config ? { config: frame.config.toString('base64') } : {}), data: frame.data.toString('base64') })) };

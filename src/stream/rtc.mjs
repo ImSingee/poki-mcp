@@ -5,9 +5,10 @@
 //
 // The view opens two ordered, reliable DataChannels: `media` (frames from here) and `control`
 // (acknowledgements, keyframe requests and gestures from the view). Frames use lody's private
-// packets (https://github.com/ImSingee/Lody at 7ae04272dd8cb19598929ca16553f387e3a3fe87,
-// apps/cli/src/device-preview, Apache License 2.0; see THIRD_PARTY_NOTICES.md), modified for Poki
-// with Annex-B payloads and an HEVC variant:
+// packets, chunking and ICE checks (https://github.com/ImSingee/Lody at
+// 7ae04272dd8cb19598929ca16553f387e3a3fe87, apps/cli/src/device-preview/webrtc.ts and
+// webrtc-protocol.ts, Apache License 2.0; see THIRD_PARTY_NOTICES.md), modified for Poki: tool-call
+// signaling, Annex-B payloads and an HEVC variant, gestures and pings on the control channel:
 //   LHVC / LAVC: u32 magic | u32 seq | u8 2=key 3=delta | u16 config length | config | Annex-B
 //   LODY:        u32 magic | u32 seq | JPEG
 // Each packet is split into chunks of at most RTC_CHUNK_BYTES: u32 total length | u32 offset | bytes.
@@ -139,7 +140,7 @@ export async function answer(viewer, sdp, { onInput, onActivity, servers = iceSe
   const start = () => {
     if (media?.readyState !== 'open' || control?.readyState !== 'open' || viewer.rtc?.close === close && viewer.rtc.started) return;
     clearTimeout(expiry);
-    viewer.rtc = { close, pump, notify: sendControl, started: true };
+    viewer.rtc = { close, pump, notify: sendControl, started: true, control: () => control };
     sendControl({ type: 'ready', ...viewer.describe() });
     void pump();
   };
@@ -180,7 +181,7 @@ export async function answer(viewer, sdp, { onInput, onActivity, servers = iceSe
     await pc.setRemoteDescription({ type: 'offer', sdp });
     await pc.setLocalDescription(await pc.createAnswer());
     if (!pc.localDescription) throw new Error('No answer.');
-    viewer.rtc = { close, pump, notify: sendControl, started: false };
+    viewer.rtc = { close, pump, notify: sendControl, started: false, control: () => control };
     return { sdp: pc.localDescription.sdp, close };
   } catch (error) { await close(); throw error; }
 }

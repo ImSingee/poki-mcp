@@ -460,8 +460,10 @@ export class DeviceContext {
     if (sessionTools.has(name)) return this.session.dispatchSession(name, original);
     const schema = stepSchema(name);
     // A tool acting on this device (a batch step or a run_code call included), not a lookup such as
-    // list_devices: it keeps a watching screen panel going and lets a panel reopen after a disconnect.
-    if (schema && this.id !== undefined) this.coordinator.activeAt.set(this.id, performance.now());
+    // list_devices, nor disconnect_device itself: it keeps a watching screen panel going and lets a
+    // panel reopen after a disconnect.
+    const acting = Boolean(schema) && this.id !== undefined && name !== 'disconnect_device';
+    if (acting) this.coordinator.activeAt.set(this.id, performance.now());
     if (!schema) throw new Error(`Unknown tool: ${name}`);
     const { device: _device, ...rest } = original;
     const args = schema.parse(name === 'start_simulator' && this.id !== undefined ? {} : rest);
@@ -643,7 +645,11 @@ export class DeviceContext {
           return { ...text(result), ...(unchanged || result.screen_change ? { _meta: { ...(unchanged ? { stop_reason: 'no_change' } : {}), ...(result.screen_change ? { verdict: result.screen_change } : {}) } } : {}) };
         }
       }
-    } finally { if (!sharesTarget) this.resolved=previousResolved; }
+    } finally {
+      if (!sharesTarget) this.resolved=previousResolved;
+      // A long call (a batch, a wait, a recording) is activity until it ends, not only when it starts.
+      if (acting) this.coordinator.activeAt.set(this.id, performance.now());
+    }
   }
 }
 

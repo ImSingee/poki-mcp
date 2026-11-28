@@ -1833,12 +1833,7 @@ mod tests {
         let (media, mut media_closed) = make_media(reset_now).await;
         session.connection.as_mut().unwrap().media = Some(media);
 
-        let dir = std::env::temp_dir().join(format!(
-            "poki-idle-media-{}-{}",
-            std::process::id(),
-            reset_now.elapsed().as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = socket_dir("idle-media");
         let socket_path = dir.join("session.sock");
         let socket_str = socket_path.to_str().unwrap().to_owned();
         let client_socket = socket_path.clone();
@@ -2049,12 +2044,7 @@ mod tests {
             connection: Some(connection),
             stream: Streaming::default(),
         };
-        let dir = std::env::temp_dir().join(format!(
-            "poki-interrupted-input-{}-{}",
-            std::process::id(),
-            now.elapsed().as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = socket_dir("interrupted-input");
         let socket_path = dir.join("session.sock");
         let socket_str = socket_path.to_str().unwrap().to_owned();
         let client_socket = socket_path.clone();
@@ -2259,6 +2249,19 @@ mod tests {
         PHONE.with(|slot| slot.borrow_mut().take());
     }
 
+    /// A directory for a test's Unix socket. Under /tmp, not TMPDIR: a long TMPDIR (macOS's per-user
+    /// one is long already) pushes the socket path past the 104-byte sun_path limit, bind fails and
+    /// the test waits for a socket that never appears.
+    fn socket_dir(label: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::path::PathBuf::from("/tmp").join(format!("poki-{label}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     // A panel that opens after the media session was released does not get the old session's
     // cached screen: its backlog starts with the new session's first picture.
     #[tokio::test]
@@ -2368,15 +2371,7 @@ mod tests {
                 ..Default::default()
             },
         };
-        let dir = std::env::temp_dir().join(format!(
-            "poki-subscribe-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = socket_dir("subscribe");
         let socket_path = dir.join("session.sock");
         let socket_str = socket_path.to_str().unwrap().to_owned();
         let client = async {

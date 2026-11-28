@@ -634,3 +634,44 @@ test('a disconnect while a screen is still checking its codecs is not undone whe
   assert.equal(native.subscriptions.length, 0, 'the opening subscribed a phone disconnected meanwhile');
   assert.equal(screens.active, 0);
 });
+
+test('JPEG over tool calls goes at most POKI_SCREEN_JPEG_FPS pictures a second, and the newest always goes', async t => {
+  const native = fakeNative();
+  // An encoder that never outputs: the test puts the pictures on the track itself.
+  const spawnQuiet = () => Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough().resume(), kill() {} });
+  const screens = new Screens({ ...native, spawn: spawnQuiet, ffmpeg: async () => true });
+  t.after(() => screens.closeAll());
+  const viewer = await screens.open(target, { codecs: ['jpeg'] });
+  const track = viewer.hub.track('jpeg');
+  let seq = 0, running = true;
+  // The phone moves: 60 pictures a second for a second and a half.
+  const feeding = (async () => { const end = performance.now() + 1500; while (performance.now() < end) { track.push({ seq: ++seq, key: true, data: Buffer.from([0xff, 0xd8, seq & 0xff, 0xff, 0xd9]), at: performance.now() }); await delay(16); } running = false; })();
+  const got = [];
+  while (running) got.push(...(await viewer.read({ ack: got.at(-1), wait_ms: 1000 })).frames.map(f => f.seq));
+  await feeding;
+  assert.ok(got.length <= 17, `${got.length} pictures in 1.5 s over tool calls`);
+  // The screen is still now: its last picture comes within the interval, if it has not yet.
+  const tail = got.at(-1) === seq ? [] : (await viewer.read({ ack: got.at(-1), wait_ms: 1000 })).frames.map(f => f.seq);
+  assert.equal([...got, ...tail].at(-1), seq, 'the still screen\'s newest picture did not come');
+});
+
+test('an encoder waiting for the phone\'s key frame asks again, and at last starts on the cached chain', { timeout: 20000 }, async t => {
+  const native = fakeNative();
+  let asks = 0;
+  // The phone never answers, and its requests fail.
+  const keyframe = async () => { asks++; throw new Error('helper busy'); };
+  const writes = [];
+  const spawnRecorder = () => { const stdin = new PassThrough().resume(); const write = stdin.write.bind(stdin); stdin.write = chunk => { writes.push(chunk.length); return write(chunk); }; return Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), stdin, kill() {} }); };
+  const screens = new Screens({ ...native, keyframe, spawn: spawnRecorder, ffmpeg: async () => true });
+  t.after(() => screens.closeAll());
+  await screens.open(target, { codecs: ['hevc'] });
+  const [key, delta] = sampleFrames();
+  native.subscriptions[0].send(key); native.subscriptions[0].send(delta);
+  await screens.open(target, { codecs: ['h264'] });
+  // A viewer with no picture yet gets the key frame alone, and the phone is asked for a new one.
+  assert.deepEqual(writes.filter(n => n > 7), [key.data.length]);
+  await until(() => asks >= 3, 8000);
+  // After the last unanswered request the cached chain goes in once.
+  await until(() => writes.filter(n => n > 7).length >= 3, 4000);
+  assert.deepEqual(writes.filter(n => n > 7).slice(1), [key.data.length, delta.data.length]);
+});

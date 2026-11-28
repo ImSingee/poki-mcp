@@ -612,6 +612,62 @@ test('a WebRTC peer lost after it worked hands the stream to tool calls without 
   assert.equal(h.poki.count('screen_open'), 1);
 });
 
+test('a hidden panel on WebRTC stops acknowledging and pinging, so the daemon stops sending and its lease runs out', { skip, timeout: 90000 }, async t => {
+  if (!(await ffmpegAvailable())) return t.skip('ffmpeg is not installed, so no JPEG to stream');
+  const h = await open(t, { settings: { rtc: true, codecs: ['jpeg'], rtcTimeoutMs: 30000 } });
+  await h.mount(showResult);
+  await until(async () => (await h.screen()).transport === 'webrtc', 40000);
+  await until(() => painted(h.frame()));
+  const [viewer] = h.poki.screens.viewers.values();
+  await h.page.evaluate(() => { document.getElementById('slot').style.display = 'none'; });
+  await delay(1500);
+  const expires = viewer.expires, acked = viewer.flow.acked;
+  await delay(3000);
+  assert.equal(viewer.expires, expires, 'a hidden panel kept renewing its stream (pings or acknowledgements)');
+  assert.equal(viewer.flow.acked, acked, 'a hidden panel kept acknowledging frames');
+});
+
+test('a page in the background counts as hidden', { skip, timeout: 60000 }, async t => {
+  const h = await open(t, { settings: { rtc: false, codecs: (await ffmpegAvailable()) ? ['jpeg'] : undefined } });
+  await h.mount(showResult);
+  await until(() => painted(h.frame()));
+  await h.frame().evaluate(() => { Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' }); document.dispatchEvent(new Event('visibilitychange')); });
+  await delay(1500);
+  const reads = h.poki.count('screen_read');
+  await delay(2500);
+  assert.ok(h.poki.count('screen_read') - reads <= 2, `a background page kept reading: ${h.poki.count('screen_read') - reads} reads`);
+  await h.frame().evaluate(() => { Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' }); document.dispatchEvent(new Event('visibilitychange')); });
+  await until(() => h.poki.count('screen_read') > reads + 3);
+});
+
+test('a panel mounted with no room opens no stream until the host gives it some', { skip, timeout: 60000 }, async t => {
+  const h = await open(t, { settings: { rtc: false, codecs: (await ffmpegAvailable()) ? ['jpeg'] : undefined }, context: { containerDimensions: { width: 0, height: 0 } } });
+  await h.mount(showResult);
+  await delay(2500);
+  assert.equal(h.poki.count('screen_open'), 0, 'a panel with no room took the iPhone\'s camera and microphone');
+  assert.equal(h.poki.native.subscriptions.length, 0);
+  await h.page.evaluate(() => window.bridge.setHostContext({ containerDimensions: { width: 720, height: 900 } }));
+  await until(() => h.poki.count('screen_open') === 1);
+  await until(() => painted(h.frame()));
+});
+
+test('the daemon closing its side of the peer moves the panel to tool calls and closes the browser\'s peer too', { skip, timeout: 90000 }, async t => {
+  if (!(await ffmpegAvailable())) return t.skip('ffmpeg is not installed, so no JPEG to stream');
+  // Every browser peer is kept, to see whether the view closes the one it gave up.
+  const preScript = 'globalThis.peers = []; const Native = RTCPeerConnection; globalThis.RTCPeerConnection = class extends Native { constructor(...args) { super(...args); globalThis.peers.push(this); } createDataChannel(...args) { const channel = super.createDataChannel(...args); (this.channels ??= []).push(channel); return channel; } };';
+  const h = await open(t, { settings: { rtc: true, codecs: ['jpeg'], rtcTimeoutMs: 30000 }, preScript });
+  await h.mount(showResult);
+  await until(async () => (await h.screen()).transport === 'webrtc', 40000);
+  await until(() => painted(h.frame()));
+  // Only the control channel closes (the peer's connection itself stays up).
+  const [viewer] = h.poki.screens.viewers.values();
+  viewer.rtc.control().close();
+  await until(async () => (await h.screen()).transport === 'tool-calls', 10000);
+  await until(() => h.frame().evaluate(() => globalThis.peers.at(-1).connectionState === 'closed'), 5000).catch(() => {});
+  assert.equal(await h.frame().evaluate(() => globalThis.peers.at(-1).connectionState), 'closed', 'the view left the peer it gave up open');
+  await until(() => painted(h.frame()));
+});
+
 test('a decoder that fails while WebRTC is still connecting falls back to the next codec', { skip, timeout: 60000 }, async t => {
   if (!(await ffmpegAvailable())) return t.skip('ffmpeg is not installed, so there is no codec to fall back to');
   const h = await open(t, { settings: { rtc: true, codecs: ['hevc', 'jpeg'] }, backendOptions: {
@@ -752,4 +808,20 @@ test('a WebRTC attempt still setting up when the person chooses another iPhone d
   const streamB = h.poki.calls.find(c => c.name === 'screen_open' && c.args.device === 'phone-b') && configs.at(-1);
   assert.deepEqual(offers.filter(s => s === streamA), [], 'an offer was sent for the closed stream');
   assert.ok(offers.filter(s => s === streamB).length <= 1, `phone A's attempt offered for phone B's stream: offers ${JSON.stringify(offers)}, configs ${JSON.stringify(configs)}`);
+});
+
+test('the view\'s control channel closing alone moves the panel to tool calls', { skip, timeout: 90000 }, async t => {
+  if (!(await ffmpegAvailable())) return t.skip('ffmpeg is not installed, so no JPEG to stream');
+  const preScript = 'globalThis.peers = []; const Native = RTCPeerConnection; globalThis.RTCPeerConnection = class extends Native { constructor(...args) { super(...args); globalThis.peers.push(this); } createDataChannel(...args) { const channel = super.createDataChannel(...args); (this.channels ??= []).push(channel); return channel; } };';
+  const h = await open(t, { settings: { rtc: true, codecs: ['jpeg'], rtcTimeoutMs: 30000 }, preScript });
+  await h.mount(showResult);
+  await until(async () => (await h.screen()).transport === 'webrtc', 40000);
+  await until(() => painted(h.frame()));
+  // The control channel ends while the connection stays up: gestures could no longer be sent.
+  const started = Date.now();
+  await h.frame().evaluate(() => globalThis.peers.at(-1).channels.find(channel => channel.label === 'control').close());
+  await until(async () => (await h.screen()).transport === 'tool-calls', 10000);
+  // At once, not when the peer's connection is noticed to be gone (seconds later).
+  assert.ok(Date.now() - started < 1500, `moved to tool calls after ${Date.now() - started} ms`);
+  await until(() => painted(h.frame()));
 });
