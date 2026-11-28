@@ -383,6 +383,26 @@ test('after a stalled JPEG decode, the same picture sent again on resync is deco
   assert.ok(await painted(h.frame()), 'the picture sent again after the restart was dropped as already seen');
 });
 
+test('a JPEG picture stuck decoding still trips the watchdog when another one finished', { skip, timeout: 60000 }, async t => {
+  if (!(await ffmpegAvailable())) return t.skip('ffmpeg is not installed, so there is no JPEG track');
+  const h = await open(t, { settings: { rtc: false, codecs: ['jpeg'] }, backendOptions: { noFrames: true } });
+  await h.mount(showResult);
+  await until(() => h.frame().evaluate(() => globalThis.pokiScreenInternals.decoder()?.codec === 'jpeg'));
+  await h.frame().evaluate(async () => {
+    const c = new OffscreenCanvas(90, 195); c.getContext('2d').fillRect(0, 0, 90, 195);
+    const data = new Uint8Array(await (await c.convertToBlob({ type: 'image/jpeg' })).arrayBuffer());
+    const original = globalThis.createImageBitmap;
+    let calls = 0;
+    // The first picture submitted decodes; the other never finishes.
+    globalThis.createImageBitmap = blob => (calls++ === 0 ? original(blob) : new Promise(() => {}));
+    const decoder = globalThis.pokiScreenInternals.decoder();
+    void decoder.decode({ seq: 2, key: true, data });
+    void decoder.decode({ seq: 1, key: true, data });
+  });
+  await until(() => h.frame().evaluate(() => globalThis.pokiScreenInternals.decoder()?.stuck >= 1), 6000).catch(() => {});
+  assert.ok(await h.frame().evaluate(() => globalThis.pokiScreenInternals.decoder()?.stuck >= 1), 'the stuck picture never triggered a recovery');
+});
+
 test('a picture still waiting to be drawn when the stream stops is not drawn', { skip, timeout: 60000 }, async t => {
   const h = await open(t, { settings: { rtc: false }, backendOptions: { noFrames: true } });
   await h.mount(showResult);

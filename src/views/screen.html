@@ -170,11 +170,16 @@ function layout() {
 const STUCK_MS = 3000, STUCK_LIMIT = 3;
 class Decoder {
   constructor(codec, codecString, onDecoded, onFailure) {
-    Object.assign(this, { codec, codecString, onDecoded, onFailure, pending: new Map(), waitingKey: true, errors: 0, stuck: 0, submittedAt: 0, outputAt: 0 });
+    // decoding: each JPEG picture being decoded, by sequence, with the time it was submitted.
+    Object.assign(this, { codec, codecString, onDecoded, onFailure, pending: new Map(), decoding: new Map(), waitingKey: true, errors: 0, stuck: 0, submittedAt: 0, outputAt: 0 });
     if (codec !== 'jpeg') this.open();
     this.watchdog = setInterval(() => {
       const now = performance.now();
-      if (!this.submittedAt || this.outputAt >= this.submittedAt || now - this.submittedAt < STUCK_MS) return;
+      if (codec === 'jpeg') {
+        // Any one picture stuck counts, even after a later or earlier one was shown.
+        if (!this.decoding.size || now - Math.min(...this.decoding.values()) < STUCK_MS) return;
+        this.decoding.clear();
+      } else if (!this.submittedAt || this.outputAt >= this.submittedAt || now - this.submittedAt < STUCK_MS) return;
       this.submittedAt = 0;
       if (++this.stuck > STUCK_LIMIT) { this.onFailure('stuck'); return; }
       if (this.codec !== 'jpeg') { try { this.open(); } catch { this.onFailure('decode'); return; } }
@@ -195,10 +200,11 @@ class Decoder {
   async decode(frame) {
     if (this.closed) return;
     if (this.codec === 'jpeg') {
-      // Armed for every picture after the last one shown, as for video below.
-      if (!this.submittedAt || this.outputAt >= this.submittedAt) this.submittedAt = performance.now();
+      this.decoding.set(frame.seq, performance.now());
       try {
         const picture = await createImageBitmap(new Blob([frame.data], { type: 'image/jpeg' }));
+        // Given up by the watchdog meanwhile: the restart superseded it.
+        if (!this.decoding.delete(frame.seq)) { picture.close(); return; }
         // Replaced while decoding (another iPhone, another codec): the picture and its number
         // belong to the old stream.
         if (this.closed) { picture.close(); return; }
@@ -208,7 +214,7 @@ class Decoder {
         present(picture); this.shown(); stats.decoded++; this.onDecoded(frame.seq);
       }
       // A picture that cannot be decoded still returns its credit: the next one may decode.
-      catch { if (this.closed) return; if (++this.errors > 3) this.onFailure('decode'); else this.onDecoded(frame.seq); }
+      catch { if (!this.decoding.delete(frame.seq) || this.closed) return; if (++this.errors > 3) this.onFailure('decode'); else this.onDecoded(frame.seq); }
       return;
     }
     if (this.waitingKey && !frame.key) { this.onDecoded(frame.seq); return; }

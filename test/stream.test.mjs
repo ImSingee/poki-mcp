@@ -488,3 +488,20 @@ test('a resync sends the latest JPEG again when its reply was lost and nothing n
   // Once sent again, it is not repeated.
   assert.deepEqual(flow.take(track, 30, { credit: 2 }).frames, []);
 });
+
+test('a screen_open cancelled before its cold start begins starts nothing and leaves no rejection unobserved', async t => {
+  const unhandled = [];
+  const onUnhandled = reason => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  t.after(() => process.off('unhandledRejection', onUnhandled));
+  let subscribed = 0;
+  const subscribe = (device, onFrame, { signal } = {}) => { subscribed++; return new Promise((_, reject) => signal?.addEventListener('abort', () => reject(signal.reason), { once: true })); };
+  const screens = new Screens({ ...fakeNative(), subscribe, ffmpeg: async () => false });
+  t.after(() => screens.closeAll());
+  const controller = new AbortController();
+  controller.abort(new DOMException('Request cancelled', 'AbortError'));
+  await assert.rejects(screens.open(target, { codecs: ['hevc'], signal: controller.signal }), /cancelled/);
+  await delay(50);
+  assert.equal(subscribed, 0, 'a cancelled open started the phone\'s stream');
+  assert.deepEqual(unhandled, [], 'a rejected startup nobody awaited would end the daemon');
+});

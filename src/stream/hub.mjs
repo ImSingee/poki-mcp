@@ -40,9 +40,13 @@ class ScreenHub {
   // one caller's cancellation ends only its own wait, and the attempt ends once no caller waits.
   async start(signal) {
     if (this.subscription) return;
+    // A caller cancelled already starts nothing.
+    signal?.throwIfAborted();
     if (!this.starting) {
       const startup = this.startup = { controller: new AbortController(), waiters: 0, kept: false };
       this.starting = this.subscribe(startup).finally(() => { if (this.startup === startup) { this.starting = undefined; this.startup = undefined; } });
+      // Observed even when every caller has gone: a rejection nobody awaits must not end the daemon.
+      this.starting.catch(() => {});
     }
     const startup = this.startup, starting = this.starting;
     // A caller that cannot be cancelled (a reconnect) keeps the attempt going.
