@@ -126,7 +126,8 @@ export async function takeOver(session, viewer) {
   if (!viewer.releasesTakeover) {
     viewer.releasesTakeover = true;
     const end = viewer.close.bind(viewer);
-    viewer.close = () => { if (viewer.takeover) void coordinator.end(viewer.owner, 'released', [target.id]).catch(() => {}); viewer.takeover = undefined; end(); };
+    // Whatever the close carries (a disconnect's reason) goes through to the viewer.
+    viewer.close = (...reason) => { if (viewer.takeover) void coordinator.end(viewer.owner, 'released', [target.id]).catch(() => {}); viewer.takeover = undefined; end(...reason); };
   }
   if (coordinator.leases.get(target.id)?.owner !== viewer.owner) viewer.takeover = await outsideCall(() => coordinator.acquire(viewer.owner, target, TAKEOVER_TTL_SECONDS));
   return result({ taken_over: true, device: target.id, stopped_sessions: owners.size, expires_at: viewer.takeover.expires_at });

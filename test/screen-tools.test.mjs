@@ -296,3 +296,14 @@ test('disconnect_device ends the phone\'s screen panels, so their subscription d
   assert.equal(later.structuredContent?.reason, 'device_disconnected', JSON.stringify(later));
   assert.equal(native.subscriptions[0].open, false, 'the subscription stayed, to reconnect the phone');
 });
+
+test('a disconnect still reaches a panel that has taken over the iPhone', async t => {
+  const { coordinator, view, viewer } = await setup(t);
+  void coordinator;
+  const taken = await takeOver(view, viewer);
+  assert.equal(taken.structuredContent?.taken_over, true, JSON.stringify(taken));
+  viewer.screens.closeDevice(target.id);
+  assert.equal(viewer.ended?.reason, 'device_disconnected', 'the takeover dropped the disconnect\'s reason');
+  assert.throws(() => viewer.screens.get(viewer.id), { code: 'device_disconnected' });
+  assert.equal(viewer.takeover, undefined);
+});

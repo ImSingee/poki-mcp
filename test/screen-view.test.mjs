@@ -361,6 +361,43 @@ test('over WebRTC the panel learns of a disconnect at once, not when the peer ti
   assert.equal(h.poki.count('screen_open'), 1);
 });
 
+test('after a stalled JPEG decode, the same picture sent again on resync is decoded', { skip, timeout: 60000 }, async t => {
+  if (!(await ffmpegAvailable())) return t.skip('ffmpeg is not installed, so there is no JPEG track');
+  const h = await open(t, { settings: { rtc: false, codecs: ['jpeg'] }, backendOptions: { noFrames: true } });
+  await h.mount(showResult);
+  await until(() => h.frame().evaluate(() => globalThis.pokiScreenInternals.decoder()?.codec === 'jpeg'));
+  await h.frame().evaluate(async () => {
+    const c = new OffscreenCanvas(90, 195); const g = c.getContext('2d'); g.fillStyle = '#00ff00'; g.fillRect(0, 0, 90, 195);
+    const data = new Uint8Array(await (await c.convertToBlob({ type: 'image/jpeg' })).arrayBuffer());
+    const packet = new Uint8Array(8 + data.length); new DataView(packet.buffer).setUint32(0, 0x4c4f4459); new DataView(packet.buffer).setUint32(4, 1); packet.set(data, 8);
+    globalThis.testPacket = packet;
+    // The first decode never finishes: the watchdog restarts the decoder.
+    globalThis.originalBitmap = globalThis.createImageBitmap;
+    globalThis.createImageBitmap = () => new Promise(() => {});
+    globalThis.pokiScreenInternals.receivePacket(packet);
+  });
+  await until(() => h.frame().evaluate(() => globalThis.pokiScreenInternals.decoder()?.stuck >= 1), 8000);
+  // The server sends the still screen's only picture again.
+  await h.frame().evaluate(() => { globalThis.createImageBitmap = globalThis.originalBitmap; globalThis.pokiScreenInternals.receivePacket(globalThis.testPacket); });
+  await until(() => painted(h.frame()), 3000).catch(() => {});
+  assert.ok(await painted(h.frame()), 'the picture sent again after the restart was dropped as already seen');
+});
+
+test('a picture still waiting to be drawn when the stream stops is not drawn', { skip, timeout: 60000 }, async t => {
+  const h = await open(t, { settings: { rtc: false }, backendOptions: { noFrames: true } });
+  await h.mount(showResult);
+  await until(() => h.frame().evaluate(() => Boolean(globalThis.pokiScreenInternals.decoder())));
+  const shown = await h.frame().evaluate(async () => {
+    const c = new OffscreenCanvas(90, 195); const g = c.getContext('2d'); g.fillStyle = '#ffffff'; g.fillRect(0, 0, 90, 195);
+    globalThis.pokiScreenInternals.present(c.transferToImageBitmap());
+    // The person switches iPhones before the picture is drawn.
+    globalThis.pokiScreenInternals.stop();
+    await new Promise(r => setTimeout(r, 300));
+    return !document.getElementById('screen').hidden;
+  });
+  assert.equal(shown, false, 'the old stream\'s picture was drawn after it stopped');
+});
+
 test('a JPEG picture that finishes decoding after a newer one is not shown over it', { skip, timeout: 60000 }, async t => {
   if (!(await ffmpegAvailable())) return t.skip('ffmpeg is not installed, so there is no JPEG track');
   const h = await open(t, { settings: { rtc: false, codecs: ['jpeg'] }, backendOptions: { noFrames: true } });

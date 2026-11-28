@@ -236,7 +236,10 @@ class Decoder {
 
 // ---- The stream: open, receive (A or B), acknowledge, fall back. -------------------------------
 let decoder, decodedSeq = 0, lastSeq = 0, held = [], reorderTimer, rtc;
-function resetChain() { lastSeq = 0; held = []; clearTimeout(reorderTimer); }
+// After a decoder restart, the picture last received may come again (a still screen's JPEG, sent
+// again on resync): it is decoded once more rather than dropped as already seen.
+let replaySeq;
+function resetChain() { lastSeq = 0; held = []; replaySeq = undefined; clearTimeout(reorderTimer); }
 
 // Frames arrive in batches; with several reads in flight, out of order. A batch is used once it
 // continues the frames already used (`after`) or starts a new chain (`discontinuity`).
@@ -253,10 +256,12 @@ function drain(generation) {
       // Before anything was used, only a batch starting at a key frame can begin: a later batch of
       // deltas that overtook the first one waits for it.
       const usable = lastSeq === 0 ? batch.frames[0].key : batch.discontinuity || batch.after === lastSeq;
-      const stale = batch.frames.at(-1).seq <= lastSeq;
+      const replay = batch.discontinuity && replaySeq !== undefined && batch.frames.some(frame => frame.seq === replaySeq);
+      const stale = batch.frames.at(-1).seq <= lastSeq && !replay;
       if (!usable && !stale) continue;
       held.splice(index, 1);
-      if (!stale) for (const frame of batch.frames) if (frame.seq > lastSeq) { lastSeq = frame.seq; void decoder?.decode({ seq: frame.seq, key: frame.key, data: typeof frame.data === 'string' ? b64(frame.data) : frame.data }); }
+      if (replay) replaySeq = undefined;
+      if (!stale) for (const frame of batch.frames) if (frame.seq > lastSeq || (replay && frame.seq === lastSeq)) { lastSeq = frame.seq; void decoder?.decode({ seq: frame.seq, key: frame.key, data: typeof frame.data === 'string' ? b64(frame.data) : frame.data }); }
       progressed = true;
       break;
     }
@@ -270,7 +275,7 @@ function resync() { resyncWanted = true; if (state.transport === 'webrtc') rtc?.
 function decoded(seq, broken) {
   // Starting again at a key frame supersedes everything received so far: acknowledge it, or the
   // credit those frames hold would never come back.
-  if (broken) { decodedSeq = Math.max(decodedSeq, lastSeq); if (state.transport === 'webrtc') rtc?.send({ type: 'ack', seq: decodedSeq }); resync(); return; }
+  if (broken) { replaySeq = lastSeq || undefined; decodedSeq = Math.max(decodedSeq, lastSeq); if (state.transport === 'webrtc') rtc?.send({ type: 'ack', seq: decodedSeq }); resync(); return; }
   if (seq > decodedSeq) decodedSeq = seq;
   if (state.transport === 'webrtc') rtc?.send({ type: 'ack', seq: decodedSeq });
 }
@@ -465,6 +470,9 @@ function receivePacket(packet, generation) {
 function stop(closeStream = true) {
   const stream = state.stream;
   state.stream = undefined; state.transport = undefined; $('stats').hidden = true;
+  // A picture the old stream presented but that is not drawn yet goes too: drawing it would show the
+  // old phone again and let input through.
+  latest?.close?.(); latest = undefined;
   // The old phone's picture goes with its stream: input waits for the new stream's first picture.
   canvas.hidden = true; $('placeholder').hidden = false; $('placeholder').textContent = 'Connecting…';
   rtc?.pc.close(); rtc = undefined;
@@ -504,7 +512,7 @@ function sendInput(args) {
 }
 globalThis.pokiScreenInput = sendInput;
 // For tests: the WebRTC receive path, without a peer.
-globalThis.pokiScreenInternals = { installPeer, decoder: () => decoder, decodedSeq: () => decodedSeq, receivePacket: packet => receivePacket(packet, state.generation), receiveControl: message => receiveControl(message, state.generation), lastSeq: () => lastSeq, held: () => held.length, waitingKey: () => decoder?.waitingKey };
+globalThis.pokiScreenInternals = { installPeer, present, stop: () => stop(false), decoder: () => decoder, decodedSeq: () => decodedSeq, receivePacket: packet => receivePacket(packet, state.generation), receiveControl: message => receiveControl(message, state.generation), lastSeq: () => lastSeq, held: () => held.length, waitingKey: () => decoder?.waitingKey };
 
 // Normalized position (0..1) of a pointer on the phone's screen.
 function position(event) {
