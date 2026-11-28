@@ -403,6 +403,32 @@ test('a JPEG picture stuck decoding still trips the watchdog when another one fi
   assert.ok(await h.frame().evaluate(() => globalThis.pokiScreenInternals.decoder()?.stuck >= 1), 'the stuck picture never triggered a recovery');
 });
 
+test('a stalled JPEG decode that fails after its picture was sent again does not cancel the new attempt', { skip, timeout: 60000 }, async t => {
+  if (!(await ffmpegAvailable())) return t.skip('ffmpeg is not installed, so there is no JPEG track');
+  const h = await open(t, { settings: { rtc: false, codecs: ['jpeg'] }, backendOptions: { noFrames: true } });
+  await h.mount(showResult);
+  await until(() => h.frame().evaluate(() => globalThis.pokiScreenInternals.decoder()?.codec === 'jpeg'));
+  await h.frame().evaluate(async () => {
+    const c = new OffscreenCanvas(90, 195); const g = c.getContext('2d'); g.fillStyle = '#00ff00'; g.fillRect(0, 0, 90, 195);
+    const data = new Uint8Array(await (await c.convertToBlob({ type: 'image/jpeg' })).arrayBuffer());
+    const packet = new Uint8Array(8 + data.length); new DataView(packet.buffer).setUint32(0, 0x4c4f4459); new DataView(packet.buffer).setUint32(4, 1); packet.set(data, 8);
+    globalThis.testPacket = packet;
+    globalThis.originalBitmap = globalThis.createImageBitmap;
+    // The first attempt hangs until the test rejects it.
+    globalThis.createImageBitmap = () => new Promise((_, reject) => { globalThis.rejectFirst = reject; });
+    globalThis.pokiScreenInternals.receivePacket(packet);
+  });
+  await until(() => h.frame().evaluate(() => globalThis.pokiScreenInternals.decoder()?.stuck >= 1), 8000);
+  await h.frame().evaluate(async () => {
+    // The picture comes again; its decode takes a moment, during which the first attempt fails.
+    globalThis.createImageBitmap = async blob => { const bitmap = await globalThis.originalBitmap(blob); await new Promise(r => setTimeout(r, 200)); return bitmap; };
+    globalThis.pokiScreenInternals.receivePacket(globalThis.testPacket);
+    globalThis.rejectFirst(new Error('late failure'));
+  });
+  await until(() => painted(h.frame()), 3000).catch(() => {});
+  assert.ok(await painted(h.frame()), 'the late failure of the first attempt discarded the second');
+});
+
 test('a picture still waiting to be drawn when the stream stops is not drawn', { skip, timeout: 60000 }, async t => {
   const h = await open(t, { settings: { rtc: false }, backendOptions: { noFrames: true } });
   await h.mount(showResult);

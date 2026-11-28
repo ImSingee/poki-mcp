@@ -504,6 +504,11 @@ impl VideoHub {
         self.state.lock().unwrap().wanted_since = None;
     }
 
+    #[cfg(test)]
+    pub fn cached_frames(&self) -> usize {
+        self.state.lock().unwrap().chain.frames.len()
+    }
+
     pub fn subscribe(self: &Arc<Self>) -> Subscription {
         let state = self.state.lock().unwrap();
         let backlog: Vec<_> = state.chain.frames.iter().cloned().collect();
@@ -523,6 +528,13 @@ pub struct Subscription {
     hub: Arc<VideoHub>,
     backlog: Vec<Arc<Frame>>,
     frames: broadcast::Receiver<Arc<Frame>>,
+}
+
+#[cfg(test)]
+impl Subscription {
+    pub fn backlog_len(&self) -> usize {
+        self.backlog.len()
+    }
 }
 
 impl Drop for Subscription {

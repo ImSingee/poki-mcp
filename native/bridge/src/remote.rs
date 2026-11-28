@@ -211,6 +211,21 @@ impl Session {
         Ok(())
     }
 
+    /// A new subscriber, counted before the media opens so nothing releases it while it starts.
+    /// Without a live media session the cached frames are an earlier session's screen: they are
+    /// dropped, so the subscriber starts at the new session's first picture, not at stale controls.
+    fn watch(&mut self) -> crate::video::Subscription {
+        let live = self
+            .connection
+            .as_ref()
+            .and_then(|c| c.media.as_ref())
+            .is_some_and(InputMedia::alive);
+        if !live {
+            self.stream.hub.media_started();
+        }
+        self.stream.hub.subscribe()
+    }
+
     /// Opens the tunnel and the media session the screen video comes from, if not open yet.
     async fn ensure_media(&mut self) -> Result<()> {
         if self
@@ -787,8 +802,7 @@ async fn subscribe(
     mut stream: BufReader<tokio::net::UnixStream>,
 ) {
     use tokio::io::AsyncWriteExt;
-    // Counted before the media opens, so nothing releases it while it starts.
-    let subscription = session.stream.hub.subscribe();
+    let subscription = session.watch();
     let opened = Box::pin(session.ensure_media()).await;
     let reply = match &opened {
         Ok(()) => {
@@ -2243,6 +2257,34 @@ mod tests {
         );
         assert!(session.connection.as_ref().unwrap().media.is_none());
         PHONE.with(|slot| slot.borrow_mut().take());
+    }
+
+    // A panel that opens after the media session was released does not get the old session's
+    // cached screen: its backlog starts with the new session's first picture.
+    #[tokio::test]
+    async fn a_new_subscriber_does_not_get_a_released_sessions_screen() {
+        let hub: Arc<VideoHub> = Default::default();
+        hub.publish(crate::video::Frame {
+            seq: 0,
+            pts_us: 0,
+            key: true,
+            reset: false,
+            config: None,
+            data: Arc::from(&b"stale"[..]),
+        });
+        assert_eq!(hub.cached_frames(), 1);
+        let mut session = Session {
+            transport: Transport::Local("fixture-phone".into()),
+            control: None,
+            connection: None,
+            stream: Streaming {
+                hub: hub.clone(),
+                ..Default::default()
+            },
+        };
+        let subscription = session.watch();
+        assert_eq!(subscription.backlog_len(), 0, "the released session's picture was replayed");
+        assert_eq!(hub.subscribers(), 1);
     }
 
     // While the screen is watched, a tap long after the last input goes straight to the touch
