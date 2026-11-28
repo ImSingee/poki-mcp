@@ -381,3 +381,31 @@ test('the shared image download stops when every job waiting for it is cancelled
   c.abort(new Error('done'));
   await third;
 });
+
+test('two processes reclaiming the same stale registry lock never both hold it', async t => {
+  const dir = await scratch(t);
+  const { acquireFileLock, lockHooks } = await import('../src/pairing/registry.mjs');
+  const { utimes } = await import('node:fs/promises');
+  const lock = join(dir, 'remote-devices.json.lock');
+  await writeFile(lock, 'left by a process that died');
+  await utimes(lock, new Date(Date.now() - 60000), new Date(Date.now() - 60000));
+  // The first contender confirms the lock is stale, then pauses just before removing it.
+  let resume, paused;
+  const reached = new Promise(resolve => { paused = resolve; });
+  lockHooks.beforeUnlinkStale = () => { lockHooks.beforeUnlinkStale = undefined; paused(); return new Promise(resolve => { resume = resolve; }); };
+  t.after(() => { lockHooks.beforeUnlinkStale = undefined; });
+  const holders = new Set();
+  const contend = name => acquireFileLock(lock, { waitMs: 5000 }).then(release => { holders.add(name); return async () => { holders.delete(name); await release(); }; });
+  const first = contend('first');
+  await reached;
+  const second = contend('second');
+  await new Promise(resolve => setTimeout(resolve, 200));
+  resume();
+  const [winner, release] = await Promise.race([first.then(r => ['first', r]), second.then(r => ['second', r])]);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.deepEqual([...holders], [winner], 'only one contender holds the lock');
+  await release();
+  const other = await (winner === 'first' ? second : first);
+  assert.equal(holders.size, 1);
+  await other();
+});

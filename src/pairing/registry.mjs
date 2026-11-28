@@ -40,31 +40,61 @@ const serialized = (stateDir, task) => {
   return result;
 };
 const lockStaleMs = 10000, lockWaitMs = 15000;
-async function withRegistryLock(stateDir, task) {
-  await mkdir(stateDir, { recursive: true, mode: 0o700 });
-  const lock = `${registryFile(stateDir)}.lock`;
+// Test hook: lets a test pause a process after it confirmed a lock is stale and before it removes it.
+export const lockHooks = { beforeUnlinkStale: undefined };
+
+async function createExclusive(path, content) {
+  const handle = await open(path, 'wx', 0o600);
+  try { await handle.writeFile(content); } finally { await handle.close(); }
+}
+const ageOf = async path => Date.now() - ((await stat(path).catch(() => null))?.mtimeMs ?? Date.now());
+
+// Removes a stale lock that still holds `held`. Two processes may find the same stale lock; the one
+// that removes it may already have taken a new lock by the time the other gets here. So removal
+// happens only under a second, exclusive lock, and the content is read again under it: a lock that
+// changed since is someone's live lock and stays.
+async function reclaimStale(lock, held) {
+  const breaker = `${lock}.break`;
+  try { await createExclusive(breaker, String(process.pid)); }
+  catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    // A breaker that died holding it: removing it races only with other breakers of a dead lock.
+    if (await ageOf(breaker) > lockStaleMs) await unlink(breaker).catch(() => {});
+    return;
+  }
+  try {
+    if (await readFile(lock, 'utf8').catch(() => null) !== held) return;
+    await lockHooks.beforeUnlinkStale?.();
+    await unlink(lock).catch(() => {});
+  } finally { await unlink(breaker).catch(() => {}); }
+}
+
+export async function acquireFileLock(lock, { waitMs = lockWaitMs } = {}) {
   const mine = JSON.stringify({ pid: process.pid, nonce: randomBytes(8).toString('hex') });
-  const deadline = Date.now() + lockWaitMs;
+  const deadline = Date.now() + waitMs;
   while (true) {
-    try {
-      const handle = await open(lock, 'wx', 0o600);
-      try { await handle.writeFile(mine); } finally { await handle.close(); }
-      break;
-    } catch (error) {
+    try { await createExclusive(lock, mine); break; }
+    catch (error) {
       if (error.code !== 'EEXIST') throw error;
       // A change takes milliseconds: a lock this old was left by a process that died holding it.
       const held = await readFile(lock, 'utf8').catch(() => null);
-      const age = Date.now() - ((await stat(lock).catch(() => null))?.mtimeMs ?? Date.now());
+      const age = await ageOf(lock);
       if (held !== null && age > lockStaleMs) {
-        if (await readFile(lock, 'utf8').catch(() => null) === held) await unlink(lock).catch(() => {});
+        await reclaimStale(lock, held);
         continue;
       }
       if (Date.now() > deadline) throw new Error(`${lock} has been held for ${Math.round(age / 1000)} s by ${held ?? 'another process'}. If no pairing is being saved, delete it.`);
       await delay(10 + Math.random() * 20);
     }
   }
+  return async () => { if (await readFile(lock, 'utf8').catch(() => null) === mine) await unlink(lock).catch(() => {}); };
+}
+
+async function withRegistryLock(stateDir, task) {
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  const release = await acquireFileLock(`${registryFile(stateDir)}.lock`);
   try { return await task(); }
-  finally { if (await readFile(lock, 'utf8').catch(() => null) === mine) await unlink(lock).catch(() => {}); }
+  finally { await release(); }
 }
 
 async function readRegistry(stateDir) {
