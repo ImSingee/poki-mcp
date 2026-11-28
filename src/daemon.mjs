@@ -14,6 +14,7 @@ import { warnIfNativeStale } from './build-info.mjs';
 import { closeLocalHelpers, remoteDevices, warmRemote } from './remote.mjs';
 import { version, codeFingerprint, currentCodeFingerprint, setServiceStart } from './build-info.mjs';
 import { approvalMode } from './human.mjs';
+import { screens } from './stream/hub.mjs';
 import { pairingJobs } from './pairing/jobs.mjs';
 import { runningDaemon, pidNamespace } from './daemon-launch.mjs';
 
@@ -39,6 +40,9 @@ if (auto) {
 await warnIfNativeStale();
 const sessions = new Map();
 const coordinator = new Coordination();
+// The screen streams see which devices are unavailable, whether a tool acts on one now or when it
+// last did, and when the latest such call started.
+screens.attach({ unavailable: id => coordinator.unavailable.get(id), activity: id => coordinator.lastActive(id), started: id => coordinator.lastStarted(id) });
 const token = process.env.POKI_MCP_TOKEN?.trim() || randomBytes(32).toString('hex');
 // This process, as opposed to another daemon at the same address with the same token (a fixed port and
 // POKI_MCP_TOKEN, restarted): in mcp.json and /version, and checked on every request a shim sends.
@@ -115,6 +119,8 @@ const busyReasons = () => {
   if (coordinator.operations.size) reasons.push(`${coordinator.operations.size} tool call(s) in progress`);
   const background = [...sessions.values()].reduce((count, session) => count + (session.backgroundDevices?.size ?? 0), 0);
   if (background) reasons.push(`background work (recording or simulated location) on ${background} device(s)`);
+  // A screen panel may be open in a browser with no MCP session of its own in this daemon.
+  if (screens.active) reasons.push(`${screens.active} screen stream(s)`);
   // A pairing job outlives the session that started it: the person may still be typing the PIN.
   if (pairingJobs.busy()) reasons.push('a pairing job in progress');
   return reasons;
@@ -228,6 +234,12 @@ const actualPort = servers[0].address().port;
 for (const [index, server] of servers.entries()) if (index > 0) server.listen(actualPort, bindHosts[index]);
 await Promise.all(servers.slice(1).map(server => once(server, 'listening')));
 const entry = { url: `http://127.0.0.1:${actualPort}/mcp`, port: actualPort, token, enabled: true, pid: process.pid, instance, ...(pidNamespace ? { pid_ns: pidNamespace } : {}) };
+// A stop signal from here on must remove the mcp.json entry written next, so it is handled before
+// that entry exists: one that comes before stop() is defined below runs stop() once it is.
+let stopRequested = false, stopping;
+const onStopSignal = () => { if (stopping) void stopping(); else stopRequested = true; };
+process.on('SIGINT', onStopSignal);
+process.on('SIGTERM', onStopSignal);
 const temporary = `${endpointFile}.${process.pid}.tmp`;
 await writeFile(temporary, JSON.stringify(entry, null, 2), { mode: 0o600, flag: 'wx' });
 await rename(temporary, endpointFile);
@@ -247,15 +259,16 @@ pruning.unref();
 // request timeout. Unreachable devices are retried by that first call.
 for (const target of await remoteDevices().catch(() => [])) warmRemote(target).catch(() => {});
 
-let stopping = false;
+let stopped = false;
 async function stop() {
-  if (stopping) return;
-  stopping = true;
+  if (stopped) return;
+  stopped = true;
   stopUpdateChecks(); clearInterval(pruning);
   const closed = Promise.all(servers.map(server => new Promise(resolve => server.close(resolve))));
   for (const server of servers) server.closeAllConnections();
   await pairingJobs.close().catch(() => {});
   await Promise.allSettled([...sessions.values()].map(devices => devices.close()));
+  screens.closeAll();
   await Promise.allSettled([...active].map(server => server.close()));
   await closeLocalHelpers();
   await closed;
@@ -267,8 +280,8 @@ async function stop() {
   // stopped daemon around.
   setTimeout(() => process.exit(0), 2000).unref();
 }
-process.on('SIGINT', () => void stop());
-process.on('SIGTERM', () => void stop());
+stopping = stop;
+if (stopRequested) void stop();
 
 if (auto) {
   // Idle: no session (a dead client's session is pruned), no lease, no call in progress and no

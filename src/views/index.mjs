@@ -9,6 +9,7 @@
 // document order, runs after it.
 import { readFile, stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
+import { screenToolMeta } from '../stream/catalog.mjs';
 import { fileURLToPath } from 'node:url';
 
 export const RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
@@ -23,6 +24,11 @@ export const views = [
     title: 'iPhone pairing', description: 'Pair an iPhone over Wi-Fi, show its PIN, and manage paired devices.',
     meta: { ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } } },
   },
+  {
+    uri: 'ui://poki/screen', name: 'poki-screen', file: 'screen.html',
+    title: 'iPhone screen', description: 'The live screen of a paired iPhone, to watch and to tap, swipe and type on.',
+    meta: { ui: { prefersBorder: false, csp: { connectDomains: [], resourceDomains: [] } } },
+  },
 ];
 
 // _meta for tools that a view opens or calls. ui.visibility: "model" (the agent may call it), "app"
@@ -33,6 +39,7 @@ export const toolMeta = {
   pairing_cancel: { ui: { visibility: ['app'] } },
   unpair_device: { ui: { visibility: ['model', 'app'] } },
   list_devices: { ui: { visibility: ['model', 'app'] } },
+  ...screenToolMeta,
 };
 
 // Rewrites the bundle's final `export { local as Name, ... }` into an assignment to globalThis, so it

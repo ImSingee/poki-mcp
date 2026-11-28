@@ -29,8 +29,9 @@ export class InputLock {
   free(keys) { return keys.every(key => !this.holders.has(key)); }
 
   // Takes every key at once. Resolves to a release function; rejects with the holder named after
-  // waitMs, or when signal aborts. No keys (a call that names no device) takes nothing.
-  acquire(keys, holder, signal) {
+  // waitMs (the lock's own, or a shorter one for this call), or when signal aborts. No keys (a call
+  // that names no device) takes nothing.
+  acquire(keys, holder, signal, { waitMs = this.waitMs } = {}) {
     keys = [...new Set(keys)].sort();
     if (signal?.aborted) return Promise.reject(signal.reason);
     const take = () => {
@@ -43,7 +44,7 @@ export class InputLock {
       const waiter = { keys, ready: () => { finish(); resolve(take()); } };
       const finish = () => { clearTimeout(timer); this.waiters.delete(waiter); signal?.removeEventListener('abort', aborted); };
       const aborted = () => { finish(); reject(signal.reason); this.wake(); };
-      const timer = setTimeout(() => { finish(); reject(this.busy(keys)); this.wake(); }, this.waitMs);
+      const timer = setTimeout(() => { finish(); reject(this.busy(keys, waitMs)); this.wake(); }, waitMs);
       timer.unref?.();
       signal?.addEventListener('abort', aborted, { once: true });
       this.waiters.add(waiter);
@@ -61,11 +62,11 @@ export class InputLock {
     }
   }
 
-  busy(keys) {
+  busy(keys, waitMs = this.waitMs) {
     const key = keys.find(key => this.holders.has(key)) ?? keys[0];
     const holder = this.holders.get(key);
     const who = holder ? ` Session ${holder.session ?? 'unknown'} is running ${holder.tool} (held ${Math.round(performance.now() - holder.since)} ms).` : '';
-    return Object.assign(new Error(`Device ${key} is busy with input from another call.${who} Waited ${this.waitMs} ms; retry when it finishes.`), { name: 'InputLockTimeout' });
+    return Object.assign(new Error(`Device ${key} is busy with input from another call.${who} Waited ${waitMs} ms; retry when it finishes.`), { name: 'InputLockTimeout' });
   }
 
   readSlot(signal) {

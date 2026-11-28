@@ -1,7 +1,7 @@
 import { remoteDevices, nativeRequest, disconnectRemote } from './remote.mjs';
 import { pairingJobs, describe as describeJob, view as jobView } from './pairing/jobs.mjs';
 import { unregisterRemote } from './pairing/registry.mjs';
-import { execute, checkWork, deadline, pause, phase, stopped, stoppingReason, timingCount, timingsSince, work } from './work.mjs';
+import { execute, checkWork, deadline, pause, phase, signal, stopped, stoppingReason, timingCount, timingsSince, work } from './work.mjs';
 import { Coordination, managementTools } from './coordination.mjs';
 import { runBatch } from './batch.mjs';
 import { runCode } from './run-code.mjs';
@@ -12,7 +12,9 @@ import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import { root, stateDir, idevice, noUsbDevice } from './config.mjs';
-import { definitions, stepSchema, sessionTools, approvedTools, hostGated, pairingTools } from './tools.mjs';
+import { definitions, stepSchema, sessionTools, approvedTools, hostGated, pairingTools, screenTools } from './tools.mjs';
+import { runScreenTool } from './stream/tools.mjs';
+import { screens } from './stream/hub.mjs';
 import { platformTool, inventorySimulators, simulatorModels, readSettings, closePlatform } from './platform.mjs';
 import { interaction, promptWarning, readScreen, describeScreen, screenChanged, whatMoved, justReadMs, confirmAfterMs, launchWithinMs, launchPollMs } from './interaction.mjs';
 import { askHuman, approvalMode } from './human.mjs';
@@ -454,8 +456,14 @@ export class DeviceContext {
   // approval mode it was the one asked.
   async dispatch(name, original = {}, { direct = false } = {}) {
     if (pairingTools.has(name)) throw new Error('Call pairing tools directly, not from a batch or run_code.');
+    if (screenTools.has(name)) throw new Error('The screen tools are for the screen view, not for a batch or run_code.');
     if (sessionTools.has(name)) return this.session.dispatchSession(name, original);
     const schema = stepSchema(name);
+    // A tool acting on this device (a batch step or a run_code call included), not a lookup such as
+    // list_devices, nor disconnect_device itself: it keeps a watching screen panel going and lets a
+    // panel reopen after a disconnect.
+    const acting = Boolean(schema) && this.id !== undefined && name !== 'disconnect_device';
+    if (acting) this.coordinator.callStarted(this.id);
     if (!schema) throw new Error(`Unknown tool: ${name}`);
     const { device: _device, ...rest } = original;
     const args = schema.parse(name === 'start_simulator' && this.id !== undefined ? {} : rest);
@@ -500,6 +508,11 @@ export class DeviceContext {
           const target = await this.target();
           if (!target.remote) throw new Error('This device is not configured for RemotePairing.');
           this.changed(target);
+          // A disconnect is meant to stay: its screen panels end first, or their subscription would
+          // start a new helper and reconnect the phone (and its camera and microphone) at once.
+          if (name === 'disconnect_device') screens.closeDevice(target.id);
+          // Reconnecting on purpose lets a panel open the phone again without asking.
+          else screens.disconnected.delete(target.id);
           return text(await nativeRequest(target, { op: name === 'disconnect_device' ? 'disconnect' : 'reconnect' }));
         }
         case 'get_device_info': {
@@ -632,7 +645,11 @@ export class DeviceContext {
           return { ...text(result), ...(unchanged || result.screen_change ? { _meta: { ...(unchanged ? { stop_reason: 'no_change' } : {}), ...(result.screen_change ? { verdict: result.screen_change } : {}) } } : {}) };
         }
       }
-    } finally { if (!sharesTarget) this.resolved=previousResolved; }
+    } finally {
+      if (!sharesTarget) this.resolved=previousResolved;
+      // A long call (a batch, a wait, a recording) is activity until it ends.
+      if (acting) this.coordinator.callEnded(this.id);
+    }
   }
 }
 
@@ -797,6 +814,22 @@ export class Session {
     if (this.coordinator.unavailable.has(matches[0].id)) throw new Error(this.coordinator.unavailable.get(matches[0].id));
     return matches[0].id;
   }
+  // A takeover stops other sessions' work on the device, so it is a gated tool: in ask mode a person
+  // on this computer confirms it as well as in the panel; in host mode the MCP client asked.
+  async approveTakeover(target) {
+    if (approvalMode() !== 'ask') return undefined;
+    const answer = await askHuman(`是否允许在屏幕面板中接管这台 iPhone？\n设备：${target.name ?? target.id}\n这会停止其他会话在这台 iPhone 上正在进行的操作、录屏和模拟位置，并在面板打开期间让其他会话无法使用它。`, 120);
+    return answer.completed ? undefined : { refused: true, message: answer.status === 'timeout' ? 'Nobody confirmed the takeover on the Poki computer in time.' : 'The takeover was declined on the Poki computer.', detail: { approval: answer.status } };
+  }
+  // The device a screen panel shows. Watching needs no lease, so a person can see what the agent does
+  // with a device it holds and take over from there; screen_input checks the lease for each gesture.
+  async screenTarget(query) {
+    const id = await this.resolveDevice(query);
+    if (this.coordinator.unavailable?.has(id)) throw new Error(this.coordinator.unavailable.get(id));
+    const target = (await this.inventory(true)).find(device => device.id === id);
+    if (!target) throw new Error(`Device ${id} is not connected. Use list_devices to see the devices available now.`);
+    return target;
+  }
   // Which devices a call acts on and how to run it. Called in arrival order (Coordination.call).
   async route(name, args) {
     const definition = definitions.find(d => d[0] === name);
@@ -806,6 +839,9 @@ export class Session {
     // No device keys: a pairing call never waits behind a device's queue, and unpair_device's own
     // operation is not among the work it stops on that device.
     if (pairingTools.has(name)) return { keys: [], run: () => this.dispatchPairing(name, args) };
+    // No device keys either: a view's reads must not keep other sessions from taking a lease, and
+    // screen_input takes the device's lease and input lock itself.
+    if (screenTools.has(name)) return { keys: [], run: () => runScreenTool(this, name, args, { signal: signal(), resolve: query => this.screenTarget(query), approve: target => this.approveTakeover(target) }) };
     if (name === 'run_code') {
       const named = args.devices;
       if (!Array.isArray(named) || !named.length) throw new Error('run_code needs devices: the ids from list_devices the script may use.');
@@ -834,6 +870,7 @@ export class Session {
     return {
       dispatch: (tool, toolArgs = {}) => {
         if (pairingTools.has(tool)) throw new Error('Call pairing tools directly, not from run_code.');
+        if (screenTools.has(tool)) throw new Error('The screen tools are for the screen view, not for run_code.');
         if (sessionLevel.has(tool)) return this.dispatchSession(tool, toolArgs);
         if (tool === 'start_simulator' && toolArgs.model !== undefined) throw new Error('run_code cannot create a simulator: create it first with start_simulator and name it in devices.');
         const query = tool === 'start_simulator' ? toolArgs.simulator ?? toolArgs.device : toolArgs.device;
@@ -851,8 +888,8 @@ export class Session {
     checkWork();
     if (name === 'poki_mcp_status') {
       const mode = approvalMode();
-      const deviceTools = definitions.filter(([tool]) => !sessionLevel.has(tool) && !managementTools.has(tool) && !pairingTools.has(tool)).length;
-      return text({ update: await updateNotice(), implementation: `Poki MCP ${version}`, ...await buildInfo(), registered_device_tools: deviceTools, management_tools: managementTools.size, pairing_tools: pairingTools.size, total_tools: definitions.length, devices: (await this.inventory()).length,
+      const deviceTools = definitions.filter(([tool]) => !sessionLevel.has(tool) && !managementTools.has(tool) && !pairingTools.has(tool) && !screenTools.has(tool)).length;
+      return text({ update: await updateNotice(), implementation: `Poki MCP ${version}`, ...await buildInfo(), registered_device_tools: deviceTools, management_tools: managementTools.size, pairing_tools: pairingTools.size, screen_tools: screenTools.size, total_tools: definitions.length, devices: (await this.inventory()).length,
         approval_mode: { allow: 'operator-preapproved', host: 'host', ask: 'ask-human' }[mode], approval_covers: [...approvedTools],
         approval_scope: mode === 'host'
           ? 'Poki shows no dialog. The MCP client decides whether the tools in approval_covers run: they carry destructiveHint/openWorldHint annotations, and a client that runs tools without asking (LobeHub\'s default, for example) runs them unconfirmed. Taps, typing and other input inside apps are not gated.'
@@ -913,6 +950,8 @@ export class Session {
   }
   async removePairing(target, approval) {
     await pairingJobs.cancelForDevice(target.id);
+    // An open screen panel of it ends too, which releases the phone's camera and microphone.
+    screens.closeDevice(target.id, 'device_unpaired');
     // Every session's accepted work, recordings, locations and leases on it end, and their cached
     // state for it goes, so the id no longer resolves anywhere.
     const sessions = new Set([this, ...(this.peers?.() ?? [])]);

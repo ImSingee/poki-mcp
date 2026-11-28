@@ -12,6 +12,8 @@ use serde::Deserialize;
 use serde_json::Value as Json;
 use std::{io::Read, time::Duration};
 
+// The bridge's media session; this helper only holds it open and does not read the streams.
+#[allow(dead_code)]
 #[path = "../src/stream.rs"]
 mod stream;
 // The bridge's own tree reader; this helper uses only part of it.

@@ -75,12 +75,13 @@ test('stdio reaches the authenticated local MCP service and rejects an absent de
           'long_press', 'double_tap', 'drag', 'hide_keyboard', 'press_button',
           'scroll_to', 'terminate_app', 'pinch', 'list_apps', 'get_clipboard',
           'pair_device', 'pairing_status', 'pairing_cancel', 'unpair_device',
+          'show_screen', 'screen_open', 'screen_read', 'screen_close', 'screen_keyframe', 'screen_input', 'screen_takeover', 'screen_rtc_config', 'screen_rtc_offer',
         ].sort());
         const status = await transportClient.callTool({ name: 'poki_mcp_status', arguments: {} });
         assert.ok(!status.isError);
         const statusValue = JSON.parse(status.content[0].text);
         assert.equal(typeof statusValue.devices, 'number');
-        assert.equal(statusValue.total_tools, 66);
+        assert.equal(statusValue.total_tools, 75);
         assert.equal(statusValue.implementation, 'Poki MCP 0.2.0');
         assert.equal(statusValue.commit, 'unknown', 'A packaged copy outside Git must report unknown');
         assert.equal(statusValue.native_build, (await stat(join(f.dir, 'build/poki-native'))).mtime.toISOString());
@@ -89,7 +90,7 @@ test('stdio reaches the authenticated local MCP service and rejects an absent de
     } finally { await httpClient.close(); }
     const fullClient = await f.connect('all');
     const full = await fullClient.listTools();
-    assert.equal(full.tools.length, 66);
+    assert.equal(full.tools.length, 75);
     for (const tool of (await client.listTools()).tools) {
       assert.deepEqual(tool, full.tools.find(candidate => candidate.name === tool.name));
     }
@@ -98,7 +99,8 @@ test('stdio reaches the authenticated local MCP service and rejects an absent de
     const fullNames = full.tools.map(tool => tool.name);
     for (const gone of ['select_device']) assert.ok(!fullNames.includes(gone), `${gone} is gone`);
     await assert.rejects(client.callTool({ name: 'select_device', arguments: { device: 'fixture-phone' } }), /Tool select_device not found/);
-    for (const tool of full.tools.filter(tool => tool.inputSchema.properties?.device && !['list_devices', 'cancel_device', 'pair_device'].includes(tool.name))) {
+    // show_screen without a device opens the screen panel, where the person picks the iPhone.
+    for (const tool of full.tools.filter(tool => tool.inputSchema.properties?.device && !['list_devices', 'cancel_device', 'pair_device', 'show_screen'].includes(tool.name))) {
       assert.ok(tool.inputSchema.required?.includes('device'), `${tool.name} requires device`);
     }
     assert.deepEqual(full.tools.find(tool => tool.name === 'run_code').inputSchema.required.sort(), ['code', 'devices']);
@@ -158,10 +160,10 @@ test('an all-profile HTTP service still lets each stdio client choose its own li
     requestInit: { headers: { Authorization: `Bearer ${endpoint.token}`, 'x-poki-mcp-session': 'all-profile-contract' } },
   }));
   const full = await httpClient.listTools();
-  assert.equal(full.tools.length, 66);
+  assert.equal(full.tools.length, 75);
   assert.deepEqual(await f.a.listTools(), full);
   const defaultClient = await f.connect('');
-  assert.equal((await defaultClient.listTools()).tools.length, 32);
+  assert.equal((await defaultClient.listTools()).tools.length, 41);
   assert.deepEqual(await httpClient.listTools(), full);
   assert.equal(value(await defaultClient.callTool({ name: 'wait', arguments: { device: 'fixture-phone', seconds: 0 } })).waited, 0);
 });
@@ -179,9 +181,10 @@ test('Poki Agent opens its own MCP with the complete catalog even when the paren
     } finally { await client.close(); }
   `], { env: f.env });
   const { tools, result } = JSON.parse(stdout);
-  // Every tool but pairing_cancel, which only the pairing view calls.
-  assert.equal(tools.length, 65);
-  assert.ok(!tools.some(tool => tool.name === 'pairing_cancel'));
+  // Every tool but the ones only a view calls: pairing_cancel and the screen_* tools.
+  assert.equal(tools.length, 66);
+  assert.ok(!tools.some(tool => tool.name === 'pairing_cancel' || tool.name.startsWith('screen_')));
+  assert.ok(tools.some(tool => tool.name === 'show_screen'));
   for (const name of ['list_apps', 'observe_device', 'hide_keyboard', 'acquire_device', 'reconnect_device', 'disconnect_device']) {
     assert.ok(tools.some(tool => tool.name === name), name);
   }

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { work, checkWork, stoppingReason } from './work.mjs';
 import { inputLockFromEnv } from './input-lock.mjs';
-import { definitions, pairingTools } from './tools.mjs';
+import { definitions, pairingTools, screenTools } from './tools.mjs';
 
 const readOnlyTools = new Set(definitions.filter(d => d[3]).map(d => d[0]));
 
@@ -12,7 +12,9 @@ export const managementTools = new Set(['acquire_device', 'renew_device', 'relea
 // frames, a pairing job's progress) or feed a view's own input channel, where waiting behind a
 // long batch would stall the view. The pairing tools are such calls: they change this computer's
 // pairing state, and unpair_device ends a device's queued work itself.
-export const unqueuedTools = new Set(pairingTools);
+// The screen tools too: a view's frame reads and gestures must not wait behind an agent's batch
+// (screen_input takes the device's lease and input lock itself, with a short wait).
+export const unqueuedTools = new Set([...pairingTools, ...screenTools]);
 
 const text = value => ({ content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] });
 const failure = error => ({ isError: true, ...text(error.message), _meta: { stop_reason: error.name === 'TimeoutError' ? 'timeout' : error.name === 'AbortError' ? stoppingReason(error) : 'error' } });
@@ -24,13 +26,31 @@ const failure = error => ({ isError: true, ...text(error.message), _meta: { stop
 //   read slot instead and runs beside another session's input (input-lock.mjs).
 // - A lease keeps every other session off its device. A session may hold leases on several devices.
 export class Coordination {
-  leases = new Map(); operations = new Set(); revisions = new Map(); scenes = new Map();
+  // deviceCalls: per device, the tool calls acting on it (not a lookup such as list_devices): how
+  // many run now, and when the latest started and ended. The screen panel's idle pause and its
+  // reopening after a disconnect go by them.
+  leases = new Map(); operations = new Set(); revisions = new Map(); scenes = new Map(); deviceCalls = new Map();
   // Devices being unpaired: no session may resolve, lease or act on them until the removal ends.
   unavailable = new Map();
   inputLock = inputLockFromEnv();
   unqueued = unqueuedTools;
   revision(id) { return this.revisions.get(id) ?? 0; }
   changed(id) { this.revisions.set(id, this.revision(id) + 1); }
+  callStarted(id) {
+    const calls = this.deviceCalls.get(id) ?? { running: 0 };
+    calls.running++; calls.startedAt = performance.now();
+    this.deviceCalls.set(id, calls);
+  }
+  callEnded(id) {
+    const calls = this.deviceCalls.get(id);
+    if (!calls) return;
+    calls.running = Math.max(0, calls.running - 1); calls.endedAt = performance.now();
+  }
+  // When a tool last acted on the device: now while one runs, however long it takes, else when the
+  // last one ended (performance.now() time; undefined if none did).
+  lastActive(id) { const calls = this.deviceCalls.get(id); return calls?.running ? performance.now() : calls?.endedAt; }
+  // When the latest tool call on the device started.
+  lastStarted(id) { return this.deviceCalls.get(id)?.startedAt; }
   observeFrame(id, data) { const previous = this.scenes.get(id); if (previous && !previous.equals(data)) this.changed(id); this.scenes.set(id, data); }
   // The leases this session holds, one per device.
   owned(session) { return [...this.leases.values()].filter(lease => lease.owner === session); }
@@ -42,14 +62,14 @@ export class Coordination {
     checkWork();
     if (this.unavailable.has(target.id)) throw new Error(this.unavailable.get(target.id));
     const lease = this.leases.get(target.id);
-    if (lease && (lease.owner !== session || lease.state !== 'active' || performance.now() >= lease.until)) throw new Error('Device is occupied or being released.');
+    if (lease && (lease.owner !== session || lease.state !== 'active' || performance.now() >= lease.until)) throw new Error(lease.owner.holdNotice ?? 'Device is occupied or being released.');
     const operation = work.getStore()?.operation;
     if (operation) operation.devices.add(target.id);
   }
   async acquire(session, target, ttl) {
     this.access(session, target);
     if (this.leases.get(target.id)?.owner === session) throw new Error(`This session already holds a lease on ${target.id}. Use renew_device.`);
-    if ([...this.operations].some(op => op.owner !== session && op.devices.has(target.id))) throw new Error('Device has an active operation. Retry after it completes.');
+    if ([...this.operations].some(op => op.owner !== session && op.devices.has(target.id) && !op.yieldsToLease)) throw new Error('Device has an active operation. Retry after it completes.');
     // A previous compatibility recording/location is owned work too.
     for (const owner of session.peers?.() ?? []) if (owner !== session && owner.backgroundDevices.has(target.id)) throw new Error('Device has background work in another session. Its owner must stop or cancel it first.');
     const lease = { lease_id: randomUUID(), device: target.id, owner: session, state: 'active' };

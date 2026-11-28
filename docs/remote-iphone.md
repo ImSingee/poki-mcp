@@ -120,6 +120,10 @@ Mac MCP's `get_clipboard` reads text and reports clipboard types over the existi
 
 Device-management paths such as app installation, process termination, Settings deep links, recording, location simulation, and standalone clipboard writes are not supported by this transport. They report a transport limitation instead of silently using a local connection.
 
+### Live screen
+
+The screen panel (`show_screen`, see [the live screen](tools.md#live-screen)) streams over the same RemotePairing tunnel as input: the iPhone sends its screen as HEVC on the displayservice session that input already uses, so it needs the developer disk image like input does. While the panel is open the session stays open, an input skips the one-second warmup, and **the iPhone's camera and microphone are busy**; closing the panel releases them a second later. The phone's bitrate, its key frame interval and whether it answers keyframe requests over Wi-Fi have not been measured yet; a request that goes unanswered restarts the media session after two seconds, which always begins with a key frame.
+
 ## Remove a pairing, or return to USB or local Wi-Fi
 
 Call `unpair_device` with the iPhone's id as `device`. It stops that device's work in every session, closes its RemotePairing helper, and deletes its `remote-devices.json` entry and its `remote/DEVICE_ID/` directory (configuration and pairing record). The device leaves `list_devices` at once; no restart is needed. Connect the phone over USB or local Wi-Fi to use it that way, or pair it again with `pair_device`. Merely plugging in USB does not override a remote entry, so remove the entry first. The iPhone keeps its own record of this computer until you remove it there; the reply's `phone_cleanup` says how.

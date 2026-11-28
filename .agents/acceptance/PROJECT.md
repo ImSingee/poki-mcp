@@ -7,6 +7,7 @@ Poki MCP is a Node.js MCP daemon (`src/daemon.mjs`) plus a stdio bridge (`src/st
 ## 2. Environment
 
 - **Start the view host (mock MCP Apps host):** `node test/support/view-host.mjs --stub --port <free port>` from the repo root. It prints `{"event":"ready","url":...}`. It runs a real Poki stdio server and daemon from a temp copy of the worktree, with a stand-in `poki-native` (`test/support/pairing-native.mjs`) and one pre-paired iPhone "Lab iPhone".
+- **Screen panel:** add `--view screen` (`node test/support/view-host.mjs --stub --view screen --port <free port>`). The header button becomes "Agent calls show_screen"; the view is `ui://poki/screen` in fullscreen mode (container height 900). The stand-in Lab iPhone sends the sample stream (180×390 colour bars, 8 frames looped at 10 fps, a key frame every 4) over `media_subscribe`; every input the view sends and `media_subscribe` / `media_unsubscribed` (the phone's camera and microphone held / released) land in `commands.jsonl` in the temp copy (`root` in the ready line). `POKI_SCREEN_RTC=0` in the view host's environment keeps the panel on tool calls; otherwise it uses WebRTC to the local daemon.
 - **Stop:** SIGTERM the process; it removes its temp copy and stub helpers.
 - **Required services:** none.
 - **Already-running detection:** pick a free port; do not reuse a port another run holds.
@@ -34,5 +35,5 @@ None beyond the host's own buttons and `/call` endpoint.
 
 ## 6. Known constraints
 
-- Real iPhone pairing, real DDI install over the RemotePairing tunnel, and LobeHub's own MCP Apps rendering are not exercised; the stand-in plays the phone. Disclose this in every report.
+- Real iPhone pairing, real DDI install over the RemotePairing tunnel, a real iPhone's screen video, and LobeHub's own MCP Apps rendering are not exercised; the stand-in plays the phone. Disclose this in every report.
 - Unit/Playwright/cargo tests are not acceptance checks.

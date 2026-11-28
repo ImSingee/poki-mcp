@@ -10,6 +10,7 @@ mod pair_host;
 mod pasteboard;
 mod remote;
 mod stream;
+mod video;
 
 use gesture::{Drag, Pinch, Strokes, pinch_contacts};
 use idevice::{
@@ -126,12 +127,28 @@ struct InputMedia {
     ready_at: tokio::time::Instant,
     last_input: tokio::time::Instant,
     last_activity: tokio::time::Instant,
+    /// The display the video shows; a fold or panel switch restarts the session (remote.rs).
+    display_id: i64,
+    /// Receives this session's video. Subscribers keep the session open (`streaming`).
+    hub: std::sync::Arc<video::VideoHub>,
+    /// False once the video receiver stopped: the session no longer delivers frames.
+    alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl InputMedia {
+    /// Someone watches the screen: the session stays open however long input is idle.
+    fn streaming(&self) -> bool {
+        self.hub.subscribers() > 0
+    }
+
+    fn alive(&self) -> bool {
+        self.alive.load(std::sync::atomic::Ordering::Acquire)
+    }
+
     async fn connect(
         adapter: &mut idevice::tcp::handle::AdapterHandle,
         rsd: &mut RsdHandshake,
+        hub: &std::sync::Arc<video::VideoHub>,
     ) -> Result<Self> {
         let display = display::active(adapter, rsd).await?;
         let display_id = display::route(display.as_ref()).media_display;
@@ -151,10 +168,20 @@ impl InputMedia {
                 }
             })?;
         let mut receivers = tokio::task::JoinSet::new();
-        // The transport queues UDP without a bound. Consume packets while holding the input gate open.
-        for socket in [stream.audio_udp, stream.video_udp] {
-            receivers.spawn(async move { while socket.recv().await.is_ok() {} });
-        }
+        // The transport queues UDP without a bound. Consume packets while holding the input gate
+        // open: audio is discarded, video goes to the screen's subscribers.
+        let audio = stream.audio_udp;
+        receivers.spawn(async move { while audio.recv().await.is_ok() {} });
+        let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        receivers.spawn(video::pump(
+            video::Source::Udp(stream.video_udp),
+            hub.clone(),
+            video::Feedback {
+                our_ssrc: stream.our_ssrc,
+                sender_port: stream.video_sender_port,
+            },
+            alive.clone(),
+        ));
         trace("input media connected");
         let ready_at = tokio::time::Instant::now() + Duration::from_millis(1000);
         Ok(Self {
@@ -163,6 +190,9 @@ impl InputMedia {
             ready_at,
             last_input: ready_at,
             last_activity: ready_at,
+            display_id,
+            hub: hub.clone(),
+            alive,
         })
     }
 }
@@ -703,8 +733,16 @@ async fn execute(udid: &str, request: Request) -> Result<Value> {
     };
     let launch = matches!(request, Request::LaunchApp(_));
     let mut media = None;
-    let result =
-        execute_connected(&mut adapter, &mut rsd, Some(&provider), request, &mut media).await;
+    let hub = std::sync::Arc::new(video::VideoHub::new());
+    let result = execute_connected(
+        &mut adapter,
+        &mut rsd,
+        Some(&provider),
+        request,
+        &mut media,
+        &hub,
+    )
+    .await;
     let closed = close_input(&mut media).await;
     let output = match result {
         Err(error) if launch => apps::not_sent(error),
@@ -720,10 +758,14 @@ async fn execute_connected(
     provider: Option<&dyn idevice::provider::IdeviceProvider>,
     request: Request,
     media: &mut Option<InputMedia>,
+    hub: &std::sync::Arc<video::VideoHub>,
 ) -> Result<Value> {
     if !request.uses_input_media() {
+        // A read long after the last input releases the session, unless someone watches the
+        // screen through it.
         let max_hold = media
             .as_ref()
+            .filter(|m| !m.streaming())
             .map(|m| m.last_input + remote::INPUT_MEDIA_MAX_READ_HOLD);
         let op = async {
             if let Request::LaunchApp(request) = request {
@@ -825,7 +867,7 @@ async fn execute_connected(
     }
     if media.is_none() {
         *media = Some(
-            InputMedia::connect(adapter, rsd)
+            InputMedia::connect(adapter, rsd, hub)
                 .await
                 .map_err(not_sent_error)?,
         );

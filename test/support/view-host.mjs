@@ -4,12 +4,16 @@
 // allow-same-origin (origin null, as in LobeHub), and every resources/read and tools/call sent to a
 // real Poki stdio server (src/stdio.mjs) through MCP.
 //
-//   node test/support/view-host.mjs [--port 4790] [--stub]
+//   node test/support/view-host.mjs [--port 4790] [--stub [--two-phones]] [--view pairing|screen]
 //   GET /calls lists every tools/call with its time, its source (agent, view, direct) and the job state.
+// "Hide view" hides the mounted view with display:none, as LobeHub does with a side-panel tab not shown.
 //
 // --stub runs Poki from a temporary copy of this checkout with a stand-in poki-native
 // (test/support/pairing-native.mjs) and one iPhone already paired, so pairing can be walked through
 // without an iPhone: the page's "iPhone accepts the PIN" button plays the phone's part.
+// --view screen opens the screen panel (show_screen) instead; with --stub the paired iPhone sends
+// the sample stream in native/bridge/tests/fixtures, and its taps are logged to commands.jsonl.
+// --two-phones (with --stub) pairs a second iPhone, Desk iPhone, for choosing another phone in a view.
 import http from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, cp, mkdir, writeFile, symlink, rm } from 'node:fs/promises';
@@ -22,7 +26,9 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { root } from '../../src/config.mjs';
 import { pairingNative } from './pairing-native.mjs';
 
-const { values: options } = parseArgs({ options: { port: { type: 'string', default: '4790' }, stub: { type: 'boolean', default: false } } });
+const { values: options } = parseArgs({ options: { port: { type: 'string', default: '4790' }, stub: { type: 'boolean', default: false }, view: { type: 'string', default: 'pairing' }, 'two-phones': { type: 'boolean', default: false } } });
+const shown = { pairing: { uri: 'ui://poki/pairing', tool: 'pair_device', args: {}, displayMode: 'inline' }, screen: { uri: 'ui://poki/screen', tool: 'show_screen', args: options.stub ? { device: 'lab-iphone' } : {}, displayMode: 'fullscreen' } }[options.view];
+if (!shown) throw new Error('--view is pairing or screen.');
 
 let pokiRoot = root, env = { ...process.env }, stubDir;
 if (options.stub) {
@@ -30,7 +36,7 @@ if (options.stub) {
   await cp(join(root, 'src'), join(stubDir, 'src'), { recursive: true });
   await cp(join(root, 'package.json'), join(stubDir, 'package.json'));
   await symlink(join(root, 'node_modules'), join(stubDir, 'node_modules'));
-  for (const directory of ['build', 'bin', 'state/remote/lab-iphone', 'ddi']) await mkdir(join(stubDir, directory), { recursive: true });
+  for (const directory of ['build', 'bin', 'state/remote/lab-iphone', 'state/remote/desk-iphone', 'ddi']) await mkdir(join(stubDir, directory), { recursive: true });
   await writeFile(join(stubDir, 'build/poki-native'), pairingNative, { mode: 0o755 });
   // No USB devices and no simulators: only the wireless ones.
   await writeFile(join(stubDir, 'bin/python3'), '#!/bin/sh\necho "[]"\n', { mode: 0o755 });
@@ -41,16 +47,26 @@ if (options.stub) {
   await writeFile(join(stubDir, 'pairing.json'), JSON.stringify({
     pairHost: [{ event: 'advertising', port: 53124 }, { event: 'connected', peer: '192.0.2.27' }, { event: 'pin', pin: '482916' }, { await: 'accept' },
       { event: 'paired', device: { udid: 'new-iphone', name: 'New iPhone', model: 'iPhone17,1' }, peer: '192.0.2.27' }],
-    names: { 'lab-iphone': 'Lab iPhone', 'new-iphone': 'New iPhone' },
+    names: { 'lab-iphone': 'Lab iPhone', 'desk-iphone': 'Desk iPhone', 'new-iphone': 'New iPhone' },
     // Long enough to see the view's "Preparing developer services" step.
-    remote: { installDelayMs: 4000 },
+    remote: { installDelayMs: 4000, displayService: true, video: join(stubDir, 'video.json') },
   }));
+  const { sampleFrames } = await import('../stream-fixture.mjs');
+  await writeFile(join(stubDir, 'video.json'), JSON.stringify(sampleFrames().map(f => ({ key: f.key, config: f.config?.toString('base64'), data: f.data.toString('base64') }))));
   const labConfig = join(stubDir, 'state/remote/lab-iphone/config.json');
   await writeFile(labConfig, JSON.stringify({ id: 'lab-iphone', host: '192.0.2.10', port: 49152, pairing_file: join(stubDir, 'state/remote/lab-iphone/pairing.plist') }));
-  await writeFile(join(stubDir, 'state/remote-devices.json'), JSON.stringify([{ id: 'lab-iphone', name: 'Lab iPhone', config_path: labConfig }]));
+  const paired = [{ id: 'lab-iphone', name: 'Lab iPhone', config_path: labConfig }];
+  if (options['two-phones']) {
+    const deskConfig = join(stubDir, 'state/remote/desk-iphone/config.json');
+    await writeFile(deskConfig, JSON.stringify({ id: 'desk-iphone', host: '192.0.2.11', port: 49152, pairing_file: join(stubDir, 'state/remote/desk-iphone/pairing.plist') }));
+    paired.push({ id: 'desk-iphone', name: 'Desk iPhone', config_path: deskConfig });
+  }
+  await writeFile(join(stubDir, 'state/remote-devices.json'), JSON.stringify(paired));
   pokiRoot = stubDir;
   env = { ...env, HOME: stubDir, PATH: `${join(stubDir, 'bin')}:${process.env.PATH}`, POKI_MCP_STATE_DIR: join(stubDir, 'state'), POKI_NO_UPDATE_CHECK: '1',
     POKI_DDI_DIR: join(stubDir, 'ddi'), FIXTURE_STATE: join(stubDir, 'fixture.json'), FIXTURE_LOG: join(stubDir, 'commands.jsonl'), POKI_MCP_APPROVAL_MODE: 'host',
+    // No STUN server: WebRTC uses this computer's host candidates, with no public server involved.
+    POKI_STUN_URL: '',
     // The service the stdio server starts gets only the variables it needs; the stand-in needs these.
     POKI_DAEMON_ENV: 'FIXTURE_STATE,FIXTURE_LOG' };
 }
@@ -75,9 +91,10 @@ const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta n
   #log { font: 11px ui-monospace, monospace; color: #555; padding: 0 16px 16px; white-space: pre-wrap; }
 </style></head><body>
 <header>
-  <button id="call">Agent calls pair_device</button>
+  <button id="call">Agent calls ${shown.tool}</button>
   <button id="remount" disabled>Remount view</button>
   <button id="unmount" disabled>Unmount view</button>
+  <button id="hide" disabled>Hide view</button>
   ${options.stub ? '<button id="accept">iPhone accepts the PIN</button>' : ''}
   <label>Width <select id="width"><option>360</option><option>520</option><option selected>760</option></select></label>
   <label>Theme <select id="theme"><option>light</option><option>dark</option></select></label>
@@ -93,27 +110,34 @@ const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta n
     const slot = document.getElementById('slot');
     slot.style.width = document.getElementById('width').value + 'px';
     slot.replaceChildren();
-    viewHtml ??= (await post('/resource', { uri: 'ui://poki/pairing' })).contents[0].text;
+    viewHtml ??= (await post('/resource', { uri: ${JSON.stringify(shown.uri)} })).contents[0].text;
     const frame = document.createElement('iframe');
     frame.setAttribute('sandbox', 'allow-scripts allow-forms');
     frame.srcdoc = viewHtml;
     slot.append(frame);
     const theme = document.getElementById('theme').value;
-    bridge = new MockHost.AppBridge(null, { name: 'poki-view-host', version: '1' }, { serverTools: {} }, { hostContext: { theme, displayMode: 'inline', platform: 'web' } });
+    bridge = new MockHost.AppBridge(null, { name: 'poki-view-host', version: '1' }, { serverTools: {} }, { hostContext: { theme, displayMode: ${JSON.stringify(shown.displayMode)}, platform: 'web', ...(${JSON.stringify(shown.displayMode)} === 'fullscreen' ? { containerDimensions: { height: 900, width: Number(document.getElementById('width').value) } } : {}) } });
     bridge.oncalltool = async params => { log('view → ' + params.name + ' ' + JSON.stringify(params.arguments ?? {})); return post('/call', { ...params, source: 'view' }); };
     bridge.onsizechange = ({ height }) => { if (height) frame.style.height = height + 'px'; };
     bridge.oninitialized = () => { if (lastResult) bridge.sendToolResult(lastResult); };
     await bridge.connect(new MockHost.PostMessageTransport(frame.contentWindow, frame.contentWindow));
-    document.getElementById('remount').disabled = document.getElementById('unmount').disabled = false;
+    document.getElementById('remount').disabled = document.getElementById('unmount').disabled = document.getElementById('hide').disabled = false;
   }
   document.getElementById('call').onclick = async () => {
-    log('agent → pair_device');
-    lastResult = await post('/call', { name: 'pair_device', arguments: {}, source: 'agent' });
+    log('agent → ${shown.tool}');
+    lastResult = await post('/call', { name: ${JSON.stringify(shown.tool)}, arguments: ${JSON.stringify(shown.args)}, source: 'agent' });
     document.getElementById('text').textContent = (lastResult.content ?? []).filter(b => b.type === 'text').map(b => b.text)[0] ?? '';
     await mount();
   };
   document.getElementById('remount').onclick = mount;
   document.getElementById('unmount').onclick = () => { document.getElementById('slot').replaceChildren(); document.getElementById('unmount').disabled = true; };
+  // As LobeHub does with a side-panel tab that is not shown: the view stays mounted, display:none.
+  document.getElementById('hide').onclick = () => {
+    const slot = document.getElementById('slot'), hidden = slot.style.display !== 'none';
+    slot.style.display = hidden ? 'none' : '';
+    document.getElementById('hide').textContent = hidden ? 'Show view' : 'Hide view';
+    log(hidden ? 'view hidden (still mounted)' : 'view shown');
+  };
   document.getElementById('accept')?.addEventListener('click', async () => { await post('/stub/accept'); log('iPhone accepted the PIN'); });
   for (const id of ['width', 'theme']) document.getElementById(id).onchange = mount;
   window.mountView = mount;

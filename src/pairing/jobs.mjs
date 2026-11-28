@@ -13,6 +13,7 @@ import { ensureDeveloperImage } from './ddi.mjs';
 import { work } from '../work.mjs';
 import { nativeRequest as helperRequest, disconnectRemote } from '../remote.mjs';
 import { unregisterRemote, registeredTargets } from './registry.mjs';
+import { screens } from '../stream/hub.mjs';
 
 // A helper request on behalf of a job, stopped by the job's own signal (no tool call owns it).
 const jobRequest = (target, request, options, signal) => work.run({ signal, timings: [] }, () => helperRequest(target, request, options));
@@ -171,7 +172,9 @@ export class PairingJobs {
       }
       let device;
       try {
-        if (previous) await this.disconnect(previous).catch(() => {});
+        // Its screen panels end first, as for disconnect_device: their subscription would otherwise
+        // start a helper from the configuration being replaced.
+        if (previous) { screens.closeDevice(previous.id, 'device_repairing'); await this.disconnect(previous).catch(() => {}); }
         try { device = await this.complete(result, { pairing: staging.pairing, stateDir: this.stateDir }); }
         catch (error) { held?.(); return this.fail(job, 'registering', { reason: 'registration_failed', error: error.message, action: 'Pass the iPhone\'s .local name or LAN address: run node bin/prepare-remote.mjs --wireless HOST on this computer.' }); }
         job.saved_new = true;

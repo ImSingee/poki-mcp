@@ -244,3 +244,68 @@ export async function nativeRequest(target, request, { timeoutMs = 120000 } = {}
     });
   }));
 }
+
+// media_subscribe: the phone's screen video over its own connection to the helper. Resolves with
+// the helper's reply once subscribed; then onFrame receives each frame until either side closes
+// (`closed` resolves). Frames: u32 length | u8 flags | u64 seq | u64 pts_us | u16 config length |
+// config | Annex-B (native/bridge/src/video.rs).
+// The helper opens the phone's media session before it replies, which can take as long as opening
+// a tunnel (25 s). A helper that never replies, or a caller that gives up, ends the attempt.
+export const SUBSCRIBE_TIMEOUT_MS = 40000;
+export async function nativeSubscribe(target, onFrame, { signal, timeoutMs = SUBSCRIBE_TIMEOUT_MS } = {}) {
+  signal?.throwIfAborted();
+  const { socket } = await socketFor(target);
+  let buffer = Buffer.alloc(0), stage = 'hello', resolveReply, rejectReply, resolveClosed;
+  const replied = new Promise((resolve, reject) => { resolveReply = resolve; rejectReply = reject; });
+  const closed = new Promise(resolve => { resolveClosed = resolve; });
+  const fail = error => { rejectReply(error); socket.destroy(); };
+  const timer = setTimeout(() => fail(new DOMException('The screen video did not start in time.', 'TimeoutError')), timeoutMs);
+  const aborted = () => fail(signal.reason);
+  signal?.addEventListener('abort', aborted, { once: true });
+  // Only the handshake: once subscribed, the subscription belongs to every viewer of the device.
+  replied.finally(() => { clearTimeout(timer); signal?.removeEventListener('abort', aborted); }).catch(() => {});
+  if (signal?.aborted) aborted();
+  socket.on('data', chunk => {
+    buffer = buffer.length ? Buffer.concat([buffer, chunk]) : chunk;
+    while (stage !== 'frames') {
+      const newline = buffer.indexOf(10);
+      if (newline < 0) { if (buffer.length > 65536) fail(new Error('Invalid native helper reply.')); return; }
+      let value;
+      try { value = JSON.parse(buffer.subarray(0, newline).toString('utf8')); } catch { fail(new Error('Invalid native helper reply.')); return; }
+      buffer = buffer.subarray(newline + 1);
+      if (stage === 'hello') {
+        if (!Number.isSafeInteger(value.pid) || value.pid <= 1) { fail(new Error('Invalid native helper identity.')); return; }
+        stage = 'reply';
+        socket.write(JSON.stringify({ op: 'media_subscribe' }) + '\n');
+      } else {
+        if (!value.subscribed) { fail(Object.assign(new Error(value.error ?? 'The screen video could not start.'), { reason: value.reason })); return; }
+        stage = 'frames';
+        resolveReply(value);
+      }
+    }
+    while (buffer.length >= 4) {
+      const length = buffer.readUInt32BE(0);
+      if (length < 19 || length > 64 * 1024 * 1024) { socket.destroy(new Error('Invalid screen frame.')); return; }
+      if (buffer.length < 4 + length) return;
+      const frame = buffer.subarray(4, 4 + length);
+      buffer = buffer.subarray(4 + length);
+      const flags = frame[0], configLength = frame.readUInt16BE(17);
+      if (19 + configLength > frame.length) { socket.destroy(new Error('Invalid screen frame.')); return; }
+      onFrame({
+        seq: Number(frame.readBigUInt64BE(1)), pts_us: Number(frame.readBigUInt64BE(9)),
+        key: Boolean(flags & 1), reset: Boolean(flags & 4),
+        config: flags & 2 ? Buffer.from(frame.subarray(19, 19 + configLength)) : undefined,
+        data: Buffer.from(frame.subarray(19 + configLength)),
+      });
+    }
+  });
+  socket.on('error', error => fail(error));
+  socket.on('close', () => { rejectReply(new Error('The native helper closed the screen video.')); resolveClosed(); });
+  const reply = await replied;
+  return { reply, closed, close: () => socket.destroy() };
+}
+
+export function nativeKeyframe(target) {
+  return nativeRequest(target, { op: 'media_keyframe' });
+}
+

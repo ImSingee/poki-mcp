@@ -22,6 +22,18 @@ Relevant protocol and interface references at that revision include:
 
 Poki MCP's simulator helper is a local implementation using these protocol references. It does not bundle the idb executable or Apple frameworks. The idb license is retained to preserve attribution for the referenced implementation and interfaces.
 
+## Lody
+
+Three files of the screen panel are adapted from [ImSingee/Lody](https://github.com/ImSingee/Lody)'s device preview (`apps/cli/src/device-preview`) at commit `7ae04272dd8cb19598929ca16553f387e3a3fe87`, licensed under the Apache License 2.0. Its complete text is retained in [third_party/LICENSE.lody](third_party/LICENSE.lody); Lody has no NOTICE file. Each file's header names its sources and says what Poki changed.
+
+| Poki file | Adapted from | What it takes |
+| --- | --- | --- |
+| [src/stream/flow.mjs](src/stream/flow.mjs) | `h264-flow.ts`, `frame-flow.ts` | Credit by acknowledgement, dropping a backlog to the next key frame, at most one key frame request a second, adaptive H.264 bitrate |
+| [src/stream/rtc.mjs](src/stream/rtc.mjs) | `webrtc.ts`, `webrtc-protocol.ts` | The `LAVC`/`LODY` packets, their 16 KB chunking, the ICE server URL check, the two ordered DataChannels |
+| [src/views/screen.html](src/views/screen.html) | `viewer-webrtc.ts`, `viewer-h264.ts`, `viewer-media.ts`, `viewer.ts` | The browser peer and chunk reassembly, the WebCodecs decoder's progress watchdog and recovery limit, one retained picture drawn on an animation frame, acknowledging decoded frames |
+
+The rest of the screen panel (the native video hub, the daemon's hub, tracks, transcoding and tools) is Poki's own.
+
 ## BlueBubbles Server
 
 The optional `bin/setup-channels` command downloads the unmodified [BlueBubbles Server 1.9.12](https://github.com/BlueBubblesApp/bluebubbles-server/releases/tag/v1.9.12) release from BlueBubblesApp. BlueBubbles is licensed under Apache-2.0; its complete upstream license is retained in [docs/licenses/BlueBubbles-LICENSE](docs/licenses/BlueBubbles-LICENSE). Its packaged dependencies retain their respective notices. The installer pins the official release asset's SHA-256 digest and preserves the app bundle, including its third-party notices. The application archive is not stored in this repository.
@@ -35,6 +47,9 @@ The exact installed versions come from `package-lock.json`. These packages provi
 | [Model Context Protocol TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk) | `@modelcontextprotocol/client`, `core`, `server` 2.4.0; `@modelcontextprotocol/node` 2.1.2 | Package metadata declares Apache-2.0. The upstream license also retains MIT for contributions without relicensing consent; its complete text is preserved in [third_party/LICENSE.typescript-sdk](third_party/LICENSE.typescript-sdk). |
 | [sharp](https://github.com/lovell/sharp/tree/51a990faa26ade5586a4934ac9673c98d8893326) | `sharp` and applicable `@img/sharp-*` packages 0.35.5 | Apache-2.0; full text in [third_party/LICENSE.sharp](third_party/LICENSE.sharp). |
 | [Zod](https://github.com/colinhacks/zod/tree/b500a2ee95134f81d74da7911d7378dd2853d042) | `zod` 4.6.7 | MIT; full text in [third_party/LICENSE.zod](third_party/LICENSE.zod). |
+| [werift](https://github.com/shinyoshiaki/werift-webrtc) | `werift` 0.27.0, the screen panel's WebRTC peer | MIT; full text in [third_party/LICENSE.werift](third_party/LICENSE.werift). The package also ships `THIRD_PARTY_LICENSES_LIBWEBRTC.txt` for the libwebrtc code it ports, which `npm ci` installs with it. |
+
+werift brings ten packages of its own, all listed in the [dependency inventory](docs/third-party-dependencies.md#npm-packages). One of them, [mediabunny](https://github.com/Vanilagy/mediabunny) 1.66.5, is under the Mozilla Public License 2.0, a file-level copyleft license: Poki installs it unmodified from the npm registry, with its license file, and does not change or copy its source files. Its source is available at that repository. The others are under MIT or BSD-3-Clause.
 
 The [dependency inventory](docs/third-party-dependencies.md#npm-packages) names every locked npm package, its source repository, declared license and platform conditions. It includes transitive packages such as Hono, EventSource, jose and cross-spawn.
 

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, writeFile, readFile, stat, access } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, stat, access, mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fixture } from './fixture.mjs';
@@ -720,4 +721,98 @@ test('the service\'s pairing jobs wait for the device\'s input lock that a runni
   assert.equal((await f.events()).filter(e => e.remote === 'install_ddi').length, 0, 'nothing was installed under the script');
   const finished = await script;
   assert.ok(!finished.isError, JSON.stringify(finished));
+});
+
+test('an open screen panel keeps the daemon busy, and unpairing its iPhone ends the panel and releases the media session', { timeout: 60000 }, async t => {
+  const { f, data, call } = await pairingFixture(t, { registered: ['lab-phone'], remote: { displayService: true, video: await sampleVideo(t) } });
+  const opened = data(await call('screen_open', { device: 'lab-phone', codecs: ['hevc'] }));
+  const first = data(await call('screen_read', { stream: opened.stream, wait_ms: 1000 }));
+  assert.ok(first.frames.length, 'no frames from the stand-in phone');
+  // The daemon reports the stream as work it must not drop (an automatic daemon does not idle-exit).
+  const endpoint = JSON.parse(await readFile(join(f.dir, 'state/mcp.json'), 'utf8'));
+  const version = await (await fetch(endpoint.url.replace(/\/mcp$/, '/version'), { headers: { authorization: `Bearer ${endpoint.token}` } })).json();
+  assert.ok(version.busy_reasons.some(reason => /screen stream/.test(reason)), JSON.stringify(version.busy_reasons));
+  data(await call('unpair_device', { device: 'lab-phone' }));
+  const after = await call('screen_read', { stream: opened.stream, wait_ms: 0 });
+  assert.equal(after.structuredContent?.reason, 'device_unpaired', JSON.stringify(after));
+  const events = await f.events();
+  assert.ok(events.some(e => e.remote === 'media_unsubscribed'), 'the helper kept the media session for an unpaired phone');
+});
+
+test('screen tools are refused inside batch_commands and run_code with the documented message, and the takeover is gated', { timeout: 60000 }, async t => {
+  const { f, call } = await pairingFixture(t);
+  // A later step that is a screen tool: refused up front, not an internal error.
+  const batch = await call('batch_commands', { device: 'fixture-phone', commands: [{ tool: 'wait', arguments: { seconds: 0 } }, { tool: 'show_screen', arguments: {} }] });
+  assert.equal(batch.isError, true);
+  assert.match(JSON.stringify(batch), /screen tools are for the screen view, not for a batch or run_code/);
+  assert.doesNotMatch(JSON.stringify(batch), /TypeError|is not a function/);
+  const script = await call('run_code', { devices: ['fixture-phone'], code: "return await tools.screen_takeover({ stream: 'x', token: 'y'.repeat(20) });" });
+  assert.equal(script.isError, true);
+  assert.match(JSON.stringify(script), /screen tools are for the screen view/);
+  const status = JSON.parse((await call('poki_mcp_status')).content[0].text);
+  assert.ok(status.approval_covers.includes('screen_takeover'), JSON.stringify(status.approval_covers));
+  void f;
+});
+
+const sampleVideo = async t => {
+  const { sampleFrames } = await import('./stream-fixture.mjs');
+  const { rm } = await import('node:fs/promises');
+  const directory = await mkdtemp(join(tmpdir(), 'poki-video-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, 'video.json');
+  await writeFile(path, JSON.stringify(sampleFrames().map(frame => ({ key: frame.key, config: frame.config?.toString('base64'), data: frame.data.toString('base64') }))));
+  return path;
+};
+
+test('pairing a phone again ends its screen panels first, so they do not reconnect it with the old configuration', { timeout: 60000 }, async t => {
+  const { data, call, until, release } = await pairingFixture(t, { remote: { displayService: true, video: await sampleVideo(t) } });
+  const first = data(await call('pair_device')).job.job;
+  await release('accept');
+  await until(first, j => j.terminal);
+  const opened = data(await call('screen_open', { device: 'wireless-27', codecs: ['hevc'] }));
+  assert.ok(data(await call('screen_read', { stream: opened.stream, wait_ms: 1000 })).frames.length);
+  const second = data(await call('pair_device')).job.job;
+  await until(second, j => j.state === 'pin');
+  await release('accept');
+  await until(second, j => j.terminal);
+  const after = await call('screen_read', { stream: opened.stream, wait_ms: 0 });
+  assert.equal(after.structuredContent?.reason, 'device_repairing', JSON.stringify(after));
+  // The panel opens it again only when the person asks.
+  const reopened = await call('screen_open', { device: 'wireless-27', codecs: ['hevc'] });
+  assert.equal(reopened.structuredContent?.reason, 'device_repairing', JSON.stringify(reopened));
+  assert.ok(!(await call('screen_open', { device: 'wireless-27', codecs: ['hevc'], reconnect: true })).isError);
+});
+
+test('the daemon pauses an idle screen stream, but not while tools act on the phone', { timeout: 60000 }, async t => {
+  // A pause after 2.4 s without activity.
+  const { data, call } = await pairingFixture(t, { registered: ['lab-phone'], remote: { displayService: true, video: await sampleVideo(t) }, env: { POKI_SCREEN_IDLE_MINUTES: '0.04' } });
+  const opened = data(await call('screen_open', { device: 'lab-phone', codecs: ['hevc'] }));
+  let ack;
+  // A paused stream's reply says so (closed with reason idle; a later call fails with that reason).
+  const read = async () => { const reply = (await call('screen_read', { stream: opened.stream, ack, wait_ms: 200 })).structuredContent; ack = reply.frames?.at(-1)?.seq ?? ack; return { ...reply, closed: reply.closed || reply.reason === 'idle' }; };
+  // The agent works on the phone for 4 s: the watching panel stays.
+  const end = performance.now() + 4000;
+  while (performance.now() < end) { await call('take_screenshot', { device: 'lab-phone' }); assert.ok(!(await read()).closed, 'a panel watching the agent work was paused'); await new Promise(r => setTimeout(r, 300)); }
+  // Nobody does anything: it is paused.
+  let reply;
+  const deadline = performance.now() + 8000;
+  do { reply = await read(); await new Promise(r => setTimeout(r, 300)); } while (!reply.closed && performance.now() < deadline);
+  assert.equal(reply.reason, 'idle', JSON.stringify(reply).slice(0, 300));
+});
+
+test('one tool call longer than the idle period keeps a watching panel; the pause comes after it ends', { timeout: 60000 }, async t => {
+  // A pause after 2.4 s without activity; the agent's single wait takes 6 s.
+  const { data, call } = await pairingFixture(t, { registered: ['lab-phone'], remote: { displayService: true, video: await sampleVideo(t) }, env: { POKI_SCREEN_IDLE_MINUTES: '0.04' } });
+  const opened = data(await call('screen_open', { device: 'lab-phone', codecs: ['hevc'] }));
+  let ack;
+  const paused = async () => { const reply = (await call('screen_read', { stream: opened.stream, ack, wait_ms: 200 })).structuredContent; ack = reply.frames?.at(-1)?.seq ?? ack; return reply.closed || reply.reason === 'idle'; };
+  const waiting = call('wait', { device: 'lab-phone', seconds: 6 });
+  const started = performance.now();
+  let pausedAt;
+  while (pausedAt === undefined && performance.now() - started < 5500) { if (await paused()) pausedAt = Math.round(performance.now() - started); await new Promise(r => setTimeout(r, 200)); }
+  await waiting;
+  assert.equal(pausedAt, undefined, `the panel was paused ${pausedAt} ms into a 6 s call`);
+  const ended = performance.now();
+  while (!(await paused())) { assert.ok(performance.now() - ended < 8000, 'the idle panel was never paused'); await new Promise(r => setTimeout(r, 200)); }
+  assert.ok(performance.now() - ended >= 2000, `paused ${Math.round(performance.now() - ended)} ms after the call ended, before the idle period`);
 });
