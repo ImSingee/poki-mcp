@@ -184,6 +184,9 @@ impl Session {
             self.release_input().await?;
             return Ok(json!({"released":true}));
         }
+        if request["op"] == "ddi_status" || request["op"] == "install_ddi" {
+            return self.developer_disk_image(&request).await;
+        }
         let action = if request["op"] == "connect" || request["op"] == "reconnect" {
             None
         } else {
@@ -306,6 +309,52 @@ impl Session {
             )
             .into());
         }
+    }
+
+    // ddi_status and install_ddi (ddi.rs). Neither sends input. An installation adds services the
+    // current handshake does not list, so the tunnel is reopened afterwards and the reply reports
+    // displayservice as the phone now offers it.
+    async fn developer_disk_image(&mut self, request: &Value) -> Result<Value> {
+        let install = request["op"] == "install_ddi";
+        let restore_dir = request["restore_dir"].as_str().map(str::to_owned);
+        if install
+            && !restore_dir
+                .as_deref()
+                .is_some_and(|dir| dir.starts_with('/'))
+        {
+            return Err(
+                "install_ddi needs restore_dir: an absolute path to the image directory.".into(),
+            );
+        }
+        let force = request["force"].as_bool().unwrap_or(false);
+        // Only an installation disturbs the phone's input session; a status read leaves it open.
+        if install {
+            let _ = self.release_input().await;
+        }
+        if self.connection.is_none() {
+            self.open().await?;
+        }
+        let Connection { adapter, rsd, .. } = self.connection.as_mut().unwrap();
+        if !install {
+            let services_only = request["services_only"].as_bool().unwrap_or(false);
+            return Ok(super::ddi::status(adapter, rsd, services_only).await);
+        }
+        let mut reply = tokio::time::timeout(
+            Duration::from_secs(15 * 60),
+            super::ddi::install(adapter, rsd, restore_dir.as_deref().unwrap(), force),
+        )
+        .await
+        .unwrap_or_else(|_| json!({"installed": false, "stage": "install", "error": "Installing the developer disk image did not finish within 15 minutes."}));
+        if reply["installed"] == true && reply["already"] != true {
+            self.connection = None;
+            if matches!(&self.transport, Transport::Remote(config) if config.uses_bonjour()) {
+                self.control = None;
+            }
+            self.open().await?;
+        }
+        let rsd = &self.connection.as_ref().unwrap().rsd;
+        reply["display_service"] = json!(rsd.services.contains_key(super::ddi::DISPLAY_SERVICE));
+        Ok(reply)
     }
 
     async fn open(&mut self) -> Result<()> {
@@ -1147,6 +1196,116 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    fn session_with(connection: Connection) -> Session {
+        Session {
+            transport: Transport::Local("fixture-phone".into()),
+            control: None,
+            connection: Some(connection),
+        }
+    }
+
+    #[tokio::test]
+    async fn ddi_status_reports_displayservice_without_opening_a_phone_service() {
+        let (connection, _phone) = tunnel();
+        let mut session = session_with(connection);
+        for request in [
+            json!({"op":"ddi_status"}),
+            json!({"op":"ddi_status","services_only":true}),
+        ] {
+            let reply = session.request(request).await.unwrap();
+            assert_eq!(reply["display_service"], true, "{reply}");
+            assert_eq!(reply["cryptexd"], false, "{reply}");
+            assert_eq!(reply["ddi"], Value::Null, "{reply}");
+        }
+        // With cryptexd listed, services_only still answers from the service list: this fake phone
+        // never answers a cryptexd request, so asking it would hang.
+        let cryptexd = session.connection.as_ref().unwrap().rsd.services
+            [crate::Hid::rsd_service_name().as_ref()]
+        .clone();
+        session
+            .connection
+            .as_mut()
+            .unwrap()
+            .rsd
+            .services
+            .insert("com.apple.security.cryptexd.remote".into(), cryptexd);
+        let reply = tokio::time::timeout(
+            Duration::from_secs(5),
+            session.request(json!({"op":"ddi_status","services_only":true})),
+        )
+        .await
+        .expect("services_only must not ask the phone")
+        .unwrap();
+        assert_eq!(reply["cryptexd"], true, "{reply}");
+        assert_eq!(reply["ddi_error"], Value::Null, "{reply}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ddi_status_leaves_an_open_input_session_alone() {
+        let (display, _display_phone) = tokio::io::duplex(1 << 16);
+        let now = tokio::time::Instant::now();
+        let media = InputMedia {
+            client: DisplayServiceClient::from_stream(Box::new(display))
+                .await
+                .unwrap(),
+            receivers: tokio::task::JoinSet::new(),
+            ready_at: now,
+            last_input: now,
+            last_activity: now,
+        };
+        let (mut connection, _phone) = tunnel();
+        connection.media = Some(media);
+        let mut session = session_with(connection);
+        let reply = session
+            .request(json!({"op":"ddi_status","services_only":true}))
+            .await
+            .unwrap();
+        assert_eq!(reply["display_service"], true, "{reply}");
+        assert!(
+            session.connection.as_ref().unwrap().media.is_some(),
+            "a status read tore down the input session"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_ddi_names_the_stage_that_failed_before_touching_the_phone() {
+        let (mut connection, _phone) = tunnel();
+        connection
+            .rsd
+            .services
+            .remove(DisplayServiceClient::<Box<dyn ReadWrite>>::rsd_service_name().as_ref());
+        let mut session = session_with(connection);
+        assert!(
+            session.request(json!({"op":"install_ddi"})).await.is_err(),
+            "install_ddi without restore_dir must be refused"
+        );
+        let reply = session
+            .request(json!({"op":"install_ddi","restore_dir":"/nonexistent"}))
+            .await
+            .unwrap();
+        assert_eq!(reply["installed"], false, "{reply}");
+        assert_eq!(reply["stage"], "unavailable", "{reply}");
+        assert_eq!(reply["display_service"], false, "{reply}");
+
+        let cryptexd = session.connection.as_ref().unwrap().rsd.services
+            [crate::Hid::rsd_service_name().as_ref()]
+        .clone();
+        session
+            .connection
+            .as_mut()
+            .unwrap()
+            .rsd
+            .services
+            .insert("com.apple.security.cryptexd.remote".into(), cryptexd);
+        let missing = std::env::temp_dir().join(format!("poki-no-ddi-{}", uuid::Uuid::new_v4()));
+        let reply = session
+            .request(json!({"op":"install_ddi","restore_dir":missing.to_str().unwrap()}))
+            .await
+            .unwrap();
+        assert_eq!(reply["installed"], false, "{reply}");
+        assert_eq!(reply["stage"], "image", "{reply}");
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 import { checkWork, phase, stopped, stoppingReason } from './work.mjs';
 import { managementTools } from './coordination.mjs';
-import { definitions, stepSchema, hostGated } from './tools.mjs';
+import { definitions, stepSchema, hostGated, pairingTools } from './tools.mjs';
 import { approvalMode } from './human.mjs';
 import { closestTo } from './interaction.mjs';
 import { flagOn } from './element-flags.mjs';
@@ -20,6 +20,7 @@ export const stopsRun = reason => Boolean(reason) && reason !== 'error' && reaso
 export function invalidStep(command, { step = true } = {}) {
   if (command.tool === 'batch_commands' || command.tool === 'run_code') return 'Nested batches are not supported, and neither is run_code.';
   if (managementTools.has(command.tool)) return 'Call device management tools outside a batch.';
+  if (pairingTools.has(command.tool)) return 'Call pairing tools outside a batch.';
   const gated = hostGated(command.tool, approvalMode());
   if (gated) return gated;
   const definition = definitions.find(([name]) => name === command.tool);

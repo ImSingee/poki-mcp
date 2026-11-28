@@ -1,20 +1,13 @@
 #!/usr/bin/env node
-import { mkdir, readFile, writeFile, rename, chmod, stat, mkdtemp, rm } from 'node:fs/promises';
-import { execFile, spawn } from 'node:child_process';
+import { mkdir, chmod, stat } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
-import { isIP } from 'node:net';
-import { hostname } from 'node:os';
-import { root, stateDir, idevice, pokiNative } from '../src/config.mjs';
-import { lines } from '../src/lines.mjs';
+import { root, stateDir, idevice } from '../src/config.mjs';
+import { registerRemote, validId, validPort, validHost, isBonjour } from '../src/pairing/registry.mjs';
+import { startPairHost, stagePairing, completeWirelessPairing, discardStaging, defaultHostName, defaultRemotePort, advertisingInstruction, pinInstruction } from '../src/pairing/wireless.mjs';
 
 const exec = promisify(execFile);
-const validId = id => /^[a-zA-Z0-9-]+$/.test(id);
-const validPort = port => Number.isInteger(port) && port >= 1 && port <= 65535;
-// Keep the Bonjour name, not a setup-time address: DHCP can change it later.
-const isBonjour = host => typeof host === 'string' && host.length <= 254 &&
-  /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+local\.?$/i.test(host);
-const validHost = host => isIP(host ?? '') !== 0 || isBonjour(host);
 const usage = 'Usage: node bin/prepare-remote.mjs DEVICE_ID IP_OR_BONJOUR_HOST [PORT]\n   or: node bin/prepare-remote.mjs --wireless [IP_OR_BONJOUR_HOST] [--port PORT] [--name HOST_NAME]\nUse an IP address or a .local host.';
 
 function nextStep(host, wireless) {
@@ -22,25 +15,6 @@ function nextStep(host, wireless) {
   return isBonjour(host)
     ? `Start Poki and call list_devices.${first} Keep the iPhone unlocked and both devices on the same LAN; the Bonjour name must remain reachable.`
     : `Start Poki and call list_devices while Wi-Fi is connected.${first} For Tailscale, keep both devices connected and keep the daemon running when switching to cellular.`;
-}
-
-async function writeJson(file, value) {
-  const temporary = file + '.tmp';
-  await writeFile(temporary, JSON.stringify(value), { mode: 0o600 });
-  await chmod(temporary, 0o600);
-  await rename(temporary, file);
-}
-
-async function registerRemote(id, name, host, port, pairingFile) {
-  const configPath = join(stateDir, 'remote', id, 'config.json');
-  await writeJson(configPath, { id, host, port, pairing_file: pairingFile });
-  let configs = [];
-  const registry = join(stateDir, 'remote-devices.json');
-  try { configs = JSON.parse(await readFile(registry, 'utf8')); }
-  catch (error) { if (error.code !== 'ENOENT') throw error; }
-  configs = configs.filter(d => d.id !== id);
-  configs.push({ id, name, config_path: configPath });
-  await writeJson(registry, configs);
 }
 
 async function prepareUsb([id, host, portText = '49152']) {
@@ -70,8 +44,8 @@ async function prepareUsb([id, host, portText = '49152']) {
 
 function parseWirelessArgs(args) {
   let host;
-  let port = 49152;
-  let name = hostname() || 'poki-mcp';
+  let port = defaultRemotePort;
+  let name = defaultHostName();
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
     if (arg === '--port' && index + 1 < args.length) port = Number(args[++index]);
@@ -83,58 +57,19 @@ function parseWirelessArgs(args) {
   return { host, port, name };
 }
 
-function runPairHost(hostState, output, name) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(pokiNative, ['--pair-host', hostState, output, name, '0'], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let stderr = '';
-    let paired;
-    lines(child.stdout).on('line', line => {
-      let event;
-      try { event = JSON.parse(line); }
-      catch { return; }
-      if (event.event === 'advertising') {
-        console.log(`Advertising ${name} on the local network. On the iPhone, open Settings › Privacy & Security › Developer Mode and tap “Pair with ${name}”.`);
-      } else if (event.event === 'pin') {
-        console.log(`Enter this code on the iPhone: ${event.pin}`);
-      } else if (event.event === 'paired') {
-        paired = event;
-      }
-    });
-    child.stderr.on('data', chunk => { stderr += chunk; });
-    child.on('error', reject);
-    child.on('close', (code, signal) => {
-      if (code === 0 && paired) resolve(paired);
-      else if (signal) reject(new Error(`Wireless pairing stopped with ${signal}.`));
-      else reject(new Error(stderr.trim() || `Wireless pairing did not complete (exit ${code}).`));
-    });
-  });
-}
-
 async function prepareWireless(args) {
   const options = parseWirelessArgs(args);
-  const remoteRoot = join(stateDir, 'remote');
-  await mkdir(remoteRoot, { recursive: true, mode: 0o700 });
-  await chmod(remoteRoot, 0o700);
-  const pending = await mkdtemp(join(remoteRoot, 'wireless-'));
+  const staging = await stagePairing();
   try {
-    await chmod(pending, 0o700);
-    const pendingPairing = join(pending, 'pairing.plist');
     console.log('Keep this computer and the iPhone on the same local network. Wireless first pairing requires iOS 27 or newer.');
-    const result = await runPairHost(join(remoteRoot, 'host'), pendingPairing, options.name);
-    const id = result.device?.udid;
-    if (!validId(id ?? '')) throw new Error('Wireless pairing finished without a valid device identifier.');
-    const host = options.host ?? result.peer;
-    if (!validHost(host)) throw new Error('Wireless pairing finished without a usable device address. Pass the iPhone\'s .local name, LAN address, or Tailscale address as the host.');
-    const directory = join(remoteRoot, id);
-    await mkdir(directory, { recursive: true, mode: 0o700 });
-    await chmod(directory, 0o700);
-    const pairing = join(directory, 'pairing.plist');
-    await rename(pendingPairing, pairing);
-    await chmod(pairing, 0o600);
-    await registerRemote(id, result.device?.name || id, host, options.port, pairing);
-    console.log(JSON.stringify({ paired: true, wireless: true, device: id, host, next: nextStep(host, true) }));
+    const { events, done } = startPairHost({ name: options.name, hostState: staging.hostState, output: staging.pairing });
+    events.on('advertising', () => console.log(`Advertising ${options.name} on the local network. ${advertisingInstruction(options.name)}`));
+    events.on('pin', event => console.log(pinInstruction(event.pin)));
+    const result = await done;
+    const device = await completeWirelessPairing(result, { pairing: staging.pairing, host: options.host, port: options.port });
+    console.log(JSON.stringify({ paired: true, wireless: true, device: device.id, host: device.host, next: nextStep(device.host, true) }));
   } finally {
-    await rm(pending, { recursive: true, force: true });
+    await discardStaging(staging.directory);
   }
 }
 

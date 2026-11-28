@@ -31,8 +31,24 @@ jobs:
       - name: Build
         run: ./bin/setup
 
+      # The native bridge's own tests: pair-host cancellation and mDNS withdrawal, the developer
+      # disk image ops, the helper's request handling. Same target directory as the build above.
+      - name: Rust tests
+        # The flags bin/build-native builds with, so this reuses that build instead of compiling
+        # every crate again.
+        run: |
+          export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/builder --remap-path-prefix=/Volumes=/build --remap-path-prefix=$PWD=/poki"
+          export CFLAGS="${CFLAGS:-} -ffile-prefix-map=$HOME=/builder -ffile-prefix-map=/Volumes=/build"
+          export CXXFLAGS="${CXXFLAGS:-} -ffile-prefix-map=$HOME=/builder -ffile-prefix-map=/Volumes=/build"
+          cargo test --locked --release --manifest-path native/bridge/Cargo.toml --target-dir build/native-target
+
       - name: Install Poki Agent dependencies
         run: npm ci --prefix agent
+
+      # The MCP Apps views are tested in Chromium inside a mock host
+      # (test/pairing-view.test.mjs).
+      - name: Install Chromium for the view tests
+        run: npx playwright install --with-deps chromium
 
       # The suite is specified per file: each test file runs in its own
       # process, matching how the port is verified locally. A failure is

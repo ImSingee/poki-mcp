@@ -31,6 +31,7 @@ The default `tools/list` response contains the tools for phone tasks. Tool names
 | Apps and URLs | `list_apps`, `launch_app`, `terminate_app`, `open_url` |
 | Touch and input | `tap`, `tap_text`, `long_press`, `double_tap`, `drag`, `pinch`, `fill`, `type_text`, `scroll`, `scroll_to`, `swipe`, `press_key`, `go_back`, `hide_keyboard`, `press_button`, `get_clipboard` |
 | Wait, prompts, and batches | `wait_for`, `handle_alert`, `batch_commands` |
+| Wireless pairing (every profile) | `pair_device`, `pairing_status`, `pairing_cancel` (pairing view only), `unpair_device` |
 
 The runtime default list is defined in `src/tools.mjs`. The complete catalog includes simulator management, app installation, recording, location, appearance, drawing with `touch_path` and `draw_strokes`, and device leases.
 
@@ -70,7 +71,7 @@ Poki Agent starts its own stdio process with `POKI_MCP_TOOLS=all`. Its existing 
 
 ### Computer-use profile: look and do
 
-`POKI_TOOL_PROFILE=cua` lists only `look`, `do`, `list_apps`, `list_devices` and `poki_mcp_status`, with short server instructions. `look` and `do` take a required `device`, like every device tool. It works the way desktop computer-use tools do: `do` runs a list of actions in order (tap by element number or point, type, key, swipe, scroll_to, long_press, drag, pinch, button, launch, wait), waits a short fixed time after the last one, and reads the screen once; `look` reads it without acting. Each answer lists the screen's elements with numbers for the next call, marks the ones that are new since the previous read, names what disappeared, and attaches a screenshot. There is no verdict: the model decides what happened from the elements and the picture.
+`POKI_TOOL_PROFILE=cua` lists only `look`, `do`, `list_apps`, `list_devices` and `poki_mcp_status`, plus the [pairing tools](#pair-iphones-over-wi-fi) every profile lists, with short server instructions. `look` and `do` take a required `device`, like every device tool. It works the way desktop computer-use tools do: `do` runs a list of actions in order (tap by element number or point, type, key, swipe, scroll_to, long_press, drag, pinch, button, launch, wait), waits a short fixed time after the last one, and reads the screen once; `look` reads it without acting. Each answer lists the screen's elements with numbers for the next call, marks the ones that are new since the previous read, names what disappeared, and attaches a screenshot. There is no verdict: the model decides what happened from the elements and the picture.
 
 - Each action is reported as `sent`, `not_sent` or `unknown`. Nothing after a failed action is sent, and an `unknown` action is never sent again. Element numbers that are not in the latest read are refused before anything is sent.
 - `look` and `do` work on a physical iPhone through the native bridge, on a booted simulator, and on a phone running WebDriverAgent (see below). A physical iPhone needs the bridge built from this version by `./bin/setup`, because typing uses its `type_keys` and `pasteboard` operations.
@@ -101,6 +102,43 @@ Calls are coordinated per device:
 The lock lives in one daemon; two daemons driving one phone are not supported.
 
 `POKI_MCP_CALL_LOG=<path>` appends one JSON line per finished tool call: the tool, how long it took, its verdict when it has one, and whether it failed. Arguments, text and images are never written, and the session appears only as a hash.
+
+## Pair iPhones over Wi-Fi
+
+The pairing tools run iOS 27 wireless pairing from any MCP client, without USB and without a terminal on the Poki machine. They act on this computer's pairing state, so they never wait behind a device's queue, and none of them works inside `batch_commands` or `run_code`.
+
+1. `pair_device {name?}` returns `{ job }` at once. The computer advertises itself on the local network as `name` (default: its host name). Only one pairing runs per computer (there is one Bonjour name); a second `pair_device` returns the running pairing (`existing: true`). The pairing helper stops with the service: on cancel, on shutdown, and when the service dies without either (its standard input closes).
+2. Poll `pairing_status {job}` about every two seconds. Each job reports `kind` (`pair` for a new pairing, `prepare` for `pair_device {device}`). States, in order: `starting` → `advertising` (on the iPhone: Settings › Privacy & Security › Developer Mode › **Pair with NAME**) → `pin` (`pin` holds the six digits to type on the iPhone) → `paired` → `registering` → `mounting_ddi` → `ready`. `failed` and `cancelled` are the other terminal states; `terminal` is true for all three.
+3. In `mounting_ddi` Poki installs the developer disk image (DDI) through the new RemotePairing tunnel, which touch and text input need. The image comes from `POKI_DDI_DIR`, Xcode's `iOS_DDI/Restore` (macOS), a copy pymobiledevice3 already downloaded, or a one-time download pinned to one commit of the image mirror pymobiledevice3 uses and checked by SHA-256 (stored in the state directory under `ddi/`). Apple personalizes the image for the phone, so the Poki machine needs internet access to `gs.apple.com`. A `ready` job carries `ddi`: `already_mounted` (the phone had it), `version` (of the installed image, when cryptexd reports it) and `source` (`POKI_DDI_DIR`, `xcode`, `pymobiledevice3` or `download`, when it installed one).
+4. A failure names its `stage` (`pairing`, `registering`, `ddi`, or `internal`), a `reason`, the underlying `error`, and the `action` to take:
+
+| `reason` | Meaning | Action |
+| --- | --- | --- |
+| `pairing_failed` | The iPhone or the pairing helper ended the pairing. | Retry from Developer Mode; iOS 27+ on the same network. |
+| `timeout` | Nobody finished on the iPhone within 10 minutes. | Call `pair_device` again. |
+| `ddi_image_unavailable` | No image found and the download failed. | Check internet access or set `POKI_DDI_DIR`. |
+| `ddi_signing_failed` | Apple's signing server refused or was unreachable. | Check access to `gs.apple.com`. USB would need the same signature, so it does not help. |
+| `ddi_tunnel_unsupported`, `ddi_tunnel_install_failed` | The phone would not install the image over the tunnel. | Connect USB once and run `node bin/prepare-device.mjs DEVICE_ID`. |
+| `helper_missing` (stage `pairing`) | `build/poki-native` could not start. | Run `./bin/setup`, then pair again. |
+| `registration_failed` (stage `registering`) | The pairing finished but could not be saved, for example without a usable address. | Pair from a terminal with a host: `node bin/prepare-remote.mjs --wireless HOST`. |
+| `device_busy` (stage `ddi`, or `registering` when pairing a registered phone again) | Another session leases the phone, or its input held the phone for longer than `POKI_INPUT_LOCK_WAIT_MS`. A registered phone keeps its old pairing. | Call `pair_device` (with `device` for the image) again once it is done. |
+| `internal_error` (stage `internal`) | An unexpected error in the job. | Retry `pair_device`; check the service log if it repeats. |
+
+A `ddi` failure keeps the pairing (`paired: true`): the device is listed and reads work; input waits for the image. Whenever `list_devices` reports `display_service: false` for a wireless device (for example after the iPhone lost its mounted image), it adds an `action`; `pair_device {device}` installs the image again over Wi-Fi without pairing again (the pairing view offers the same as **Retry developer image** and **Install developer image**). That job runs beside a pairing of another phone and checks the device's lease like any device call; a second call for the same phone returns its job. It first reconnects the tunnel: `display_service` comes from the service list the phone sent when the tunnel opened, so an image mounted another way since (over USB with `prepare-device`) shows only after a new handshake, and then nothing is installed. `reconnect_device` refreshes that list for `list_devices` too. While a job installs the image (`mounting_ddi`, which can take minutes), every other call to that phone fails at once and names the job.
+
+`pairing_cancel` stops the pairing helper, which withdraws the Bonjour service. When the iPhone had already accepted the pairing (`paired` or `registering`), the job waits for the registration and removes it again, unless the phone was registered before this job; the reply's `note` says what is on this computer now (nothing, the earlier pairing, or the new one), read from the registry. The removal waits at most 3 s for another process holding the registry; when it fails, the note says so, keeps the error, and names the cleanup: `unpair_device` for that device, or, with the service stopped, deleting its entry in `remote-devices.json` and its `remote/<id>` directory. While a registered phone is paired again, its old helper and configuration are replaced and other calls to it are refused, as during `unpair_device`.
+
+The pairing view follows the pairing and each phone's developer-image job separately, so installing the image on one phone never hides the PIN of a pairing in progress.
+
+`unpair_device {device}` takes a wireless device's id or exact name. It is a gated tool (see [Approval & Clipboard Behavior](#approval--clipboard-behavior)): in `ask` mode a person on the Poki computer confirms it. It marks the device unavailable to every session until it finishes, cancels that device's pairing job, ends every session's accepted calls, recordings, locations and leases on it, asks its RemotePairing helper to disconnect and exit (a helper that is not running is not started, one still starting is stopped once it is up, and one that does not answer because it is busy is stopped by its pid), and deletes its `remote-devices.json` entry and `remote/DEVICE_ID/` directory. The device leaves `list_devices` at once, without a restart. The reply's `phone_cleanup` says how to remove this computer on the iPhone. USB devices are refused: Poki does not pair them.
+
+`list_devices` adds `pairing: { host: { name, advertising }, jobs }` (jobs from the last 15 minutes) and, for each wireless device, `display_service` (whether the tunnel's service list has displayservice, which input needs), or `pairing_job` while a job prepares it. Pairing jobs live in the shared service, not in the stdio process: a client that recycles its stdio processes (LobeHub's `lh connect`) keeps them, and the service does not exit for idleness while one runs.
+
+## MCP Apps views
+
+Poki serves MCP Apps views as `ui://poki/*` resources (`text/html;profile=mcp-app`). The stdio process answers `resources/list` and `resources/read` itself, so a host can load a view before Poki's service runs. Each view is one self-contained HTML file in `src/views/`; the `@modelcontextprotocol/ext-apps` App bundle is inlined when the resource is read. Views make no network requests of their own (empty CSP domain lists); everything goes through the host's `tools/call`.
+
+`tools/list` carries each tool's `_meta`: `ui.resourceUri` (and the older `ui/resourceUri`) for the tool that opens a view, `ui.visibility` (`["model", "app"]`, or `["app"]` for tools only a view calls), and `lobehub/ui.preferredModelDisplayMode`. App-only tools are listed too. An MCP Apps host that applies `ui.visibility` (LobeHub with `mcp_apps` does) hides them from the model; a client that does not ignores `_meta` and shows them like any tool. Poki Agent leaves them out. Hosts without MCP Apps get the same results as text and structured content. See [Use Poki from LobeHub](lobehub.md).
 
 ## Ask in plain language
 
@@ -141,6 +179,10 @@ Accessibility can miss changes that affect only pixels, such as Calculator's dis
 | Devices | `disconnect_device` | Close the device's RemotePairing helper and tunnel. |
 | Devices | `get_device_info` | Read device identity, capture dimensions in logical points, and optionally platform settings. |
 | Devices | `poki_mcp_status` | Report tool counts, connected-device count, and approval mode. |
+| Pairing | `pair_device` | Start pairing a new iPhone over Wi-Fi (iOS 27+), or with `device` reinstall a paired iPhone's developer disk image; returns a job at once. Opens the `ui://poki/pairing` view. |
+| Pairing | `pairing_status` | Report a pairing job: state, PIN while one is shown, device id once paired, reason and action on failure. |
+| Pairing | `pairing_cancel` | Cancel a pairing job. Meant for the pairing view (`ui.visibility: ["app"]`): hosts that apply `ui.visibility` hide it from the model, other clients list it like any tool. |
+| Pairing | `unpair_device` | Remove a wirelessly paired iPhone: stop its work and leases in every session, close its helper, delete its saved pairing. |
 | Coordination | `acquire_device` | Exclusively occupy one device across tool calls in this MCP session. A session may hold leases on several devices, one each. |
 | Coordination | `renew_device` | Extend one of this session’s device leases by 1–600 seconds (default 120). |
 | Coordination | `release_device` | Release one of this session’s device leases after cancelling this session's accepted work on that device and awaiting its recording/location cleanup. |
@@ -255,7 +297,7 @@ Tool responses include `_meta.timing.stages` with queue, capture, AX, OCR, input
 
 ## Approval & Clipboard Behavior
 
-Seven tools are gated: `install_app`, `uninstall_app`, `build_and_run`, `open_url`, `download_app_container`, `get_clipboard` and `set_clipboard`. `POKI_MCP_APPROVAL_MODE` decides who approves them:
+Eight tools are gated: `install_app`, `uninstall_app`, `build_and_run`, `open_url`, `download_app_container`, `get_clipboard`, `set_clipboard` and `unpair_device`. `POKI_MCP_APPROVAL_MODE` decides who approves them:
 
 | Mode | Who approves |
 | --- | --- |
@@ -265,7 +307,7 @@ Seven tools are gated: `install_app`, `uninstall_app`, `build_and_run`, `open_ur
 
 - **Default**: `host` on a Linux host whose environment has neither `DISPLAY` nor `WAYLAND_DISPLAY`, and `ask` everywhere else. An explicit value always wins. An unknown value is an error, and the daemon does not start.
 - **The daemon's environment decides**, not the client's. A daemon started automatically takes `POKI_MCP_APPROVAL_MODE` (and the display variables) from the client that started it, and every other client shares that mode. A client that sets `POKI_MCP_APPROVAL_MODE` explicitly to a mode stricter than the running daemon's (`ask` over `host` over `allow`) has its device calls refused, with an error that names the daemon's pid; stop that daemon so the next call starts one with the client's mode. A client that asks for a looser mode runs under the daemon's. In both cases `poki_mcp_status` ends with a note naming both modes.
-- **Annotations**: in every mode, `tools/list` marks the gated tools so that a client can ask before running them: `destructiveHint: true` on `install_app`, `uninstall_app`, `build_and_run`, `open_url` and `set_clipboard`; `openWorldHint: true` on `open_url`, `download_app_container`, `get_clipboard` and `set_clipboard`. `get_clipboard` carries `readOnlyHint: false`, so a client that runs read-only tools without asking still asks about it.
+- **Annotations**: in every mode, `tools/list` marks the gated tools so that a client can ask before running them: `destructiveHint: true` on `install_app`, `uninstall_app`, `build_and_run`, `open_url`, `set_clipboard` and `unpair_device`; `openWorldHint: true` on `open_url`, `download_app_container`, `get_clipboard` and `set_clipboard`. `get_clipboard` carries `readOnlyHint: false`, so a client that runs read-only tools without asking still asks about it.
 - **Inside `batch_commands` and `run_code`**: in `host` mode the client is asked only about the wrapper, so a gated tool is refused there, with an error that says to call it on its own. With the default `stop_on_error` such a batch is rejected before any step runs; with `stop_on_error=false` that step fails and the others run. In `ask` mode a gated step shows the dialog as a direct call does; in `allow` mode it runs.
 - **Results**: a gated call reports who let it run, for example `"approval": {"mode": "host", "approved_by": "mcp-client"}` in host mode. `poki_mcp_status.approval_mode` reports `ask-human`, `host` or `operator-preapproved`, and `approval_covers` lists the gated tools.
 - **`request_human_action`** is refused in `host` mode with an error that tells the model to ask the user in the conversation.

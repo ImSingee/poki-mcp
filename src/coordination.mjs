@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { work, checkWork, stoppingReason } from './work.mjs';
 import { inputLockFromEnv } from './input-lock.mjs';
-import { definitions } from './tools.mjs';
+import { definitions, pairingTools } from './tools.mjs';
 
 const readOnlyTools = new Set(definitions.filter(d => d[3]).map(d => d[0]));
 
@@ -10,8 +10,9 @@ export const managementTools = new Set(['acquire_device', 'renew_device', 'relea
 // Tools that skip the per-device queue and the input lock: they run as soon as they arrive, beside
 // whatever the device is doing. For calls that only read state kept in the daemon (a stream's next
 // frames, a pairing job's progress) or feed a view's own input channel, where waiting behind a
-// long batch would stall the view. None of the current tools needs it.
-export const unqueuedTools = new Set();
+// long batch would stall the view. The pairing tools are such calls: they change this computer's
+// pairing state, and unpair_device ends a device's queued work itself.
+export const unqueuedTools = new Set(pairingTools);
 
 const text = value => ({ content: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value, null, 2) }] });
 const failure = error => ({ isError: true, ...text(error.message), _meta: { stop_reason: error.name === 'TimeoutError' ? 'timeout' : error.name === 'AbortError' ? stoppingReason(error) : 'error' } });
@@ -24,6 +25,8 @@ const failure = error => ({ isError: true, ...text(error.message), _meta: { stop
 // - A lease keeps every other session off its device. A session may hold leases on several devices.
 export class Coordination {
   leases = new Map(); operations = new Set(); revisions = new Map(); scenes = new Map();
+  // Devices being unpaired: no session may resolve, lease or act on them until the removal ends.
+  unavailable = new Map();
   inputLock = inputLockFromEnv();
   unqueued = unqueuedTools;
   revision(id) { return this.revisions.get(id) ?? 0; }
@@ -37,6 +40,7 @@ export class Coordination {
   }
   access(session, target) {
     checkWork();
+    if (this.unavailable.has(target.id)) throw new Error(this.unavailable.get(target.id));
     const lease = this.leases.get(target.id);
     if (lease && (lease.owner !== session || lease.state !== 'active' || performance.now() >= lease.until)) throw new Error('Device is occupied or being released.');
     const operation = work.getStore()?.operation;

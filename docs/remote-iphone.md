@@ -12,7 +12,9 @@ For LAN-only use, see [LAN addresses that change with DHCP](#lan-addresses-that-
 2. Enable Developer Mode and UI Automation on the iPhone.
 3. Pair the device in one of two ways:
 
-   **Wireless first pairing (iOS 27+).** Keep the host and iPhone on the same local network with mDNS/Bonjour reachable. Set `POKI_MCP_STATE_DIR` to this installation's private state directory, then run:
+   **Wireless first pairing from an MCP client (iOS 27+).** Ask the agent to pair the iPhone, or call `pair_device` and follow `pairing_status` (or the pairing view in an MCP Apps client such as LobeHub). Poki advertises this computer, shows the PIN to type on the iPhone, saves the pairing, and installs the developer disk image over the new tunnel, all without USB. See [Pair iPhones over Wi-Fi](tools.md#pair-iphones-over-wi-fi). The saved host is the address that paired; to keep a `.local` name or a Tailscale address instead, use the command below.
+
+   **Wireless first pairing from a terminal (iOS 27+).** Keep the host and iPhone on the same local network with mDNS/Bonjour reachable. Set `POKI_MCP_STATE_DIR` to this installation's private state directory, then run:
 
    ```sh
    node bin/prepare-remote.mjs --wireless [HOST] [--port PORT] [--name HOST_NAME]
@@ -30,7 +32,9 @@ For LAN-only use, see [LAN addresses that change with DHCP](#lan-addresses-that-
 
    This verifies a RemotePairing record over the existing trusted USB connection.
 
-   In both modes the pairing key remains in the private state directory. Ordinary operations never trigger a new pairing flow.
+   In every mode the pairing key remains in the private state directory. Ordinary operations never trigger a new pairing flow.
+
+   **Developer disk image.** Touch and text input need displayservice, which the developer disk image (DDI) provides. `pair_device` installs it through cryptexd over the RemotePairing tunnel; when `list_devices` later reports `display_service: false` for the device, call `pair_device` with `device` set to its id to install it again. Over the tunnel the computer needs internet access for Apple's personalization (`gs.apple.com`). When the iPhone refuses the installation over the tunnel, connect USB once and run `node bin/prepare-device.mjs DEVICE_ID`.
 4. Use Poki with the same state directory. Call `take_screenshot` with this device's ID as `device` while Wi-Fi is connected. Confirm the actual screen before disconnecting USB or leaving the LAN.
 5. For a cellular/Tailscale route, disconnect Wi-Fi from Control Center, leaving the Wi-Fi setting enabled, Tailscale connected, and the phone unlocked. Verify the phone is using cellular data.
 
@@ -116,9 +120,11 @@ Mac MCP's `get_clipboard` reads text and reports clipboard types over the existi
 
 Device-management paths such as app installation, process termination, Settings deep links, recording, location simulation, and standalone clipboard writes are not supported by this transport. They report a transport limitation instead of silently using a local connection.
 
-## Return to USB or local Wi-Fi
+## Remove a pairing, or return to USB or local Wi-Fi
 
-Call `disconnect_device` with that iPhone's ID as `device`. In this installation's `remote-devices.json`, remove only that device's entry. Use the same `POKI_MCP_STATE_DIR` as the daemon, or the default `~/Library/Application Support/PokiMCP` when it is unset. Restart the daemon (restart a `npm start` service; stop an automatic daemon, whose pid is in `mcp.json`, and the next call starts a new one) and connect the phone over USB or local Wi-Fi. Merely plugging in USB does not override a remote entry. Keep the private pairing files if you intend to re-enable RemotePairing.
+Call `unpair_device` with the iPhone's id as `device`. It stops that device's work in every session, closes its RemotePairing helper, and deletes its `remote-devices.json` entry and its `remote/DEVICE_ID/` directory (configuration and pairing record). The device leaves `list_devices` at once; no restart is needed. Connect the phone over USB or local Wi-Fi to use it that way, or pair it again with `pair_device`. Merely plugging in USB does not override a remote entry, so remove the entry first. The iPhone keeps its own record of this computer until you remove it there; the reply's `phone_cleanup` says how.
+
+To keep the pairing files for later instead, call `disconnect_device`, remove only that device's entry from `remote-devices.json` (in the daemon's `POKI_MCP_STATE_DIR`, or the default `~/Library/Application Support/PokiMCP` when it is unset), and keep `remote/DEVICE_ID/`.
 
 If the first connection reports that the saved pairing record did not verify, rename `remote/DEVICE_ID/pairing.plist` within the same private state directory, then run `bin/prepare-remote.mjs` again to create a new record. Use the wireless mode on iOS 27+ or the USB mode on older systems. Do not share the old or new pairing file.
 

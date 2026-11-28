@@ -1,0 +1,61 @@
+// A stand-in for build/poki-native in both modes the pairing flow starts, for tests and for the
+// view harness (test/support/view-host.mjs). Its behavior comes from pairing.json next to
+// FIXTURE_STATE; every helper start and request is logged to FIXTURE_LOG.
+// --pair-host: plays `pairHost`, waiting at each `await` step until that file exists next to
+//   FIXTURE_STATE; on SIGTERM prints a cancelled event and exits 1, as pair_host.rs does.
+// --remote-server: answers device_info, ddi_status, install_ddi and disconnect from `remote`.
+export const pairingNative = `#!/usr/bin/env node
+import { appendFileSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { createServer } from 'node:net';
+import { createInterface } from 'node:readline';
+import { dirname, join } from 'node:path';
+const log = event => appendFileSync(process.env.FIXTURE_LOG, JSON.stringify(event) + '\\n');
+const config = () => JSON.parse(readFileSync(join(dirname(process.env.FIXTURE_STATE), 'pairing.json'), 'utf8'));
+const mode = process.argv[2];
+log({ helper: mode, args: process.argv.slice(3), pid: process.pid });
+if (mode === '--pair-host') {
+  const [, , , hostState, output, name] = process.argv;
+  process.on('SIGTERM', () => { log({ helper: 'pair-host-sigterm', pid: process.pid }); console.log(JSON.stringify({ event: 'cancelled' })); process.exit(1); });
+  for (const step of config().pairHost) {
+    if (step.await) { const gate = join(dirname(process.env.FIXTURE_STATE), step.await); while (!existsSync(gate)) await new Promise(r => setTimeout(r, 20)); rmSync(gate, { force: true }); continue; }
+    if (step.fail) { console.error(step.fail); process.exit(1); }
+    if (step.event === 'paired') writeFileSync(output, 'pairing record for ' + name);
+    console.log(JSON.stringify(step));
+  }
+  process.exit(0);
+}
+if (mode === '--remote-server') {
+  let installed = false, busy = false, reconnected = false;
+  const server = createServer(socket => {
+    // Like the Rust helper, which serves one request at a time: while busy, nobody is greeted.
+    if (busy) return;
+    socket.write(JSON.stringify({ pid: process.pid }) + '\\n');
+    createInterface({ input: socket }).once('line', line => {
+      const request = JSON.parse(line);
+      log({ remote: request.op, request });
+      const remote = config().remote ?? {};
+      // hangInstall: an installation that never finishes and keeps the helper busy.
+      if (request.op === 'install_ddi' && remote.hangInstall) { busy = true; return; }
+      const reply = request.op === 'disconnect' ? { disconnected: true }
+        : request.op === 'device_info' ? { properties: { DeviceName: config().names?.[JSON.parse(readFileSync(process.argv[3], 'utf8')).id] ?? 'Wireless iPhone', ProductType: 'iPhone17,1', ProductVersion: '27.0' } }
+        // displayAfterReconnect: an image mounted another way, which only a new handshake shows.
+        : request.op === 'ddi_status' ? { display_service: installed || Boolean(remote.displayService) || (Boolean(remote.displayAfterReconnect) && reconnected), cryptexd: true, ddi: installed ? { identifier: 'com.apple.MobileAsset.DDI', version: '27B52' } : null }
+        : request.op === 'reconnect' ? (reconnected = true, { connected: true, transport: 'remote_pairing' })
+        : request.op === 'tap' ? { sent: true, screen_change_verified: false }
+        : request.op === 'install_ddi' ? (remote.install ?? (installed = true, { installed: true, display_service: true, ddi: { identifier: 'com.apple.MobileAsset.DDI', version: '27B52' } }))
+        : { transport_error: true, error: 'Unexpected native request ' + request.op };
+      // installDelayMs: a slow installation, so the view's "Preparing developer services" step lasts.
+      // tapDelayMs: a tap that holds the device for a while.
+      const delay = request.op === 'install_ddi' ? Number(remote.installDelayMs ?? 0) : request.op === 'tap' ? Number(remote.tapDelayMs ?? 0) : 0;
+      setTimeout(() => {
+        socket.end(JSON.stringify(reply) + '\\n');
+        // exitDelayMs: like the Rust helper, it answers first, then releases its session and removes
+        // its socket file before exiting.
+        if (request.op === 'disconnect') server.close(() => setTimeout(() => { try { rmSync(process.argv[4], { force: true }); } catch {} process.exit(0); }, Number(remote.exitDelayMs ?? 0)));
+      }, delay);
+    });
+  });
+  // startDelayMs: a helper slow to come up.
+  setTimeout(() => server.listen(process.argv[4], () => console.log(JSON.stringify({ ready: true }))), Number(config().remote?.startDelayMs ?? 0));
+} else if (mode !== '--pair-host') process.exit(1);
+`;

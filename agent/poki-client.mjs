@@ -12,7 +12,8 @@ export class PokiClient {
       stderr: 'ignore',
     }));
     this.instructions = this.client.getInstructions() ?? '';
-    return (await this.client.listTools()).tools;
+    // A tool whose ui.visibility leaves out "model" is only for an MCP Apps view (pairing_cancel).
+    return (await this.client.listTools()).tools.filter(tool => !Array.isArray(tool._meta?.ui?.visibility) || tool._meta.ui.visibility.includes('model'));
   }
 
   call(name, args = {}) {
