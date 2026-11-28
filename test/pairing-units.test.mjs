@@ -253,3 +253,18 @@ test('a zombie process counts as gone', { skip: process.platform === 'win32' }, 
     assert.equal(processGone(process.pid), false);
   } finally { parent.kill('SIGKILL'); }
 });
+
+test('jobs preparing two phones at once share one download of the image', async t => {
+  const dir = await scratch(t);
+  const bytes = { 'Image.dmg': 'image', 'BuildManifest.plist': 'manifest' };
+  const image = { build: 'shared', baseUrl: 'https://mirror.invalid/ddi', files: Object.entries(bytes).map(([name, body]) => ({ name, sha256: createHash('sha256').update(body).digest('hex') })) };
+  const requested = [];
+  const fetchImpl = async url => { const name = url.split('/').at(-1); requested.push(name); await new Promise(resolve => setTimeout(resolve, 50)); return new Response(bytes[name]); };
+  const env = { HOME: join(dir, 'home') };
+  // As on Linux: no Xcode image to fall back on.
+  const [first, second] = await Promise.all([1, 2].map(() => resolveImage({ env, stateDir: join(dir, 'state'), image, fetchImpl, platform: 'linux' })));
+  assert.equal(first.directory, second.directory);
+  assert.deepEqual(requested, ['Image.dmg', 'BuildManifest.plist'], 'each file was fetched once');
+  assert.equal(await readFile(join(first.directory, 'Image.dmg'), 'utf8'), 'image');
+  assert.deepEqual((await readdir(first.directory)).filter(name => name.endsWith('.tmp')), []);
+});

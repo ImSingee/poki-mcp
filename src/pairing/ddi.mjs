@@ -10,7 +10,7 @@
 // 4. <state>/ddi/<build>, downloaded once from the image mirror pymobiledevice3 uses, pinned to one
 //    commit and checked against the SHA-256 of every file. The image is the same for every phone;
 //    Apple personalizes it for this phone during installation.
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { access, mkdir, rename, rm, writeFile, readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -33,12 +33,12 @@ export const pinnedImage = {
 const xcodeImage = '/Library/Developer/DeveloperDiskImages/iOS_DDI/Restore';
 const hasManifest = async directory => access(join(directory, 'BuildManifest.plist')).then(() => true, () => false);
 
-export function candidateDirectories(env = process.env, stateDir = defaultStateDir, image = pinnedImage) {
+export function candidateDirectories(env = process.env, stateDir = defaultStateDir, image = pinnedImage, platform = process.platform) {
   const home = env.HOME ?? homedir();
   const xdg = env.XDG_DATA_HOME || join(home, '.local/share');
   return [
     ...(env.POKI_DDI_DIR ? [{ source: 'POKI_DDI_DIR', directory: env.POKI_DDI_DIR }] : []),
-    ...(process.platform === 'darwin' ? [{ source: 'xcode', directory: xcodeImage }] : []),
+    ...(platform === 'darwin' ? [{ source: 'xcode', directory: xcodeImage }] : []),
     { source: 'pymobiledevice3', directory: join(home, '.pymobiledevice3/Xcode_iOS_DDI_Cryptex') },
     { source: 'pymobiledevice3', directory: join(xdg, 'pymobiledevice3/Xcode_iOS_DDI_Cryptex') },
     { source: 'download', directory: join(stateDir, 'ddi', image.build) },
@@ -57,22 +57,32 @@ export async function downloadImage(directory, { image = pinnedImage, fetchImpl 
     const bytes = Buffer.from(await response.arrayBuffer());
     const digest = createHash('sha256').update(bytes).digest('hex');
     if (digest !== file.sha256) throw new Error(`The downloaded ${file.name} does not match the expected checksum (got ${digest}).`);
-    const temporary = `${target}.${process.pid}.tmp`;
+    const temporary = `${target}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
     await writeFile(temporary, bytes, { mode: 0o600 });
     await rename(temporary, target);
   }
   return directory;
 }
 
+// Downloads in progress, by directory: jobs preparing several phones at once share one download.
+const downloads = new Map();
+
 // The directory to install from, downloading the pinned image when no local copy exists.
-export async function resolveImage({ env = process.env, stateDir = defaultStateDir, image = pinnedImage, fetchImpl, signal } = {}) {
-  const candidates = candidateDirectories(env, stateDir, image);
+export async function resolveImage({ env = process.env, stateDir = defaultStateDir, image = pinnedImage, fetchImpl, signal, platform } = {}) {
+  const candidates = candidateDirectories(env, stateDir, image, platform);
   for (const candidate of candidates) if (await hasManifest(candidate.directory)) return candidate;
   const download = candidates.at(-1);
+  if (!downloads.has(download.directory)) {
+    // Not tied to one job's signal: another job may be waiting for the same download.
+    const pending = downloadImage(download.directory, { image, fetchImpl })
+      .catch(async error => { await rm(join(download.directory, 'BuildManifest.plist'), { force: true }); throw error; })
+      .finally(() => downloads.delete(download.directory));
+    downloads.set(download.directory, pending);
+  }
   try {
-    await downloadImage(download.directory, { image, fetchImpl, signal });
+    const pending = downloads.get(download.directory);
+    await (signal ? Promise.race([pending, new Promise((_, reject) => { signal.throwIfAborted(); signal.addEventListener('abort', () => reject(signal.reason), { once: true }); })]) : pending);
   } catch (error) {
-    await rm(join(download.directory, 'BuildManifest.plist'), { force: true });
     throw Object.assign(new Error(error.message), { stage: 'image' });
   }
   return download;
