@@ -503,6 +503,9 @@ export class DeviceContext {
           const target = await this.target();
           if (!target.remote) throw new Error('This device is not configured for RemotePairing.');
           this.changed(target);
+          // A disconnect is meant to stay: its screen panels end first, or their subscription would
+          // start a new helper and reconnect the phone (and its camera and microphone) at once.
+          if (name === 'disconnect_device') screens.closeDevice(target.id);
           return text(await nativeRequest(target, { op: name === 'disconnect_device' ? 'disconnect' : 'reconnect' }));
         }
         case 'get_device_info': {

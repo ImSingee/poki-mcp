@@ -50,7 +50,8 @@ export class Flow {
     if (this.latestOnly) {
       const latest = track.frames.at(-1);
       if (!latest || latest.seq <= this.sent || this.inFlight.size >= 2 || credit < 1) return { frames: [], discontinuity, recover };
-      discontinuity = latest.seq !== this.sent + 1 && this.sent !== 0;
+      // After a resync the view starts again here, whatever it received last.
+      discontinuity = this.sent !== 0 && (latest.seq !== this.sent + 1 || this.waitingKey);
       this.record(latest, now);
       this.waitingKey = false;
       return { frames: [latest], discontinuity, recover };

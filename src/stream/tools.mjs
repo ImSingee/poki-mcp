@@ -76,32 +76,36 @@ export async function screenInput(session, viewer, args, { signal, native = nati
   if (foreignLease()) return failure('The agent is using this iPhone (it holds the device). Take over to control it from here.', { reason: 'busy' });
   try { outsideCall(() => coordinator.access(owner, target)); }
   catch { return failure('The agent is using this iPhone (it holds the device). Take over to control it from here.', { reason: 'busy' }); }
-  let release;
-  try { release = await coordinator.inputLock.acquire([target.id], { session: owner.label, tool: 'screen_input' }, signal, { waitMs: INPUT_WAIT_MS }); }
-  catch (error) {
-    if (error.name !== 'InputLockTimeout') throw error;
-    return failure(`The agent is using this iPhone right now. ${error.message.replace(/ Waited.*$/, '')} Take over to control it from here.`, { reason: 'busy' });
-  }
-  // Recorded as work on the device while it is sent, so no lease can be taken from under it.
-  const dispatch = { owner, devices: new Set([target.id]), controller: new AbortController(), timings: [] };
+  // Work on the device from here on, waiting for the lock included: cancel_device, a takeover or a
+  // lease expiry stops it (the tool call's own operation names no device). While it only waits, a
+  // lease may still be taken (the gesture is then refused below); once it holds the lock, none is.
+  const dispatch = { owner, devices: new Set([target.id]), controller: new AbortController(), timings: [], yieldsToLease: true };
+  let finished;
+  dispatch.done = new Promise(resolve => { finished = resolve; });
+  coordinator.operations.add(dispatch);
+  const stop = signal ? AbortSignal.any([signal, dispatch.controller.signal]) : dispatch.controller.signal;
   try {
-    // Someone may have taken the device's lease while this gesture waited for the lock.
-    if (foreignLease()) return failure('The agent is using this iPhone (it holds the device). Take over to control it from here.', { reason: 'busy' });
-    try { outsideCall(() => coordinator.access(owner, target)); }
-    catch { return failure('The agent is using this iPhone (it holds the device). Take over to control it from here.', { reason: 'busy' }); }
-    let finished;
-    dispatch.done = new Promise(resolve => { finished = resolve; });
-    coordinator.operations.add(dispatch);
+    let release;
+    try { release = await coordinator.inputLock.acquire([target.id], { session: owner.label, tool: 'screen_input' }, stop, { waitMs: INPUT_WAIT_MS }); }
+    catch (error) {
+      if (dispatch.controller.signal.aborted) return failure('The gesture was stopped before it reached the iPhone.', { reason: 'stopped' });
+      if (error.name !== 'InputLockTimeout') throw error;
+      return failure(`The agent is using this iPhone right now. ${error.message.replace(/ Waited.*$/, '')} Take over to control it from here.`, { reason: 'busy' });
+    }
+    dispatch.yieldsToLease = false;
     try {
+      // The panel closed (or another iPhone was chosen) while this gesture waited: it is not sent.
+      if (viewer.closed) return failure('This screen stream has ended. Open it again.', { reason: 'stream_closed' });
+      if (foreignLease()) return failure('The agent is using this iPhone (it holds the device). Take over to control it from here.', { reason: 'busy' });
+      try { outsideCall(() => coordinator.access(owner, target)); }
+      catch { return failure('The agent is using this iPhone (it holds the device). Take over to control it from here.', { reason: 'busy' }); }
       if (taken) coordinator.renew(viewer.owner, viewer.takeover.lease_id, TAKEOVER_TTL_SECONDS);
-      // Sent under the dispatch's own signal too: cancel_device, a takeover or a lease expiry stops
-      // it, which the tool call's signal (no device keys) would not.
-      const reply = await work.run({ signal: signal ? AbortSignal.any([signal, dispatch.controller.signal]) : dispatch.controller.signal, timings: [] }, () => native(target, request));
+      const reply = await work.run({ signal: stop, timings: [] }, () => native(target, request));
       coordinator.changed(target.id);
       if (reply?.isError) return failure(reply.error ?? 'The input was not sent.', { outcome: reply.outcome });
       return result({ sent: reply?.sent !== false, kind: args.kind });
-    } finally { coordinator.operations.delete(dispatch); finished(); }
-  } finally { release(); }
+    } finally { release(); }
+  } finally { coordinator.operations.delete(dispatch); finished(); }
 }
 
 // Stops every other session's work and lease on the device, then holds it for the view.

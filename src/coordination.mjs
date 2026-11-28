@@ -51,7 +51,7 @@ export class Coordination {
   async acquire(session, target, ttl) {
     this.access(session, target);
     if (this.leases.get(target.id)?.owner === session) throw new Error(`This session already holds a lease on ${target.id}. Use renew_device.`);
-    if ([...this.operations].some(op => op.owner !== session && op.devices.has(target.id))) throw new Error('Device has an active operation. Retry after it completes.');
+    if ([...this.operations].some(op => op.owner !== session && op.devices.has(target.id) && !op.yieldsToLease)) throw new Error('Device has an active operation. Retry after it completes.');
     // A previous compatibility recording/location is owned work too.
     for (const owner of session.peers?.() ?? []) if (owner !== session && owner.backgroundDevices.has(target.id)) throw new Error('Device has background work in another session. Its owner must stop or cancel it first.');
     const lease = { lease_id: randomUUID(), device: target.id, owner: session, state: 'active' };

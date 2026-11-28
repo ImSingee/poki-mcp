@@ -222,3 +222,73 @@ test('stopping the device\'s work stops a gesture that is still being sent', asy
   await stopped;
   assert.equal(aborted, true, 'the native request went on after cancel_device');
 });
+
+test('cancel_device stops a gesture that is still waiting for the input lock', async t => {
+  const { coordinator, view, viewer, sent, native } = await setup(t);
+  const release = await coordinator.inputLock.acquire([target.id], { session: 'agent', tool: 'batch_commands' });
+  t.after(release);
+  const started = Date.now();
+  const waiting = screenInput(view, viewer, { kind: 'tap', x: 0.5, y: 0.5 }, { native });
+  await delay(100);
+  const stopped = await coordinator.end(view, 'cancelled', [target.id]);
+  const reply = await waiting;
+  assert.equal(reply.structuredContent.reason, 'stopped', JSON.stringify(reply));
+  assert.equal(stopped.cancelled_operations, 1);
+  assert.ok(Date.now() - started < INPUT_WAIT_MS, 'the gesture waited out the lock after cancel_device');
+  assert.deepEqual(sent, []);
+});
+
+test('a gesture whose panel closed while it waited for the input lock is not sent', async t => {
+  const { coordinator, view, viewer, sent, native } = await setup(t);
+  const release = await coordinator.inputLock.acquire([target.id], { session: 'agent', tool: 'tap' });
+  const waiting = screenInput(view, viewer, { kind: 'tap', x: 0.5, y: 0.5 }, { native });
+  await delay(100);
+  viewer.close();
+  release();
+  const reply = await waiting;
+  assert.equal(reply.structuredContent.reason, 'stream_closed', JSON.stringify(reply));
+  assert.deepEqual(sent, [], 'a gesture from a closed panel reached the phone');
+});
+
+test('disconnect_device ends the phone\'s screen panels, so their subscription does not reconnect it', async t => {
+  const { createServer } = await import('node:net');
+  const { createHash, randomUUID } = await import('node:crypto');
+  const { mkdir, unlink } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const { once } = await import('node:events');
+  const { screens } = await import('../src/stream/hub.mjs');
+  const phone = { id: 'remote-phone', kind: 'physical', name: 'Remote iPhone', remote: `/nonexistent/${randomUUID()}/config.json`, connection: 'RemotePairing' };
+  // The phone's RemotePairing helper, at the socket the daemon derives from its config path.
+  const directory = `/tmp/poki-remote-${process.getuid()}`;
+  await mkdir(directory, { mode: 0o700, recursive: true });
+  const path = join(directory, createHash('sha256').update(phone.remote).digest('hex').slice(0, 24) + '.sock');
+  const ops = [];
+  const server = createServer(socket => {
+    socket.write(JSON.stringify({ pid: process.pid }) + '\n');
+    let buffered = '';
+    socket.on('data', chunk => {
+      buffered += chunk;
+      if (!buffered.includes('\n')) return;
+      const { op } = JSON.parse(buffered.slice(0, buffered.indexOf('\n')));
+      ops.push(op);
+      socket.end(JSON.stringify(op === 'disconnect' ? { disconnected: true } : { error: 'unexpected' }) + '\n');
+    });
+  });
+  server.listen(path);
+  await once(server, 'listening');
+  t.after(async () => { server.close(); await unlink(path).catch(() => {}); });
+  // The daemon's own screens, over a stand-in subscription.
+  const native = fakeNative();
+  const deps = screens.deps;
+  screens.deps = { ...deps, ...native, ffmpeg: async () => false };
+  t.after(() => { screens.closeAll(); screens.deps = deps; });
+  const viewer = await screens.open(phone, { codecs: ['hevc'] });
+  const session = new Session(new Coordination());
+  session.inventory = async () => [phone];
+  const route = await session.route('disconnect_device', { device: phone.id });
+  const reply = await route.run();
+  assert.ok(!reply.isError, JSON.stringify(reply));
+  assert.deepEqual(ops, ['disconnect']);
+  assert.equal(viewer.closed, true, 'the panel kept watching a disconnected phone');
+  assert.equal(native.subscriptions[0].open, false, 'the subscription stayed, to reconnect the phone');
+});

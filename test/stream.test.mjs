@@ -393,3 +393,83 @@ test('input dropped behind a backed-up encoder asks the phone for a key frame', 
   for (let seq = 2; seq <= 4; seq++) native.subscriptions[0].send({ ...key, seq, key: false, data: Buffer.alloc(2 * 1024 * 1024, 1) });
   assert.equal(native.keyframes.length, before + 1, 'the encoder dropped input and nobody asked for a key frame to resume on');
 });
+
+test('an encoder that caught up resumes on the cached chain, even when the key frame asked for was dropped too', async t => {
+  const native = fakeNative();
+  // An encoder that reads nothing until the test drains it; every write is recorded.
+  let stdin;
+  const writes = [];
+  const spawnFake = () => {
+    stdin = new PassThrough({ highWaterMark: 1024 });
+    const write = stdin.write.bind(stdin);
+    stdin.write = chunk => { writes.push(chunk.length); return write(chunk); };
+    return Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), stdin, kill() {} });
+  };
+  const screens = new Screens({ ...native, spawn: spawnFake, ffmpeg: async () => true });
+  t.after(() => screens.closeAll());
+  await screens.open(target, { codecs: ['hevc'] });
+  const [key] = sampleFrames();
+  native.subscriptions[0].send(key);
+  await screens.open(target, { codecs: ['jpeg'] });
+  for (let seq = 2; seq <= 4; seq++) native.subscriptions[0].send({ ...key, seq, key: false, data: Buffer.alloc(2 * 1024 * 1024, 1) });
+  assert.equal(native.keyframes.length, 1);
+  // The key frame the phone sends in answer arrives while the encoder is still backed up.
+  native.subscriptions[0].send({ ...key, seq: 5 });
+  native.subscriptions[0].send({ ...key, seq: 6, key: false, data: Buffer.alloc(100, 2) });
+  writes.length = 0;
+  // The encoder takes its input; nothing new comes from the (still) phone.
+  stdin.resume();
+  await until(() => writes.length > 0, 2000);
+  assert.ok(writes.includes(key.data.length), 'the encoder was not given the cached key frame');
+  native.subscriptions[0].send({ ...key, seq: 7, key: false, data: Buffer.alloc(100, 3) });
+  assert.ok(writes.includes(100), 'the frames after it were not fed');
+});
+
+test('a request for a key frame within a second of the last one is deferred, not dropped', async t => {
+  const native = fakeNative();
+  const spawnFake = () => Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough({ highWaterMark: 1024 }), kill() {} });
+  const screens = new Screens({ ...native, spawn: spawnFake, ffmpeg: async () => true });
+  t.after(() => screens.closeAll());
+  await screens.open(target, { codecs: ['hevc'] });
+  const [key] = sampleFrames();
+  native.subscriptions[0].send(key);
+  await screens.open(target, { codecs: ['jpeg'] });
+  for (let seq = 2; seq <= 4; seq++) native.subscriptions[0].send({ ...key, seq, key: false, data: Buffer.alloc(2 * 1024 * 1024, 1) });
+  assert.equal(native.keyframes.length, 1);
+  // The key frame that answered it is dropped too: a second request follows a second later.
+  native.subscriptions[0].send({ ...key, seq: 5 });
+  await until(() => native.keyframes.length === 2, 2500);
+  assert.ok(native.keyframes[1].at - native.keyframes[0].at >= 990);
+});
+
+test('cancelling one of two screens opening during a cold start leaves the other to open', async t => {
+  let started;
+  const ready = new Promise(resolve => { started = resolve; });
+  const native = fakeNative();
+  const subscribe = async (device, onFrame, { signal } = {}) => {
+    await Promise.race([ready, new Promise((_, reject) => signal?.addEventListener('abort', () => reject(signal.reason), { once: true }))]);
+    return native.subscribe(device, onFrame);
+  };
+  const screens = new Screens({ ...native, subscribe, ffmpeg: async () => false });
+  t.after(() => screens.closeAll());
+  const first = new AbortController(), second = new AbortController();
+  const opening = [screens.open(target, { codecs: ['hevc'], signal: first.signal }), screens.open(target, { codecs: ['hevc'], signal: second.signal })];
+  await delay(20);
+  first.abort(new DOMException('Request cancelled', 'AbortError'));
+  await assert.rejects(opening[0], /cancelled/);
+  started();
+  const viewer = await opening[1];
+  assert.ok(!viewer.closed, 'the second panel was closed with the first');
+  assert.equal(native.subscriptions.length, 1);
+  assert.equal(native.subscriptions[0].open, true);
+  // With every opening caller cancelled, the attempt itself ends.
+  viewer.close();
+  let aborted = false;
+  const lone = new AbortController();
+  const stalled = new Screens({ ...native, subscribe: async (device, onFrame, { signal }) => new Promise((_, reject) => signal.addEventListener('abort', () => { aborted = true; reject(signal.reason); }, { once: true })), ffmpeg: async () => false });
+  const pending = stalled.open(target, { codecs: ['hevc'], signal: lone.signal });
+  await delay(20);
+  lone.abort(new DOMException('Request cancelled', 'AbortError'));
+  await assert.rejects(pending, /cancelled/);
+  assert.equal(aborted, true, 'a subscription nobody waits for went on');
+});

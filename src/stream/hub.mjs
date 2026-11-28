@@ -9,7 +9,7 @@ import { randomBytes } from 'node:crypto';
 import { nativeSubscribe, nativeKeyframe } from '../remote.mjs';
 import { Track } from './track.mjs';
 import { Flow, readLimits } from './flow.mjs';
-import { Transcoder, ffmpegAvailable } from './transcode.mjs';
+import { Transcoder, ffmpegAvailable, ENCODER_BACKLOG_BYTES } from './transcode.mjs';
 
 export const VIEWER_TTL_MS = 10_000;
 export const KEYFRAME_INTERVAL_MS = 1000;
@@ -34,22 +34,40 @@ class ScreenHub {
   }
 
   // Subscribes on the first viewer. Rejects when the phone cannot stream (no displayservice).
+  // The subscription attempt is shared by every viewer opening meanwhile and has its own lifetime:
+  // one caller's cancellation ends only its own wait, and the attempt ends once no caller waits.
   async start(signal) {
     if (this.subscription) return;
-    this.starting ??= (async () => {
-      try {
-        // A new subscription numbers its frames afresh; the track must see a gap before them. Reset
-        // before subscribing: the first frames can arrive in the same chunk as the reply, before
-        // subscribe() resolves.
-        this.nativeBase = undefined;
-        const subscription = await this.deps.subscribe(this.target, frame => this.receive(frame), { signal });
-        if (this.stopped) { subscription.close(); return; }
-        this.subscription = subscription; this.retry = 0; this.error = undefined;
-        this.reply = subscription.reply;
-        subscription.closed.then(() => { if (this.subscription === subscription) { this.subscription = undefined; this.reconnect(); } });
-      } finally { this.starting = undefined; }
-    })();
-    return this.starting;
+    if (!this.starting) {
+      const startup = this.startup = { controller: new AbortController(), waiters: 0, kept: false };
+      this.starting = this.subscribe(startup).finally(() => { if (this.startup === startup) { this.starting = undefined; this.startup = undefined; } });
+    }
+    const startup = this.startup, starting = this.starting;
+    // A caller that cannot be cancelled (a reconnect) keeps the attempt going.
+    if (!signal) { startup.kept = true; return starting; }
+    startup.waiters++;
+    let onAbort;
+    try {
+      signal.throwIfAborted();
+      return await Promise.race([starting, new Promise((_, reject) => { onAbort = () => reject(signal.reason); signal.addEventListener('abort', onAbort, { once: true }); })]);
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+      startup.waiters--;
+      if (signal.aborted && !startup.waiters && !startup.kept) startup.controller.abort(signal.reason);
+    }
+  }
+
+  async subscribe(startup) {
+    const { signal } = startup.controller;
+    // A new subscription numbers its frames afresh; the track must see a gap before them. Reset
+    // before subscribing: the first frames can arrive in the same chunk as the reply, before
+    // subscribe() resolves.
+    this.nativeBase = undefined;
+    const subscription = await this.deps.subscribe(this.target, frame => this.receive(frame), { signal });
+    if (this.stopped) { subscription.close(); return; }
+    this.subscription = subscription; this.retry = 0; this.error = undefined;
+    this.reply = subscription.reply;
+    subscription.closed.then(() => { if (this.subscription === subscription) { this.subscription = undefined; this.reconnect(); } });
   }
 
   reconnect() {
@@ -86,6 +104,7 @@ class ScreenHub {
         onFrame: frame => { track.push({ ...frame, seq: ++seq, at: performance.now() }); this.pushed(codec); },
         // It resumes only at a key frame, which a still screen sends only when asked.
         onStall: () => this.askSourceKeyframe(),
+        onDrain: () => this.resumeEncoder(transcoder),
         onExit: ({ closed, code, stderr }) => {
           if (closed) return;
           transcoder.lastExit = stderr || `exit code ${code}`;
@@ -115,12 +134,25 @@ class ScreenHub {
     this.askSourceKeyframe();
   }
 
-  // Asks the phone for a key frame for an encoder, at most once a second.
+  // Asks the phone for a key frame for an encoder, at most once a second: a request within that
+  // second is deferred to its end, not dropped (the key frame asked for may itself be lost).
   askSourceKeyframe() {
-    const now = performance.now();
-    if (now - (this.chainKeyframeAt ?? -Infinity) < KEYFRAME_INTERVAL_MS) return;
-    this.chainKeyframeAt = now;
-    this.deps.keyframe(this.target).catch(() => {});
+    if (this.stopped || this.chainKeyframeTimer) return;
+    const wait = (this.chainKeyframeAt ?? -Infinity) + KEYFRAME_INTERVAL_MS - performance.now();
+    const ask = () => { this.chainKeyframeTimer = undefined; if (this.stopped) return; this.chainKeyframeAt = performance.now(); this.deps.keyframe(this.target).catch(() => {}); };
+    if (wait <= 0) { ask(); return; }
+    this.chainKeyframeTimer = setTimeout(ask, wait);
+    this.chainKeyframeTimer.unref?.();
+  }
+
+  // A backed-up encoder caught up: it resumes on the cached chain when that fits its input
+  // buffer, else at the phone's next key frame.
+  resumeEncoder(transcoder) {
+    if (transcoder.closed || transcoder.feeding || this.transcoders.get(transcoder.mode) !== transcoder) return;
+    const hevc = this.tracks.get('hevc'), key = hevc.latestKey();
+    const chain = key ? hevc.since(key.seq - 1) : [];
+    if (key && chain.reduce((sum, frame) => sum + frame.data.length, 0) <= ENCODER_BACKLOG_BYTES) { for (const frame of chain) transcoder.write(frame); return; }
+    this.askSourceKeyframe();
   }
 
   bitrate(codec) {
@@ -167,7 +199,8 @@ class ScreenHub {
   }
 
   stop() {
-    this.stopped = true; clearTimeout(this.retryTimer);
+    this.stopped = true; clearTimeout(this.retryTimer); clearTimeout(this.chainKeyframeTimer);
+    this.startup?.controller.abort(new DOMException('The screen stream ended', 'AbortError'));
     this.subscription?.close(); this.subscription = undefined;
     for (const transcoder of this.transcoders.values()) transcoder.close();
     for (const track of this.tracks.values()) track.close();

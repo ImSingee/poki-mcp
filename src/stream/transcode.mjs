@@ -121,11 +121,15 @@ const HEVC_AUD = Buffer.from([0, 0, 0, 1, 0x46, 0x01, 0x50]);
 // One encoder process. write() takes the phone's HEVC frames ({ key, data }); onFrame receives
 // the output frames ({ key, config?, data, pts_us }). The encoder only starts on a key frame, and
 // a write that would back up behind a slow encoder drops input up to the next key frame.
+// Input queued for an encoder beyond this is dropped up to the next key frame.
+export const ENCODER_BACKLOG_BYTES = 4 * 1024 * 1024;
+
 export class Transcoder {
   child; splitter; feeding = false; pts = []; closed = false; restarts = 0;
   // onStall: input was dropped (a backed-up encoder); feeding resumes at the next key frame.
-  constructor(mode, { onFrame, onExit, onStall, spawn = spawnProcess, ...options } = {}) {
-    Object.assign(this, { mode, onFrame, onExit, onStall, spawn, options });
+  // onDrain: that encoder took its backed-up input; it can be fed again from a key frame.
+  constructor(mode, { onFrame, onExit, onStall, onDrain, spawn = spawnProcess, ...options } = {}) {
+    Object.assign(this, { mode, onFrame, onExit, onStall, onDrain, spawn, options });
   }
 
   get running() { return Boolean(this.child); }
@@ -163,7 +167,12 @@ export class Transcoder {
     if (!this.child) this.start();
     if (!this.feeding && !frame.key) return;
     // A slow encoder: skip input up to the next key frame rather than queue it without bound.
-    if (this.child.stdin.writableLength > 4 * 1024 * 1024) { this.feeding = false; this.onStall?.(); return; }
+    if (this.child.stdin.writableLength > ENCODER_BACKLOG_BYTES) {
+      this.feeding = false; this.onStall?.();
+      const child = this.child;
+      if (!child.draining) { child.draining = true; child.stdin.once('drain', () => { child.draining = false; if (this.child === child && !this.closed && !this.feeding) this.onDrain?.(); }); }
+      return;
+    }
     this.feeding = true;
     this.pts.push(frame.pts_us);
     if (this.pts.length > 256) this.pts.shift();

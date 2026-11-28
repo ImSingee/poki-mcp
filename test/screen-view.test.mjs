@@ -55,16 +55,19 @@ const hostPage = `<!doctype html><html><head><meta charset="utf-8"><style>body{m
 </script></body></html>`;
 
 // Poki's stream tools over a stand-in phone that sends the sample stream in a loop, 10 frames a second.
-function backend({ rtcConfig, rtcConfigDelayMs = 0, noFrames = false, busy = false, garbleHevc = false, rtcOffer, openCodecString, inputDelayMs = 0, onlyFirstKey = false, delayFirstFramesMs = 0, devices = [{ id: 'fixture-phone', name: 'Lab iPhone', kind: 'physical', connection: 'RemotePairing' }] } = {}) {
+function backend({ rtcConfig, rtcConfigDelayMs = 0, noFrames = false, busy = false, garbleHevc = false, rtcOffer, openCodecString, inputDelayMs = 0, onlyFirstKey = false, delayFirstFramesMs = 0, firstPhoneOnly = false, garbleJpegAfterFirst = false, loseReads = 0, devices = [{ id: 'fixture-phone', name: 'Lab iPhone', kind: 'physical', connection: 'RemotePairing' }] } = {}) {
   const native = fakeNative();
   const screens = new Screens({ subscribe: native.subscribe, keyframe: native.keyframe });
   const session = { coordinator: new Coordination(), label: 'view session' };
   const calls = [], inputs = [];
-  let inFlight = 0, maxInFlight = 0, seq = 0, firstFramesSent = false;
+  let inFlight = 0, maxInFlight = 0, seq = 0, firstFramesSent = false, jpegBatches = 0, lost = 0;
+  const delivered = [];
   const frames = sampleFrames();
   const feeder = setInterval(() => {
     const subscription = native.subscriptions.at(-1);
     if (!subscription?.open || noFrames) return;
+    // firstPhoneOnly: a phone chosen later sends nothing yet, as one still starting its stream.
+    if (firstPhoneOnly && native.subscriptions.length > 1) return;
     // onlyFirstKey: one key frame, then deltas only, as a still screen after its first picture.
     const frame = onlyFirstKey && seq > 0 ? frames[1 + (seq - 1) % 3] : frames[seq % frames.length];
     seq++;
@@ -86,13 +89,20 @@ function backend({ rtcConfig, rtcConfigDelayMs = 0, noFrames = false, busy = fal
       });
       // The reply carrying the first frames is slow: the next read's later frames overtake it.
       if (name === 'screen_read' && delayFirstFramesMs && !firstFramesSent && result.structuredContent?.frames?.length) { firstFramesSent = true; delayed = true; await delay(delayFirstFramesMs); }
+      if (name === 'screen_read' && result.structuredContent?.frames?.length) {
+        // garbleJpegAfterFirst: one picture decodes, every later one is not a JPEG.
+        if (garbleJpegAfterFirst && result.structuredContent.codec === 'jpeg' && jpegBatches++ > 0) for (const frame of result.structuredContent.frames) frame.data = Buffer.from('not a jpeg').toString('base64');
+        delivered.push(...result.structuredContent.frames.map(f => f.seq));
+        // loseReads: replies the server sent that never reach the view (a relay dropped them).
+        if (lost < loseReads) { lost++; throw new Error('The relay dropped this reply.'); }
+      }
       // A codec string the browser cannot configure, to make the first decoder fail at once.
       if (name === 'screen_open' && openCodecString && result.structuredContent?.codec === 'hevc') result.structuredContent.codec_string = openCodecString;
       // Through the bridge, as JSON: a Buffer would not survive.
       return JSON.parse(JSON.stringify(result));
     } finally { inFlight--; }
   };
-  return { handle, calls, inputs, native, screens, session, count: name => calls.filter(c => c.name === name).length, get maxInFlight() { return maxInFlight; }, stop: () => { clearInterval(feeder); screens.closeAll(); } };
+  return { handle, calls, inputs, native, screens, session, delivered, count: name => calls.filter(c => c.name === name).length, get maxInFlight() { return maxInFlight; }, stop: () => { clearInterval(feeder); screens.closeAll(); } };
 }
 
 let shared, server;
@@ -282,6 +292,41 @@ test('choosing another iPhone closes the previous stream', { skip, timeout: 6000
   await until(() => h.poki.calls.some(c => c.name === 'screen_close' && c.args.stream === first));
   // Phone A's subscription ends with its only viewer, so its camera and microphone are released.
   await until(() => h.poki.native.subscriptions[0].open === false);
+});
+
+test('while another iPhone\'s stream starts, the previous phone\'s picture is gone and taps on it go nowhere', { skip, timeout: 60000 }, async t => {
+  const devices = [{ id: 'phone-a', name: 'Phone A', kind: 'physical', connection: 'RemotePairing' }, { id: 'phone-b', name: 'Phone B', kind: 'physical', connection: 'RemotePairing' }];
+  const h = await open(t, { settings: { rtc: false, codecs: (await ffmpegAvailable()) ? ['jpeg'] : undefined }, backendOptions: { devices, firstPhoneOnly: true } });
+  await h.mount({ content: [{ type: 'text', text: 'shown' }], structuredContent: { device: 'phone-a' } });
+  await until(() => painted(h.frame()));
+  const box = await h.view.locator('#screen').boundingBox();
+  await h.view.locator('#device').selectOption('phone-b');
+  await until(() => h.poki.calls.some(c => c.name === 'screen_open' && c.args.device === 'phone-b'));
+  assert.equal(await h.frame().evaluate(() => document.getElementById('screen').hidden), true, 'Phone A\'s picture still shows for Phone B');
+  assert.equal(await h.frame().evaluate(() => document.getElementById('placeholder').hidden), false);
+  // Where Phone A's picture was: nothing is there to aim at on Phone B yet.
+  await h.page.mouse.click(box.x + box.width * 0.5, box.y + box.height * 0.5);
+  await delay(1000);
+  assert.deepEqual(h.poki.inputs, [], `a tap on the old picture reached ${JSON.stringify(h.poki.inputs.map(i => i.device))}`);
+});
+
+test('JPEG pictures that fail to decode after one that did still return their credit, until the codec is given up', { skip, timeout: 60000 }, async t => {
+  if (!(await ffmpegAvailable())) return t.skip('ffmpeg is not installed, so there is no JPEG track');
+  const h = await open(t, { settings: { rtc: false, codecs: ['jpeg'] }, backendOptions: { garbleJpegAfterFirst: true } });
+  await h.mount(showResult);
+  await until(() => painted(h.frame()));
+  // Two undecodable pictures fill the JPEG window; without their credit back nothing more comes.
+  await until(() => h.poki.delivered.length >= 5, 12000).catch(() => {});
+  assert.ok(h.poki.delivered.length >= 5, `only ${h.poki.delivered.length} pictures were sent: the failed ones kept their credit`);
+});
+
+test('pictures whose read replies were lost return their credit, and the stream goes on', { skip, timeout: 60000 }, async t => {
+  if (!(await ffmpegAvailable())) return t.skip('ffmpeg is not installed, so there is no JPEG track');
+  const h = await open(t, { settings: { rtc: false, codecs: ['jpeg'] }, backendOptions: { loseReads: 2 } });
+  await h.mount(showResult);
+  await until(() => h.poki.delivered.length >= 2);
+  await until(() => painted(h.frame()), 10000).catch(() => {});
+  assert.ok(await painted(h.frame()), `no picture after two lost replies (${h.poki.delivered.length} sent)`);
 });
 
 test('a decoder that fails while WebRTC is still connecting falls back to the next codec', { skip, timeout: 60000 }, async t => {
