@@ -933,7 +933,7 @@ export class Session {
   async removePairing(target, approval) {
     await pairingJobs.cancelForDevice(target.id);
     // An open screen panel of it ends too, which releases the phone's camera and microphone.
-    screens.closeDevice(target.id);
+    screens.closeDevice(target.id, 'device_unpaired');
     // Every session's accepted work, recordings, locations and leases on it end, and their cached
     // state for it goes, so the id no longer resolves anywhere.
     const sessions = new Set([this, ...(this.peers?.() ?? [])]);

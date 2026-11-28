@@ -202,6 +202,9 @@ class Decoder {
         // Replaced while decoding (another iPhone, another codec): the picture and its number
         // belong to the old stream.
         if (this.closed) { picture.close(); return; }
+        // A newer picture finished decoding first: the older one is not shown over it.
+        if (frame.seq < (this.presentedSeq ?? 0)) { picture.close(); this.onDecoded(frame.seq); return; }
+        this.presentedSeq = frame.seq;
         present(picture); this.shown(); stats.decoded++; this.onDecoded(frame.seq);
       }
       // A picture that cannot be decoded still returns its credit: the next one may decode.
@@ -274,6 +277,16 @@ function decoded(seq, broken) {
 
 // One stream per device: a second request while one opens for the same device waits for it.
 let opening;
+// The iPhone was disconnected or unpaired on purpose: the panel stops and waits for the person,
+// since opening the stream again would reconnect the phone (and its camera and microphone).
+function endedOnPurpose(reason, message, generation) {
+  if (!['device_disconnected', 'device_unpaired'].includes(reason) || generation !== state.generation) return false;
+  state.generation++;
+  stop(false);
+  $('placeholder').textContent = message;
+  notice(message, reason === 'device_disconnected' ? { label: 'Reconnect', run: () => { notice(''); void openStream(); } } : undefined);
+  return true;
+}
 function openStream() {
   if (opening?.device === state.device && opening.generation === state.generation) return opening.promise;
   const promise = startStream();
@@ -326,7 +339,7 @@ async function poll(generation, lane) {
       const reply = await call('screen_read', args);
       if (generation !== state.generation) return;
       state.failures = 0;
-      if (reply.closed) { void openStream(); return; }
+      if (reply.closed) { if (endedOnPurpose(reply.reason, reply.error, generation)) return; void openStream(); return; }
       if (reply.codec_failed) { fallBack(generation); return; }
       if (reply.codec_string && reply.codec_string !== state.codecString) { state.codecString = reply.codec_string; decoder?.reconfigure(reply.codec_string); }
       if (reply.frames?.length) { stats.latency = Math.round(performance.now() - started); accept(reply, generation); }
@@ -339,6 +352,7 @@ async function poll(generation, lane) {
       // Frames the server took for the lost reply hold credit this view never returns: the next
       // read resynchronizes (a resync that call carried is asked for again).
       resync();
+      if (endedOnPurpose(error.data?.reason, error.message, generation)) return;
       if (/ended|closed/i.test(error.message)) { void openStream(); return; }
       if (state.failures >= 6) { if (state.codec !== 'jpeg') fallBack(generation); else notice(error.message); return; }
       await new Promise(r => setTimeout(r, 300 * state.failures));

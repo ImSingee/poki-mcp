@@ -244,7 +244,7 @@ class Viewer {
     if (Number.isSafeInteger(max_bytes) && max_bytes >= 16 * 1024) limits.maxBytes = Math.min(limits.maxBytes, max_bytes);
     const deadline = now() + Math.min(Math.max(0, wait_ms), MAX_WAIT_MS);
     for (;;) {
-      if (this.closed) return { stream: this.id, device: this.device, codec: this.codec, closed: true, frames: [] };
+      if (this.closed) return { stream: this.id, device: this.device, codec: this.codec, closed: true, ...(this.ended ? { reason: this.ended.reason, error: this.ended.message } : {}), frames: [] };
       // The codec cannot be served any more: the view opens the stream again in another one.
       if (this.hub.failed.has(this.codec)) return { ...this.describe(), codec_failed: true, error: this.hub.failed.get(this.codec), frames: [] };
       const track = this.track;
@@ -261,12 +261,19 @@ class Viewer {
     }
   }
 
-  close() { this.closed = true; void this.rtc?.close(); this.screens.detach(this); }
+  // ended: why the device's panels were ended on purpose (disconnect_device, unpair_device); a view
+  // told so does not open the stream again on its own.
+  close(ended) {
+    if (this.closed) return;
+    this.closed = true; this.ended = ended;
+    if (ended) this.screens.remember(this.id, ended);
+    void this.rtc?.close(); this.screens.detach(this);
+  }
 }
 
 // Every device's live screen in this daemon.
 export class Screens {
-  hubs = new Map(); viewers = new Map(); sweeper;
+  hubs = new Map(); viewers = new Map(); ended = new Map(); sweeper;
   constructor({ ttlMs = VIEWER_TTL_MS, ...deps } = {}) { this.ttlMs = ttlMs; this.deps = { subscribe: nativeSubscribe, keyframe: nativeKeyframe, ffmpeg: ffmpegAvailable, ...deps }; }
 
   // The codecs this host can serve, in the order a view tries them.
@@ -300,8 +307,16 @@ export class Screens {
 
   get(id) {
     const viewer = typeof id === 'string' ? this.viewers.get(id) : undefined;
+    const ended = typeof id === 'string' ? this.ended.get(id) : undefined;
+    if (!viewer && ended) throw Object.assign(new Error(ended.message), { code: ended.reason });
     if (!viewer || viewer.closed) throw Object.assign(new Error('This screen stream has ended. Open it again.'), { code: 'stream_closed' });
     return viewer;
+  }
+
+  // Why a stream was ended on purpose, for the view's later calls on it (a bounded memory).
+  remember(id, ended) {
+    this.ended.set(id, ended);
+    for (const key of this.ended.keys()) { if (this.ended.size <= 64) break; this.ended.delete(key); }
   }
 
   detach(viewer) {
@@ -326,7 +341,10 @@ export class Screens {
   }
 
   // Every viewer of a device ends: it was unpaired or disconnected.
-  closeDevice(id) { for (const viewer of [...this.viewers.values()]) if (viewer.device === id) viewer.close(); }
+  closeDevice(id, reason = 'device_disconnected') {
+    const message = reason === 'device_unpaired' ? 'This iPhone was unpaired, so its screen is no longer shown.' : 'This iPhone was disconnected. Reconnect to show its screen again.';
+    for (const viewer of [...this.viewers.values()]) if (viewer.device === id) viewer.close({ reason, message });
+  }
   closeAll() { for (const viewer of [...this.viewers.values()]) viewer.close(); }
   get active() { return this.viewers.size; }
 }

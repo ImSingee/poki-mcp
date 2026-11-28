@@ -151,7 +151,7 @@ export async function runScreenTool(session, name, args, { resolve, signal, scre
   }
   let viewer;
   try { viewer = screens.get(args.stream); }
-  catch (error) { return failure(error.message, { reason: 'stream_closed' }); }
+  catch (error) { return failure(error.message, { reason: error.code ?? 'stream_closed' }); }
   switch (name) {
     case 'screen_read': {
       const reply = await viewer.read(args, signal);

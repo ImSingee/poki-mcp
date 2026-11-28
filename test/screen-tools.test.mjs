@@ -6,7 +6,7 @@ import { Coordination } from '../src/coordination.mjs';
 import { work } from '../src/work.mjs';
 import { Session } from '../src/device.mjs';
 import { Screens } from '../src/stream/hub.mjs';
-import { nativeInput, screenInput, takeOver, INPUT_WAIT_MS } from '../src/stream/tools.mjs';
+import { nativeInput, screenInput, takeOver, runScreenTool, INPUT_WAIT_MS } from '../src/stream/tools.mjs';
 import { iceServers, packet, chunks, RTC_CHUNK_BYTES, MAGIC } from '../src/stream/rtc.mjs';
 import { fakeNative } from './stream-fixture.mjs';
 
@@ -290,5 +290,9 @@ test('disconnect_device ends the phone\'s screen panels, so their subscription d
   assert.ok(!reply.isError, JSON.stringify(reply));
   assert.deepEqual(ops, ['disconnect']);
   assert.equal(viewer.closed, true, 'the panel kept watching a disconnected phone');
+  // The view is told it was a disconnect, by a read still waiting and by a later call on the stream.
+  assert.equal((await viewer.read({ wait_ms: 0 })).reason, 'device_disconnected');
+  const later = await runScreenTool(session, 'screen_read', { stream: viewer.id, wait_ms: 0 }, { screens });
+  assert.equal(later.structuredContent?.reason, 'device_disconnected', JSON.stringify(later));
   assert.equal(native.subscriptions[0].open, false, 'the subscription stayed, to reconnect the phone');
 });

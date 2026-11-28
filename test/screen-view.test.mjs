@@ -329,6 +329,46 @@ test('pictures whose read replies were lost return their credit, and the stream 
   assert.ok(await painted(h.frame()), `no picture after two lost replies (${h.poki.delivered.length} sent)`);
 });
 
+test('an iPhone disconnected on purpose is not reconnected by the panel until the person asks', { skip, timeout: 60000 }, async t => {
+  const h = await open(t, { settings: { rtc: false, codecs: (await ffmpegAvailable()) ? ['jpeg'] : undefined } });
+  await h.mount(showResult);
+  await until(() => painted(h.frame()));
+  assert.equal(h.poki.count('screen_open'), 1);
+  // disconnect_device ends the phone's panels.
+  h.poki.screens.closeDevice('fixture-phone');
+  await until(async () => (await h.view.locator('#notice').textContent()).includes('disconnected'));
+  await delay(2000);
+  assert.equal(h.poki.count('screen_open'), 1, 'the panel opened the stream again, reconnecting the phone');
+  assert.equal(h.poki.native.subscriptions.at(-1).open, false);
+  // The person reconnects.
+  await h.view.locator('#notice button', { hasText: 'Reconnect' }).click();
+  await until(() => h.poki.count('screen_open') === 2);
+  await until(() => painted(h.frame()));
+});
+
+test('a JPEG picture that finishes decoding after a newer one is not shown over it', { skip, timeout: 60000 }, async t => {
+  if (!(await ffmpegAvailable())) return t.skip('ffmpeg is not installed, so there is no JPEG track');
+  const h = await open(t, { settings: { rtc: false, codecs: ['jpeg'] }, backendOptions: { noFrames: true } });
+  await h.mount(showResult);
+  await until(() => h.frame().evaluate(() => globalThis.pokiScreenInternals.decoder()?.codec === 'jpeg'));
+  const centre = await h.frame().evaluate(async () => {
+    const jpeg = async colour => { const c = new OffscreenCanvas(90, 195); const g = c.getContext('2d'); g.fillStyle = colour; g.fillRect(0, 0, 90, 195); return new Uint8Array(await (await c.convertToBlob({ type: 'image/jpeg' })).arrayBuffer()); };
+    const older = await jpeg('#ff0000'), newer = await jpeg('#0000ff');
+    // The older picture's decode finishes last.
+    const original = globalThis.createImageBitmap;
+    let calls = 0;
+    globalThis.createImageBitmap = async blob => { const first = calls++ === 0; const bitmap = await original(blob); if (first) await new Promise(r => setTimeout(r, 300)); return bitmap; };
+    const decoder = globalThis.pokiScreenInternals.decoder();
+    await Promise.all([decoder.decode({ seq: 1, key: true, data: older }), decoder.decode({ seq: 2, key: true, data: newer })]);
+    await new Promise(r => setTimeout(r, 300));
+    globalThis.createImageBitmap = original;
+    const canvas = document.getElementById('screen');
+    const [r, , b] = canvas.getContext('2d').getImageData(canvas.width >> 1, canvas.height >> 1, 1, 1).data;
+    return { r, b };
+  });
+  assert.ok(centre.b > 200 && centre.r < 60, `the older picture is shown over the newer one: ${JSON.stringify(centre)}`);
+});
+
 test('a decoder that fails while WebRTC is still connecting falls back to the next codec', { skip, timeout: 60000 }, async t => {
   if (!(await ffmpegAvailable())) return t.skip('ffmpeg is not installed, so there is no codec to fall back to');
   const h = await open(t, { settings: { rtc: true, codecs: ['hevc', 'jpeg'] }, backendOptions: {
