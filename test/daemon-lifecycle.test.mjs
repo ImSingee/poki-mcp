@@ -467,6 +467,20 @@ test('POKI_DAEMON_ENV cannot pass the client\'s secrets or the shim\'s own varia
   assert.match(warnings[0], /POKI_IPHONE_PASSCODE, OPENAI_API_KEY, POKI_PARENT_PID, POKI_MCP_TOKEN, POKI_MCP_SESSION/);
 });
 
+test('POKI_DAEMON_ENV refuses secrets by whole words and does not call a passed setting refused', async () => {
+  const { daemonEnvironment, refusedExtra } = await import('../src/daemon-launch.mjs');
+  assert.equal(refusedExtra('KEYBOARD_LAYOUT'), false);
+  assert.equal(refusedExtra('MONKEY_PATH'), false);
+  assert.equal(refusedExtra('OPENAI_API_KEY'), true);
+  assert.equal(refusedExtra('GITHUB_TOKEN'), true);
+  const warnings = [];
+  // POKI_TYPE_KEY_MS and POKI_TLS_KEY are the daemon's own settings: passed, so not reported as refused.
+  const env = daemonEnvironment({ POKI_DAEMON_ENV: 'KEYBOARD_LAYOUT,POKI_TYPE_KEY_MS,POKI_TLS_KEY,MY_SECRET', KEYBOARD_LAYOUT: 'us', POKI_TYPE_KEY_MS: '20', POKI_TLS_KEY: '/k.pem', MY_SECRET: 's' }, message => warnings.push(message));
+  assert.deepEqual(Object.keys(env).sort(), ['KEYBOARD_LAYOUT', 'POKI_TLS_KEY', 'POKI_TYPE_KEY_MS']);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /names MY_SECRET, which/);
+});
+
 // A session kept by heartbeats alone (no request open, as when a client's background stream is gone)
 // must not be dropped because the daemon itself was stopped for longer than the heartbeat window:
 // the daemon read no heartbeats meanwhile.
@@ -558,4 +572,46 @@ test('a call sent again after an outdated service refused it is refused when the
   assert.equal(opened.isError, true);
   assert.match(opened.content[0].text, /approval mode ask.*uses allow/s);
   assert.equal((await f.events()).filter(event => event.args?.includes('openurl')).length, 0, 'nothing was opened under the weaker mode');
+});
+
+test('daemons are told apart by address, token and instance, not by pid', async () => {
+  const { sameDaemon } = await import('../src/daemon-launch.mjs');
+  const one = { url: 'http://127.0.0.1:47825/mcp', token: 't'.repeat(40), pid: 1, instance: 'a' };
+  assert.equal(sameDaemon(one, { ...one }), true);
+  assert.equal(sameDaemon(one, { ...one, pid: 7 }), true, 'a pid seen from another namespace');
+  assert.equal(sameDaemon(one, { ...one, instance: 'b' }), false, 'a restart on the same port with the same token');
+  assert.equal(sameDaemon(one, { ...one, url: 'http://127.0.0.1:47826/mcp' }), false);
+});
+
+// npm start on a fixed port with a fixed POKI_MCP_TOKEN, restarted: the same address and token, but
+// another daemon. A connected shim notices (421), finds it again, and starts its order and approval
+// check over there.
+test('a service restarted on the same port with the same token is treated as a new one', { timeout: 40000 }, async t => {
+  const f = await fixture(t, { daemon: false, approvalMode: 'ask' });
+  await f.set({ simulatorOnly: true, simulatorBooted: true });
+  const token = 'fixed-token-'.padEnd(40, 'x');
+  const children = [];
+  t.after(() => { for (const child of children) child.kill('SIGKILL'); });
+  const start = async (port, mode) => {
+    const child = spawn(process.execPath, [join(f.dir, 'src/daemon.mjs'), '--port', String(port)], { env: { ...f.env, POKI_MCP_TOKEN: token, POKI_MCP_APPROVAL_MODE: mode }, stdio: ['ignore', 'pipe', 'inherit'] });
+    children.push(child);
+    await new Promise(resolve => child.stdout.on('data', chunk => { if (String(chunk).includes('"ready"')) resolve(); }));
+    return child;
+  };
+  const stop = async child => { child.kill('SIGTERM'); await once(child, 'exit'); };
+  let daemon = await start(0, 'ask');
+  const { port } = await endpointOf(f);
+  for (let i = 0; i < 3; i++) assert.notEqual((await f.call('tap', { x: 10, y: 10 })).isError, true);
+  // Same mode: the first call there does not wait for the calls the old daemon numbered.
+  await stop(daemon); daemon = await start(port, 'ask');
+  const tap = await f.call('tap', { x: 10, y: 10 });
+  assert.notEqual(tap.isError, true, tap.content?.[0]?.text);
+  const queue = tap._meta.timing.stages.find(stage => stage.phase === 'queue').elapsed_ms;
+  assert.ok(queue < 400, `the call waited ${queue} ms for calls that never come`);
+  // A weaker mode: the stricter check applies to the first call there.
+  await stop(daemon); daemon = await start(port, 'allow');
+  const opened = await f.call('open_url', { url: 'https://example.com' });
+  assert.equal(opened.isError, true);
+  assert.match(opened.content[0].text, /approval mode ask.*uses allow/s);
+  assert.equal((await f.events()).filter(event => event.args?.includes('openurl')).length, 0);
 });

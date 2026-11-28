@@ -1,6 +1,6 @@
 import http from 'node:http';
 import https from 'node:https';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { mkdir, writeFile, readFile, unlink, rename, chmod } from 'node:fs/promises';
 import { once } from 'node:events';
 import { NodeStreamableHTTPServerTransport, localhostHostValidation, localhostOriginValidation, hostHeaderValidation } from '@modelcontextprotocol/node';
@@ -40,6 +40,9 @@ await warnIfNativeStale();
 const sessions = new Map();
 const coordinator = new Coordination();
 const token = process.env.POKI_MCP_TOKEN?.trim() || randomBytes(32).toString('hex');
+// This process, as opposed to another daemon at the same address with the same token (a fixed port and
+// POKI_MCP_TOKEN, restarted): in mcp.json and /version, and checked on every request a shim sends.
+const instance = randomUUID();
 // A short token is the only thing standing between the network and the device, and it is cheap
 // to type in a shell by mistake.
 if (token.length < 32) throw new Error('POKI_MCP_TOKEN must be at least 32 characters long.');
@@ -134,7 +137,7 @@ async function pruneSessions() {
 const versionInfo = async () => {
   const reasons = busyReasons();
   // stale: this checkout's files changed after this process loaded them.
-  return { version, code: codeFingerprint, stale: await currentCodeFingerprint() !== codeFingerprint, pid: process.pid, auto, approval_mode: approval, sessions: sessions.size, busy: reasons.length > 0, busy_reasons: reasons };
+  return { version, code: codeFingerprint, stale: await currentCodeFingerprint() !== codeFingerprint, pid: process.pid, instance, auto, approval_mode: approval, sessions: sessions.size, busy: reasons.length > 0, busy_reasons: reasons };
 };
 
 async function handle(req, res) {
@@ -146,6 +149,10 @@ async function handle(req, res) {
     return;
   }
   lastActivity = performance.now();
+  // A shim that reached this address for another instance: 421, which it answers by finding the daemon
+  // again (its order, approval mode and session start over there), as it does after a restart.
+  const expectedInstance = req.headers['x-poki-mcp-instance'];
+  if (typeof expectedInstance === 'string' && expectedInstance !== instance) { res.writeHead(421, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'another Poki MCP instance' })); return; }
   if (req.url === '/version') {
     if (req.method !== 'GET') { res.writeHead(405); res.end(); return; }
     await pruneSessions();
@@ -220,14 +227,14 @@ await once(servers[0], 'listening');
 const actualPort = servers[0].address().port;
 for (const [index, server] of servers.entries()) if (index > 0) server.listen(actualPort, bindHosts[index]);
 await Promise.all(servers.slice(1).map(server => once(server, 'listening')));
-const entry = { url: `http://127.0.0.1:${actualPort}/mcp`, port: actualPort, token, enabled: true, pid: process.pid, ...(pidNamespace ? { pid_ns: pidNamespace } : {}) };
+const entry = { url: `http://127.0.0.1:${actualPort}/mcp`, port: actualPort, token, enabled: true, pid: process.pid, instance, ...(pidNamespace ? { pid_ns: pidNamespace } : {}) };
 const temporary = `${endpointFile}.${process.pid}.tmp`;
 await writeFile(temporary, JSON.stringify(entry, null, 2), { mode: 0o600, flag: 'wx' });
 await rename(temporary, endpointFile);
 await chmod(endpointFile, 0o600);
 // mcp.json names this daemon when it holds this daemon's address and token. Pids are not compared: two
 // daemons in different PID namespaces can have the same one.
-const ours = named => named?.url === entry.url && named?.token === token;
+const ours = named => named?.url === entry.url && named?.token === token && named?.instance === instance;
 console.log(JSON.stringify({ event: 'ready', pid: process.pid, url: entry.url, endpointFile, tools: definitions.length, auto, approval_mode: approval }));
 
 const stopUpdateChecks = startUpdateChecks();

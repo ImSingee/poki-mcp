@@ -28,6 +28,8 @@ const send = (path, init, to = endpoint) => {
   headers.set('Authorization', `Bearer ${to.token}`);
   headers.set('x-poki-mcp-session', session);
   headers.set('x-poki-mcp-heartbeat-ms', String(heartbeatMs));
+  // The daemon this shim found; another at the same address answers 421.
+  if (to.instance) headers.set('x-poki-mcp-instance', to.instance);
   return fetch(new URL(path, to.url), { ...init, headers });
 };
 const refused = error => error.cause?.code === 'ECONNREFUSED';
@@ -94,9 +96,9 @@ async function request(path, init) {
     }
     try {
       const response = await send(path, { ...init, body }, to);
-      if (response.status !== 401) return { response };
+      if (response.status !== 401 && response.status !== 421) return { response };
       await response.body?.cancel();
-      return { retry: to, status: 401 };
+      return { retry: to, status: response.status };
     } catch (error) {
       if (!refused(error)) throw lost(error);
       return { retry: to };
@@ -107,6 +109,7 @@ async function request(path, init) {
   await reconnect(Boolean(call), first.retry);
   const second = await attempt();
   if (second.response) return second.response;
+  if (second.status === 421) throw new Error(`The Poki MCP service at ${endpoint.url} is not the one ${endpointFile} names. Retry the call.`);
   if (second.status === 401) throw new Error(`The running Poki MCP rejected the token in ${endpointFile}. Stop it; the next call starts it again.`);
   throw call ? new Error(`Poki MCP (pid ${endpoint.pid}) refused the connection. Retry the call.`) : unavailable();
 }
