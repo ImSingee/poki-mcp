@@ -114,9 +114,15 @@ export async function takeOver(session, viewer) {
   const lease = coordinator.leases.get(target.id);
   if (lease && lease.owner !== viewer.owner) owners.add(lease.owner);
   await Promise.all([...owners].map(owner => coordinator.end(owner, 'taken_over', [target.id])));
+  // The panel may have closed while the agent's work was stopping: no lease for a gone viewer.
+  if (viewer.closed) return failure('The screen panel closed before the takeover finished; the agent\'s work was stopped, and the iPhone is free.', { reason: 'stream_closed' });
+  // Release on close is in place before the lease exists.
+  if (!viewer.releasesTakeover) {
+    viewer.releasesTakeover = true;
+    const end = viewer.close.bind(viewer);
+    viewer.close = () => { if (viewer.takeover) void coordinator.end(viewer.owner, 'released', [target.id]).catch(() => {}); viewer.takeover = undefined; end(); };
+  }
   if (coordinator.leases.get(target.id)?.owner !== viewer.owner) viewer.takeover = await outsideCall(() => coordinator.acquire(viewer.owner, target, TAKEOVER_TTL_SECONDS));
-  const end = viewer.close.bind(viewer);
-  viewer.close = () => { if (viewer.takeover) void coordinator.end(viewer.owner, 'released', [target.id]).catch(() => {}); viewer.takeover = undefined; end(); };
   return result({ taken_over: true, device: target.id, stopped_sessions: owners.size, expires_at: viewer.takeover.expires_at });
 }
 

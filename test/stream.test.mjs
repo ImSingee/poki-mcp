@@ -362,3 +362,19 @@ test('a restarted encoder with no cached chain asks the phone for a key frame', 
   await screens.open(target, { codecs: ['jpeg'] });
   assert.equal(native.keyframes.length, before + 1, 'the new encoder got no chain and no key frame was asked for');
 });
+
+test('H.264 from ffmpeg is cut into whole pictures however its pipe pauses', { skip: !(await ffmpegAvailable()) && 'ffmpeg with libx264 is not installed' }, async () => {
+  const { FlvSplitter, ffmpegArgs } = await import('../src/stream/transcode.mjs');
+  const { execFileSync } = await import('node:child_process');
+  // The transcoder's own arguments, on the whole sample at once.
+  const flv = execFileSync('ffmpeg', ffmpegArgs('h264'), { input: readFileSync(samplePath('hevc')), maxBuffer: 1 << 24 });
+  const whole = [], split = [];
+  new FlvSplitter(unit => whole.push(unit)).push(flv);
+  assert.equal(whole.length, 8);
+  assert.equal(whole[0].key, true);
+  assert.deepEqual(describe('h264', whole[0].config), { codec: describe('h264', whole[0].data).codec, width: 180, height: 390 });
+  // The same bytes in uneven pieces with pauses: the same pictures, none cut short.
+  const splitter = new FlvSplitter(unit => split.push(unit));
+  for (let at = 0; at < flv.length; at += 997) { splitter.push(flv.subarray(at, at + 997)); await delay(20); }
+  assert.deepEqual(split.map(u => u.data.length), whole.map(u => u.data.length));
+});

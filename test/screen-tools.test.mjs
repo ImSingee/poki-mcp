@@ -193,3 +193,18 @@ test('a lease the agent took on the same MCP session still keeps the view\'s ges
   assert.equal(reply.structuredContent.reason, 'busy', JSON.stringify(reply));
   assert.deepEqual(sent, []);
 });
+
+test('a takeover whose panel closes while the agent\'s work stops takes no lease', async t => {
+  const { coordinator, agent, view, viewer } = await setup(t);
+  // The agent has a call in flight on the device that takes a while to stop.
+  let finish;
+  const op = { owner: agent, devices: new Set([target.id]), controller: new AbortController(), timings: [], done: new Promise(resolve => { finish = resolve; }) };
+  coordinator.operations.add(op);
+  const taking = takeOver(view, viewer);
+  await delay(20);
+  viewer.close();
+  coordinator.operations.delete(op); finish();
+  const taken = await taking;
+  assert.equal(taken.structuredContent?.reason, 'stream_closed', JSON.stringify(taken));
+  assert.equal(coordinator.leases.has(target.id), false, 'a closed panel kept the agent off the device');
+});

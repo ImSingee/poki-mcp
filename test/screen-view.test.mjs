@@ -55,7 +55,7 @@ const hostPage = `<!doctype html><html><head><meta charset="utf-8"><style>body{m
 </script></body></html>`;
 
 // Poki's stream tools over a stand-in phone that sends the sample stream in a loop, 10 frames a second.
-function backend({ busy = false, garbleHevc = false, rtcOffer, openCodecString, inputDelayMs = 0, onlyFirstKey = false, delayFirstFramesMs = 0, devices = [{ id: 'fixture-phone', name: 'Lab iPhone', kind: 'physical', connection: 'RemotePairing' }] } = {}) {
+function backend({ noFrames = false, busy = false, garbleHevc = false, rtcOffer, openCodecString, inputDelayMs = 0, onlyFirstKey = false, delayFirstFramesMs = 0, devices = [{ id: 'fixture-phone', name: 'Lab iPhone', kind: 'physical', connection: 'RemotePairing' }] } = {}) {
   const native = fakeNative();
   const screens = new Screens({ subscribe: native.subscribe, keyframe: native.keyframe });
   const session = { coordinator: new Coordination(), label: 'view session' };
@@ -64,7 +64,7 @@ function backend({ busy = false, garbleHevc = false, rtcOffer, openCodecString, 
   const frames = sampleFrames();
   const feeder = setInterval(() => {
     const subscription = native.subscriptions.at(-1);
-    if (!subscription?.open) return;
+    if (!subscription?.open || noFrames) return;
     // onlyFirstKey: one key frame, then deltas only, as a still screen after its first picture.
     const frame = onlyFirstKey && seq > 0 ? frames[1 + (seq - 1) % 3] : frames[seq % frames.length];
     seq++;
@@ -360,4 +360,25 @@ test('over WebRTC a key frame resumes the chain, and a late discontinuity notice
     return { last: r.lastSeq() - base, held: r.held() };
   });
   assert.deepEqual(state, { last: 1, held: 0 }, 'the delta after the recovery key frame was held');
+});
+
+test('a codec string that arrives after the first key frame does not tear down a decoding chain', { skip, timeout: 60000 }, async t => {
+  const h = await open(t, { settings: { rtc: false, codecs: ['hevc'] }, backendOptions: { noFrames: true } });
+  await h.mount(showResult);
+  await until(async () => (await h.screen()).codec === 'hevc');
+  const hevc = await h.frame().evaluate(() => VideoDecoder.isConfigSupported({ codec: 'hvc1.1.6.L60.90' }).then(r => r.supported));
+  if (!hevc) return t.skip('this browser does not decode HEVC');
+  const [key, delta] = sampleFrames().map(f => f.data.toString('base64'));
+  const waiting = await h.frame().evaluate(async ([key, delta]) => {
+    const bytes = b => Uint8Array.from(atob(b), c => c.charCodeAt(0));
+    const packet = (seq, isKey, data) => { const p = new Uint8Array(11 + data.length); const v = new DataView(p.buffer); v.setUint32(0, 0x4c485643); v.setUint32(4, seq); p[8] = isKey ? 2 : 3; v.setUint16(9, 0); p.set(data, 11); return p; };
+    const r = globalThis.pokiScreenInternals;
+    r.receivePacket(packet(5000, true, bytes(key)));
+    // WebRTC's ready (with the real codec string) comes after the key frame on the media channel.
+    r.receiveControl({ type: 'ready', codec_string: 'hvc1.1.6.L60.90' });
+    r.receivePacket(packet(5001, false, bytes(delta)));
+    await new Promise(resolve => setTimeout(resolve, 300));
+    return r.waitingKey();
+  }, [key, delta]);
+  assert.equal(waiting, false, 'the decoder was reset and waits for another key frame');
 });

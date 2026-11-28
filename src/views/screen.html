@@ -209,10 +209,13 @@ class Decoder {
     catch { this.waitingKey = true; this.onDecoded(undefined, true); }
   }
   // The codec string of the stream's latest key frame, once it is known: decode with it.
+  // Once a chain has started on the fallback string it is decoding (the parameter sets travel in
+  // the stream), so it is not torn down: the string is kept for the next time the decoder opens.
   reconfigure(codecString) {
     if (this.codec === 'jpeg' || !codecString || codecString === this.codecString) return;
     this.codecString = codecString;
-    this.waitingKey = true; this.pending.clear();
+    if (!this.waitingKey) return;
+    this.pending.clear();
     try { this.open(); } catch { this.onFailure('decode'); }
   }
   get backlog() { return this.video?.decodeQueueSize ?? 0; }
@@ -460,7 +463,7 @@ function sendInput(args) {
 }
 globalThis.pokiScreenInput = sendInput;
 // For tests: the WebRTC receive path, without a peer.
-globalThis.pokiScreenInternals = { receivePacket: packet => receivePacket(packet, state.generation), receiveControl: message => receiveControl(message, state.generation), lastSeq: () => lastSeq, held: () => held.length };
+globalThis.pokiScreenInternals = { receivePacket: packet => receivePacket(packet, state.generation), receiveControl: message => receiveControl(message, state.generation), lastSeq: () => lastSeq, held: () => held.length, waitingKey: () => decoder?.waitingKey };
 
 // Normalized position (0..1) of a pointer on the phone's screen.
 function position(event) {

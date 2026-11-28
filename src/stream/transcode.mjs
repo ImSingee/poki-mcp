@@ -4,7 +4,7 @@
 // on an HEVC key frame. Restarting it (a new bitrate, a keyframe request) starts a new chain with
 // a key frame.
 import { spawn as spawnProcess, execFile } from 'node:child_process';
-import { nalUnits, avcType } from './codec.mjs';
+import { avcType } from './codec.mjs';
 
 let available;
 // Whether ffmpeg with libx264 and mjpeg is on PATH. Checked once.
@@ -26,45 +26,72 @@ export function ffmpegArgs(mode, { bitrate = 1_500_000, maxEdge = 1280, fps = 10
   if (mode === 'h264') {
     const kbps = Math.round(bitrate / 1000);
     return [...input, '-vf', scale(maxEdge), '-fps_mode', 'passthrough', '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-profile:v', 'baseline', '-pix_fmt', 'yuv420p', '-bf', '0', '-g', '240',
-      '-x264-params', 'aud=1:repeat-headers=1:scenecut=0', '-b:v', `${kbps}k`, '-maxrate', `${kbps}k`, '-bufsize', `${Math.max(100, Math.round(kbps / 2))}k`, '-flush_packets', '1', '-f', 'h264', 'pipe:1'];
+      '-x264-params', 'scenecut=0', '-b:v', `${kbps}k`, '-maxrate', `${kbps}k`, '-bufsize', `${Math.max(100, Math.round(kbps / 2))}k`, '-flush_packets', '1', '-flvflags', 'no_duration_filesize', '-f', 'flv', 'pipe:1'];
   }
   if (mode === 'jpeg') return [...input, '-vf', `fps=${fps},${scale(maxEdge)}`, '-c:v', 'mjpeg', '-q:v', String(quality), '-flush_packets', '1', '-f', 'image2pipe', 'pipe:1'];
   throw new Error(`Unknown transcode mode ${mode}`);
 }
 
-// Splits ffmpeg's H.264 output into access units at each access unit delimiter (aud=1). The
-// last unit is complete once the next delimiter arrives, or once the encoder has been quiet for
-// IDLE_FLUSH_MS (zerolatency writes each picture at once).
-const IDLE_FLUSH_MS = 15;
-export class AvcSplitter {
-  buffer = Buffer.alloc(0); timer;
+// Splits ffmpeg's H.264 output, muxed as FLV, into access units. Each FLV video tag carries
+// exactly one picture and says how long it is, so a pause in the pipe can never cut a picture in
+// two (raw Annex-B output has no end-of-picture mark until the next picture begins). The AVCC
+// payload is rewritten to Annex-B, and the sequence header's SPS and PPS go with every key frame.
+export class FlvSplitter {
+  buffer = Buffer.alloc(0); header = false; config;
   constructor(onUnit) { this.onUnit = onUnit; }
   push(chunk) {
     this.buffer = this.buffer.length ? Buffer.concat([this.buffer, chunk]) : chunk;
-    let start = this.findDelimiter(0);
-    if (start < 0) return this.idle();
-    let next;
-    while ((next = this.findDelimiter(start + 4)) >= 0) { this.emit(this.buffer.subarray(start, next)); start = next; }
-    this.buffer = this.buffer.subarray(start);
-    this.idle();
-  }
-  // The offset of the next start code introducing an access unit delimiter (NAL type 9).
-  findDelimiter(from) {
-    for (let i = from; i + 4 <= this.buffer.length; i++) {
-      if (this.buffer[i] === 0 && this.buffer[i + 1] === 0 && this.buffer[i + 2] === 1 && (this.buffer[i + 3] & 0x1f) === 9) return i > 0 && this.buffer[i - 1] === 0 ? i - 1 : i;
+    if (!this.header) {
+      if (this.buffer.length < 9) return;
+      if (this.buffer.toString('latin1', 0, 3) !== 'FLV') throw new Error('Not an FLV stream');
+      const size = this.buffer.readUInt32BE(5);
+      if (this.buffer.length < size + 4) return;
+      this.buffer = this.buffer.subarray(size + 4);
+      this.header = true;
     }
-    return -1;
+    while (this.buffer.length >= 11) {
+      const type = this.buffer[0], size = this.buffer.readUIntBE(1, 3);
+      if (this.buffer.length < 11 + size + 4) return;
+      const data = this.buffer.subarray(11, 11 + size);
+      this.buffer = this.buffer.subarray(11 + size + 4);
+      if (type === 9 && data.length >= 5 && (data[0] & 0x0f) === 7) this.video(data);
+    }
   }
-  idle() { clearTimeout(this.timer); if (this.buffer.length) this.timer = setTimeout(() => this.flush(), IDLE_FLUSH_MS); }
-  flush() { clearTimeout(this.timer); if (this.buffer.length) { this.emit(this.buffer); this.buffer = Buffer.alloc(0); } }
-  emit(unit) {
-    const nals = nalUnits(unit).filter(nal => avcType(nal) !== 9);
+  video(data) {
+    const key = data[0] >> 4 === 1, packetType = data[1], payload = data.subarray(5);
+    if (packetType === 0) { this.config = avcConfig(payload); return; }
+    if (packetType !== 1) return;
+    const nals = [];
+    for (let at = 0; at + 4 <= payload.length;) {
+      const length = payload.readUInt32BE(at);
+      if (at + 4 + length > payload.length) break;
+      nals.push(payload.subarray(at + 4, at + 4 + length));
+      at += 4 + length;
+    }
     if (!nals.length) return;
-    const key = nals.some(nal => avcType(nal) === 5);
-    const config = key ? annexb(nals.filter(nal => [7, 8].includes(avcType(nal)))) : undefined;
-    this.onUnit({ key, config, data: annexb(nals) });
+    const isKey = key || nals.some(nal => avcType(nal) === 5);
+    const config = isKey ? this.config : undefined;
+    if (isKey && !config) return; // a key frame without parameter sets cannot start a decoder
+    const picture = annexb(nals);
+    this.onUnit({ key: isKey, config, data: isKey && !nals.some(nal => avcType(nal) === 7) ? Buffer.concat([config, picture]) : picture });
   }
-  close() { clearTimeout(this.timer); }
+  close() {}
+}
+
+// The SPS and PPS of an AVCDecoderConfigurationRecord (version, profile, compatibility, level,
+// length size, then the SPS count with each SPS, then the PPS count with each PPS), as Annex-B.
+function avcConfig(record) {
+  const nals = [];
+  let at = 5;
+  for (const count of [record[at++] & 0x1f, null]) {
+    const n = count ?? record[at++];
+    for (let i = 0; i < n && at + 2 <= record.length; i++) {
+      const length = record.readUInt16BE(at);
+      nals.push(record.subarray(at + 2, at + 2 + length));
+      at += 2 + length;
+    }
+  }
+  return annexb(nals);
 }
 
 // Splits a concatenation of JPEG images at their end markers. Entropy-coded data stuffs every
@@ -109,7 +136,7 @@ export class Transcoder {
     this.startedAt = performance.now();
     this.feeding = false;
     this.pts = [];
-    const Splitter = this.mode === 'jpeg' ? JpegSplitter : AvcSplitter;
+    const Splitter = this.mode === 'jpeg' ? JpegSplitter : FlvSplitter;
     // Bound to this child: a replaced encoder's late output is dropped, never put into the new chain.
     const splitter = this.splitter = new Splitter(unit => {
       if (this.child !== child) return;
