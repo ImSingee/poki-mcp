@@ -84,6 +84,9 @@ async function request(path, init) {
   const attempt = async () => {
     const to = endpoint;
     let body = init?.body;
+    // Checked at every send, against the daemon this send goes to: a call made again after a restart,
+    // a replacement for an outdated daemon or a refused connection may reach one with a weaker mode.
+    if (call && modeConflict?.stricter && !sessionTools.has(call.params?.name)) throw new Error(refusal(modeConflict));
     if (call) {
       const meta = call.params._meta ??= {};
       if (meta['poki/order']?.stream !== stream) meta['poki/order'] = nextOrder();
@@ -102,8 +105,6 @@ async function request(path, init) {
   const first = await attempt();
   if (first.response) return first.response;
   await reconnect(Boolean(call), first.retry);
-  // The daemon reached now may run a weaker approval mode than the one this call was checked against.
-  if (call && modeConflict?.stricter && !sessionTools.has(call.params?.name)) throw new Error(refusal(modeConflict));
   const second = await attempt();
   if (second.response) return second.response;
   if (second.status === 401) throw new Error(`The running Poki MCP rejected the token in ${endpointFile}. Stop it; the next call starts it again.`);
@@ -146,7 +147,6 @@ const server = createServer(async (name, args, extra) => {
   try {
     extra.signal.throwIfAborted();
     const client = await remoteClient(true);
-    if (modeConflict?.stricter && !sessionTools.has(name)) return { isError: true, content: [{ type: 'text', text: refusal(modeConflict) }] };
     const call = () => client.callTool({ name, arguments: args, _meta: { 'poki/request_id': id } }, { timeout: 3700000, signal: extra.signal });
     let result = await call();
     // A service this kind of shim started, refusing the call before it touched a device because its
