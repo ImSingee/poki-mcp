@@ -384,12 +384,19 @@ test('a service a shim starts does not take the client\'s secrets', { timeout: 3
   assert.notEqual(entry.token, 'x'.repeat(40), 'the service made its own token');
 });
 
-test('every POKI_ setting the service reads reaches a service a shim starts', async () => {
+// The daemon's own code reads process.env.POKI_*; the native helpers it runs (build/ocr, poki-native,
+// the simulator helper) read the same environment, through helpers that take the name as a string.
+test('every POKI_ setting the service or its native helpers read reaches a service a shim starts', async () => {
   const { readdir } = await import('node:fs/promises');
   const { daemonSettings } = await import('../src/daemon-launch.mjs');
-  const source = join(import.meta.dirname, '../src');
+  const repo = join(import.meta.dirname, '..');
+  const files = async (dir, pattern) => (await readdir(join(repo, dir), { recursive: true })).filter(file => pattern.test(file) && !file.split('/').includes('target')).map(file => join(repo, dir, file));
   const read = new Set();
-  for (const file of await readdir(source)) if (file.endsWith('.mjs')) for (const [, name] of (await readFile(join(source, file), 'utf8')).matchAll(/env\.(POKI_[A-Z0-9_]+)/g)) read.add(name);
+  for (const file of await files('src', /\.mjs$/)) for (const [, name] of (await readFile(file, 'utf8')).matchAll(/env\.(POKI_[A-Z0-9_]+)/g)) read.add(name);
+  const native = await files('native', /\.(rs|swift|m|py)$/);
+  assert.ok(native.some(file => file.endsWith('ocr.rs')), 'the native sources were scanned');
+  for (const file of native) for (const [, name] of (await readFile(file, 'utf8')).matchAll(/"(POKI_[A-Z0-9_]+)"/g)) read.add(name);
+  assert.ok(read.has('POKI_OCR_LANGS') && read.has('POKI_TYPE_KEY_MS'));
   const shimOnly = new Set(['POKI_MCP_TOKEN', 'POKI_PARENT_PID', 'POKI_MCP_SESSION', 'POKI_MCP_HEARTBEAT_MS', 'POKI_MCP_AUTOSTART', 'POKI_DAEMON_ENV']);
   assert.deepEqual([...read].filter(name => !shimOnly.has(name) && !daemonSettings.has(name)), []);
 });
@@ -447,4 +454,15 @@ test('a client asking for a stricter approval mode than the running service gets
   t.after(() => loose.close());
   assert.notEqual((await loose.callTool({ name: 'tap', arguments: { device: 'fixture-phone', x: 10, y: 10 } })).isError, true);
   assert.match((await loose.callTool({ name: 'poki_mcp_status', arguments: {} })).content.at(-1).text, /The service's mode applies\./);
+});
+
+test('POKI_DAEMON_ENV cannot pass the client\'s secrets or the shim\'s own variables', async () => {
+  const { daemonEnvironment } = await import('../src/daemon-launch.mjs');
+  const warnings = [];
+  const env = daemonEnvironment({ PATH: '/bin', POKI_DAEMON_ENV: 'POKI_IPHONE_PASSCODE, OPENAI_API_KEY,POKI_PARENT_PID,POKI_MCP_TOKEN,POKI_MCP_SESSION,FIXTURE_STATE',
+    POKI_IPHONE_PASSCODE: '123456', OPENAI_API_KEY: 'sk-x', POKI_PARENT_PID: '1', POKI_MCP_TOKEN: 'x'.repeat(40), POKI_MCP_SESSION: 's', FIXTURE_STATE: '/f',
+    POKI_OCR_LANGS: 'eng', POKI_TYPE_KEY_MS: '20', TESSDATA_PREFIX: '/tess' }, message => warnings.push(message));
+  assert.deepEqual(Object.keys(env).sort(), ['FIXTURE_STATE', 'PATH', 'POKI_OCR_LANGS', 'POKI_TYPE_KEY_MS', 'TESSDATA_PREFIX']);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /POKI_IPHONE_PASSCODE, OPENAI_API_KEY, POKI_PARENT_PID, POKI_MCP_TOKEN, POKI_MCP_SESSION/);
 });
