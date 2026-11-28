@@ -206,6 +206,8 @@ test('a failed developer image offers a retry that needs no new PIN, and a phone
   await mount({ content: [], structuredContent: server.jobView() });
   await view.getByText('Pairing failed').waitFor();
   assert.equal(await view.getByRole('button', { name: 'Pair again' }).count(), 0, 'a paired phone is not sent back to the PIN');
+  // The USB advice is the fallback after a retry, not an alternative shown beside it.
+  await view.getByText('Try installing the developer image again over Wi-Fi. If it fails again: Connect the iPhone with a USB cable once.').waitFor();
   await view.getByRole('button', { name: 'Retry developer image' }).click();
   await view.getByText('Preparing developer services').first().waitFor();
   assert.deepEqual(server.calls.find(c => c.name === 'pair_device').args, { device: 'wireless-2' });

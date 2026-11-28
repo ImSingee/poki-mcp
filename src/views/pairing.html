@@ -210,7 +210,7 @@ function renderJob() {
     <div class="row"><span class="dot ${dot}" aria-hidden="true"></span><strong>${escape(title)}</strong><span class="spacer"></span>
       ${live ? '<button id="cancel">Cancel</button>' : retryImage ? '<button id="retry" class="primary">Retry developer image</button>' : '<button id="again">Pair again</button>'}</div>
     ${stepper}${pin}
-    <p class="instruction">${escape(job.instruction ?? '')}</p>${detail}${device}${note}`;
+    <p class="instruction">${escape(retryImage ? `Try installing the developer image again over Wi-Fi. If it fails again: ${job.instruction ?? ''}` : job.instruction ?? '')}</p>${detail}${device}${note}`;
   const cancel = section.querySelector('#cancel'), again = section.querySelector('#again'), retry = section.querySelector('#retry');
   if (cancel) { cancel.hidden = !state.canCall; cancel.onclick = () => act(cancel, async () => { adopt(await call('pairing_cancel', { job: job.job })); await refreshDevices({ adoptJob: false }); }); }
   if (again) { again.hidden = !state.canCall; again.onclick = () => act(again, () => startPairing()); }
