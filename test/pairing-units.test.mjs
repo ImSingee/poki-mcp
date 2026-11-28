@@ -68,15 +68,19 @@ process.exit(1);
   assert.equal(jobs.jobs.get(job.job).reason, 'timeout');
 });
 
-test('finished jobs are kept for the retention period, then forgotten', async t => {
+test('finished jobs are kept for the retention period from when they ended, then forgotten', async t => {
   const dir = await scratch(t);
-  const jobs = new PairingJobs({ stateDir: join(dir, 'state'), native: await waitingHelper(dir), retainMs: 80 });
+  // A clock the test moves: retention must not depend on how fast the helper exits.
+  let clock = 1_000_000;
+  const jobs = new PairingJobs({ stateDir: join(dir, 'state'), native: await waitingHelper(dir), retainMs: 60_000, now: () => clock });
   const { job } = jobs.start();
   await waitFor(() => jobs.jobs.get(job.job).state === 'advertising');
+  clock += 5_000;
   await jobs.cancel(job.job);
+  clock += 59_999;
   assert.equal(jobs.get(job.job).state, 'cancelled');
   assert.equal(jobs.list().length, 1);
-  await new Promise(resolve => setTimeout(resolve, 120));
+  clock += 1;
   assert.throws(() => jobs.get(job.job), /No pairing job/);
   assert.deepEqual(jobs.list(), []);
 });
@@ -161,23 +165,41 @@ test('DDI failures name their reason and only the tunnel install suggests USB', 
   assert.deepEqual(await ensureDeveloperImage('p', async () => ({ display_service: true, ddi: null })), { ready: true, already: true, ddi: null });
 });
 
-// The real helper: SIGTERM while advertising ends it cleanly with a cancelled event and no record.
+// The real helper. It announces "starting" once its stop sources exist, so a SIGTERM from then on,
+// even before it advertises, ends it with a cancelled event and an mDNS goodbye, never by the default
+// disposition.
 const native = join(root, 'build/poki-native');
 const realHelper = await stat(native).then(info => info.size > 1_000_000, () => false);
-test('poki-native --pair-host stops on SIGTERM and says it was cancelled', { skip: !realHelper && 'build/poki-native is not built', timeout: 30000 }, async t => {
-  const dir = await scratch(t);
-  const output = join(dir, 'pairing.plist');
-  const child = spawn(native, ['--pair-host', join(dir, 'host'), output, `poki-sigterm-${process.pid}`, '0'], { stdio: ['ignore', 'pipe', 'pipe'] });
+async function realPairHost(t, dir, index = 0) {
+  const output = join(dir, `pairing-${index}.plist`);
+  const child = spawn(native, ['--pair-host', join(dir, 'host'), output, `poki-stop-${process.pid}-${index}`, '0'], { stdio: ['pipe', 'pipe', 'pipe'] });
+  t.after(() => child.kill('SIGKILL'));
   const events = [];
-  const lines = createInterface({ input: child.stdout });
-  lines.on('line', line => events.push(JSON.parse(line)));
-  await waitFor(() => events.some(e => e.event === 'advertising'), 15000);
+  createInterface({ input: child.stdout }).on('line', line => events.push(JSON.parse(line)));
   const exited = once(child, 'exit');
-  child.kill('SIGTERM');
-  const [code] = await Promise.race([exited, new Promise((_, reject) => setTimeout(() => reject(new Error('did not exit')), 10000))]);
-  assert.notEqual(code, 0);
-  assert.ok(events.some(e => e.event === 'cancelled'), JSON.stringify(events));
-  await assert.rejects(stat(output), { code: 'ENOENT' });
+  const ended = async () => (await Promise.race([exited, new Promise((_, reject) => setTimeout(() => reject(new Error('did not exit')), 10000))]))[0];
+  return { child, events, output, ended };
+}
+test('poki-native --pair-host ends with cancelled for a SIGTERM sent as soon as it starts', { skip: !realHelper && 'build/poki-native is not built', timeout: 120000 }, async t => {
+  const dir = await scratch(t);
+  for (let index = 0; index < 10; index++) {
+    const helper = await realPairHost(t, dir, index);
+    await waitFor(() => helper.events.some(e => e.event === 'starting'));
+    helper.child.kill('SIGTERM');
+    const code = await helper.ended();
+    assert.equal(code, 1, `run ${index} died by signal instead of stopping: ${JSON.stringify(helper.events)}`);
+    assert.ok(helper.events.some(e => e.event === 'cancelled'), JSON.stringify(helper.events));
+    await assert.rejects(stat(helper.output), { code: 'ENOENT' });
+  }
+});
+
+test('poki-native --pair-host stops when its standard input closes (the daemon died)', { skip: !realHelper && 'build/poki-native is not built', timeout: 30000 }, async t => {
+  const dir = await scratch(t);
+  const helper = await realPairHost(t, dir);
+  await waitFor(() => helper.events.some(e => e.event === 'advertising'));
+  helper.child.stdin.end();
+  assert.equal(await helper.ended(), 1);
+  assert.ok(helper.events.some(e => e.event === 'cancelled' && e.reason === 'parent_gone'), JSON.stringify(helper.events));
 });
 
 test('a helper failure reads as its message, not as the JSON line poki-native prints', () => {
@@ -194,5 +216,40 @@ test('an image listed as installed without displayservice is installed again onc
   };
   const prepared = await ensureDeveloperImage('p', request, { resolve: async () => ({ source: 'test', directory: '/x' }) });
   assert.equal(prepared.ready, true);
-  assert.deepEqual(requests.map(r => [r.op, Boolean(r.force)]), [['ddi_status', false], ['install_ddi', false], ['install_ddi', true]]);
+  assert.deepEqual(requests.map(r => [r.op, Boolean(r.force)]), [['ddi_status', false], ['reconnect', false], ['install_ddi', false], ['install_ddi', true]]);
+});
+
+test('a DDI installation holds the device\'s input lock, and fails as device_busy when it cannot get it', async t => {
+  const dir = await scratch(t);
+  const events = [];
+  const target = { id: 'phone-lock', name: 'Phone', remote: join(dir, 'config.json') };
+  const lock = { acquire: async (keys, holder) => { events.push(['acquire', keys, holder.tool]); return () => events.push(['release']); } };
+  const jobs = new PairingJobs({ stateDir: join(dir, 'state'), ensureImage: async () => { events.push(['install']); return { already: false }; } });
+  jobs.coordinator = { inputLock: lock };
+  const { job } = jobs.start({ device: target });
+  await jobs.jobs.get(job.job).done;
+  assert.equal(jobs.get(job.job).state, 'ready');
+  assert.deepEqual(events, [['acquire', ['phone-lock'], 'pair_device'], ['install'], ['release']]);
+
+  jobs.coordinator = { inputLock: { acquire: async () => { throw new Error('Device phone-lock is busy: tap by session other'); } } };
+  const busy = jobs.start({ device: { ...target, id: 'phone-busy' } }).job;
+  await jobs.jobs.get(busy.job).done;
+  const failed = jobs.get(busy.job);
+  assert.equal(failed.state, 'failed');
+  assert.equal(failed.reason, 'device_busy');
+  assert.match(failed.action, /Another session is using phone-busy/);
+});
+
+test('a zombie process counts as gone', { skip: process.platform === 'win32' }, async () => {
+  const { processGone } = await import('../src/remote.mjs');
+  // The python parent never waits for its child, so the child stays a zombie while the parent runs.
+  const parent = spawn('python3', ['-c', 'import os,sys,time\npid=os.fork()\nif pid==0: os._exit(0)\nprint(pid, flush=True)\ntime.sleep(30)'], { stdio: ['ignore', 'pipe', 'ignore'] });
+  const [line] = await once(createInterface({ input: parent.stdout }), 'line');
+  const zombie = Number(line);
+  try {
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.doesNotThrow(() => process.kill(zombie, 0), 'kill(0) still finds the zombie');
+    assert.equal(processGone(zombie), true);
+    assert.equal(processGone(process.pid), false);
+  } finally { parent.kill('SIGKILL'); }
 });

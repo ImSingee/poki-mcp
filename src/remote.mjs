@@ -1,4 +1,5 @@
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { once } from 'node:events';
 import { mkdir, readFile, lstat, unlink } from 'node:fs/promises';
 import { createConnection } from 'node:net';
@@ -62,6 +63,9 @@ async function socketPath(target) {
 // stopped? }.
 export async function disconnectRemote(target, { timeoutMs = 5000 } = {}) {
   const path = await socketPath(target);
+  // A helper still starting (for a call that was aborted meanwhile) would come up after this and
+  // serve a configuration about to be deleted: let it finish starting, then stop it too.
+  await starting.get(path)?.catch(() => {});
   let socket;
   try { socket = await connect(path); }
   catch (error) { if (['ENOENT', 'ECONNREFUSED'].includes(error.code)) return { running: false, disconnected: false }; throw error; }
@@ -75,9 +79,20 @@ export async function disconnectRemote(target, { timeoutMs = 5000 } = {}) {
   return { ...result, stopped, pid };
 }
 
+// Whether a process has exited. A zombie (exited, not yet reaped: its parent is a PID 1 that does not
+// reap adopted children, such as a container started without --init) has exited too, though
+// kill(pid, 0) still succeeds for it.
+export function processGone(pid) {
+  try { process.kill(pid, 0); } catch (error) { return error.code === 'ESRCH'; }
+  try {
+    if (process.platform === 'linux') return /^\d+ \(.*\) Z/.test(readFileSync(`/proc/${pid}/stat`, 'utf8'));
+    return /^Z/.test(execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).trim());
+  } catch { return false; }
+}
+
 // SIGTERM, then SIGKILL after two seconds. Resolves whether the process is gone.
 async function stopProcess(pid) {
-  const gone = () => { try { process.kill(pid, 0); return false; } catch (error) { return error.code === 'ESRCH'; } };
+  const gone = () => processGone(pid);
   try { process.kill(pid, 'SIGTERM'); } catch (error) { return error.code === 'ESRCH'; }
   for (let waited = 0; waited < 4000; waited += 50) {
     if (gone()) return true;

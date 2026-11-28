@@ -28,7 +28,7 @@ if (mode === '--pair-host') {
   process.exit(0);
 }
 if (mode === '--remote-server') {
-  let installed = false, busy = false;
+  let installed = false, busy = false, reconnected = false;
   const server = createServer(socket => {
     // Like the Rust helper, which serves one request at a time: while busy, nobody is greeted.
     if (busy) return;
@@ -62,17 +62,22 @@ if (mode === '--remote-server') {
       }
       const reply = request.op === 'disconnect' ? { disconnected: true }
         : request.op === 'device_info' ? { properties: { DeviceName: config().names?.[JSON.parse(readFileSync(process.argv[3], 'utf8')).id] ?? 'Wireless iPhone', ProductType: 'iPhone17,1', ProductVersion: '27.0' } }
-        : request.op === 'ddi_status' ? { display_service: installed || Boolean(remote.displayService), cryptexd: true, ddi: installed ? { identifier: 'com.apple.MobileAsset.DDI', version: '27B52' } : null }
+        // displayAfterReconnect: an image mounted another way, which only a new handshake shows.
+        : request.op === 'ddi_status' ? { display_service: installed || Boolean(remote.displayService) || (Boolean(remote.displayAfterReconnect) && reconnected), cryptexd: true, ddi: installed ? { identifier: 'com.apple.MobileAsset.DDI', version: '27B52' } : null }
+        : request.op === 'reconnect' ? (reconnected = true, { connected: true, transport: 'remote_pairing' })
+        : request.op === 'tap' ? { sent: true, screen_change_verified: false }
         : request.op === 'install_ddi' ? (remote.install ?? (installed = true, { installed: true, display_service: true, ddi: { identifier: 'com.apple.MobileAsset.DDI', version: '27B52' } }))
         : { transport_error: true, error: 'Unexpected native request ' + request.op };
       // installDelayMs: a slow installation, so the view's "Preparing developer services" step lasts.
-      const delay = request.op === 'install_ddi' ? Number(remote.installDelayMs ?? 0) : 0;
+      // tapDelayMs: a tap that holds the device for a while.
+      const delay = request.op === 'install_ddi' ? Number(remote.installDelayMs ?? 0) : request.op === 'tap' ? Number(remote.tapDelayMs ?? 0) : 0;
       setTimeout(() => {
         socket.end(JSON.stringify(reply) + '\\n');
         if (request.op === 'disconnect') server.close(() => process.exit(0));
       }, delay);
     });
   });
-  server.listen(process.argv[4], () => console.log(JSON.stringify({ ready: true })));
+  // startDelayMs: a helper slow to come up.
+  setTimeout(() => server.listen(process.argv[4], () => console.log(JSON.stringify({ ready: true }))), Number(config().remote?.startDelayMs ?? 0));
 } else if (mode !== '--pair-host') process.exit(1);
 `;

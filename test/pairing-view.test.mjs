@@ -56,8 +56,8 @@ function backend() {
     return {
       job: 'pair-1', kind: 'pair', state: s, host_name: 'Poki Lab', terminal, updated_at: new Date().toISOString(),
       ...(s === 'pin' ? { pin: '482916' } : {}),
-      ...(['mounting_ddi', 'ready'].includes(s) ? { device: { id: 'wireless-2', name: 'New iPhone', host: '192.0.2.2', model: 'iPhone17,1' } } : {}),
-      ...(s === 'failed' ? { stage: 'ddi', reason: 'ddi_tunnel_install_failed', error: 'cryptexd refused', action: 'Connect the iPhone with a USB cable once.' } : {}),
+      ...(['mounting_ddi', 'ready', 'failed'].includes(s) ? { device: { id: 'wireless-2', name: 'New iPhone', host: '192.0.2.2', model: 'iPhone17,1' } } : {}),
+      ...(s === 'failed' ? { stage: 'ddi', reason: 'ddi_tunnel_install_failed', error: 'cryptexd refused', action: 'Connect the iPhone with a USB cable once.', paired: true } : {}),
       instruction: { advertising: 'On the iPhone, open Settings › Privacy & Security › Developer Mode and tap “Pair with Poki Lab”.', pin: 'Enter this code on the iPhone: 482916.', mounting_ddi: 'Preparing developer services.', ready: 'Paired and ready.', cancelled: 'Pairing was cancelled.', failed: 'Connect the iPhone with a USB cable once.' }[s],
     };
   };
@@ -65,7 +65,7 @@ function backend() {
   const handle = async (name, args) => {
     calls.push({ name, args, at: Date.now() });
     if (name === 'list_devices') return ok({ devices: [...state.devices, ...(state.jobState === 'ready' && state.job ? [{ id: 'wireless-2', name: 'New iPhone', connection: 'RemotePairing', readiness: 'remote services connected', display_service: true }] : [])], pairing: { host: { name: 'Poki Lab', advertising: Boolean(state.job) && ['advertising', 'pin'].includes(state.jobState) }, jobs: state.job ? [jobView()] : [] } });
-    if (name === 'pair_device') { state.job = true; state.jobState = 'advertising'; return ok({ job: jobView(), existing: false }); }
+    if (name === 'pair_device') { state.job = true; state.jobState = args.device ? 'mounting_ddi' : 'advertising'; return ok({ job: jobView(), existing: false }); }
     if (name === 'pairing_status') return state.job ? ok(jobView()) : { isError: true, content: [{ type: 'text', text: 'No pairing job "pair-1".' }] };
     if (name === 'pairing_cancel') { state.jobState = 'cancelled'; return ok(jobView()); }
     if (name === 'unpair_device') { state.devices = state.devices.filter(d => d.id !== args.device); return ok({ unpaired: true, device: { id: args.device, name: 'Lab iPhone' }, phone_cleanup: 'Remove this computer on the iPhone too.' }); }
@@ -195,4 +195,23 @@ test('the view fits a phone-width inline frame without horizontal scrolling', { 
   assert.ok(layout.buttonsInside, JSON.stringify(layout));
   assert.match(layout.theme, /dark/);
   await page.screenshot({ path: process.env.POKI_VIEW_SCREENSHOT ?? '/dev/null', fullPage: true }).catch(() => {});
+});
+
+test('a failed developer image offers a retry that needs no new PIN, and a phone missing displayservice offers an install', { skip, timeout: 60000 }, async t => {
+  const { view, server, mount } = await open(t);
+  server.state.devices[0].display_service = false;
+  server.state.devices[0].readiness = 'connected; developer services missing';
+  server.state.job = true;
+  server.state.jobState = 'failed';
+  await mount({ content: [], structuredContent: server.jobView() });
+  await view.getByText('Pairing failed').waitFor();
+  assert.equal(await view.getByRole('button', { name: 'Pair again' }).count(), 0, 'a paired phone is not sent back to the PIN');
+  await view.getByRole('button', { name: 'Retry developer image' }).click();
+  await view.getByText('Preparing developer services').first().waitFor();
+  assert.deepEqual(server.calls.find(c => c.name === 'pair_device').args, { device: 'wireless-2' });
+  server.state.jobState = 'ready';
+  await view.getByRole('button', { name: 'Pair again' }).waitFor();
+  await view.getByRole('button', { name: 'Install developer image' }).click();
+  await until(() => server.calls.filter(c => c.name === 'pair_device').length === 2);
+  assert.deepEqual(server.calls.filter(c => c.name === 'pair_device')[1].args, { device: 'wireless-1' });
 });

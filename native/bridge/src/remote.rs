@@ -510,7 +510,10 @@ impl Session {
             );
         }
         let force = request["force"].as_bool().unwrap_or(false);
-        let _ = self.release_input().await;
+        // Only an installation disturbs the phone's input session; a status read leaves it open.
+        if install {
+            let _ = self.release_input().await;
+        }
         if self.connection.is_none() {
             self.open().await?;
         }
@@ -1495,6 +1498,33 @@ mod tests {
         .unwrap();
         assert_eq!(reply["cryptexd"], true, "{reply}");
         assert_eq!(reply["ddi_error"], Value::Null, "{reply}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ddi_status_leaves_an_open_input_session_alone() {
+        let (display, _display_phone) = tokio::io::duplex(1 << 16);
+        let now = tokio::time::Instant::now();
+        let media = InputMedia {
+            client: DisplayServiceClient::from_stream(Box::new(display))
+                .await
+                .unwrap(),
+            receivers: tokio::task::JoinSet::new(),
+            ready_at: now,
+            last_input: now,
+            last_activity: now,
+        };
+        let (mut connection, _phone) = tunnel();
+        connection.media = Some(media);
+        let mut session = session_with(connection);
+        let reply = session
+            .request(json!({"op":"ddi_status","services_only":true}))
+            .await
+            .unwrap();
+        assert_eq!(reply["display_service"], true, "{reply}");
+        assert!(
+            session.connection.as_ref().unwrap().media.is_some(),
+            "a status read tore down the input session"
+        );
     }
 
     #[tokio::test]

@@ -13,6 +13,7 @@
 // --view screen opens the screen panel (show_screen) instead; with --stub the paired iPhone sends
 // the sample stream in native/bridge/tests/fixtures, and its taps are logged to commands.jsonl.
 import http from 'node:http';
+import { execFileSync } from 'node:child_process';
 import { mkdtemp, cp, mkdir, writeFile, symlink, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -150,18 +151,26 @@ const server = http.createServer(async (request, response) => {
 });
 server.listen(Number(options.port), '127.0.0.1', () => console.log(JSON.stringify({ event: 'ready', url: `http://127.0.0.1:${server.address().port}/`, stub: Boolean(stubDir), root: pokiRoot })));
 
+// Processes still running from the stub copy: its automatic service and its stand-in helpers.
+const leftovers = () => {
+  try { return execFileSync('pgrep', ['-f', stubDir], { encoding: 'utf8' }).split('\n').filter(Boolean).map(Number).filter(pid => pid !== process.pid); }
+  catch { return []; }
+};
+
 async function stop() {
   server.close();
   await client.close().catch(() => {});
-  // The stub copy's own service (started by its stdio server) stops on its idle timer; its files go now.
   if (stubDir) {
-    const endpoint = await import('node:fs/promises').then(fs => fs.readFile(join(stubDir, 'state/mcp.json'), 'utf8')).then(JSON.parse).catch(() => null);
-    if (endpoint?.pid) { try { process.kill(endpoint.pid, 'SIGTERM'); } catch {} }
-    // RemotePairing helpers run detached from the service, as real ones do; stop the stand-ins.
-    const started = await import('node:fs/promises').then(fs => fs.readFile(join(stubDir, 'commands.jsonl'), 'utf8')).catch(() => '');
-    for (const line of started.split('\n')) { try { const event = JSON.parse(line); if (event.helper && event.pid) process.kill(event.pid, 'SIGTERM'); } catch {} }
-    await new Promise(resolve => setTimeout(resolve, 500));
+    // The stdio server started an automatic service, which outlives it by design, and the service
+    // started detached RemotePairing stand-ins. Everything from the stub copy has its path on the
+    // command line.
+    for (const pid of leftovers()) { try { process.kill(pid, 'SIGTERM'); } catch {} }
+    for (let waited = 0; leftovers().length && waited < 5000; waited += 100) await new Promise(resolve => setTimeout(resolve, 100));
+    for (const pid of leftovers()) { try { process.kill(pid, 'SIGKILL'); } catch {} }
+    const left = leftovers();
+    console.log(JSON.stringify({ event: 'stopped', leftovers: left }));
     await rm(stubDir, { recursive: true, force: true });
+    process.exit(left.length ? 1 : 0);
   }
   process.exit(0);
 }

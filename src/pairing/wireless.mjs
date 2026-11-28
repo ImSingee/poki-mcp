@@ -39,7 +39,10 @@ export function helperError(stderr) {
 // `cancelled` and `stderr` say how the helper ended.
 export function startPairHost({ name, hostState, output, native = pokiNative }) {
   const events = new EventEmitter();
-  const child = spawn(native, ['--pair-host', hostState, output, name, '0'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  // Standard input stays open and unused: the helper stops when it closes, which is how it learns
+  // that this process died without cancelling it.
+  const child = spawn(native, ['--pair-host', hostState, output, name, '0'], { stdio: ['pipe', 'pipe', 'pipe'] });
+  child.stdin.on('error', () => {});
   let stderr = '', paired, cancelled = false;
   lines(child.stdout).on('line', line => {
     let event;

@@ -199,6 +199,7 @@ function renderJob() {
     return `<li class="${cls}"${i === index ? ' aria-current="step"' : ''}><span>${label}</span></li>`;
   }).join('')}</ol>`;
   const live = !job.terminal;
+  const retryImage = job.state === 'failed' && job.stage === 'ddi' && job.paired && job.device?.id;
   const title = { starting: 'Starting…', advertising: 'Waiting for the iPhone', pin: 'Enter this PIN on the iPhone', paired: 'Paired', registering: 'Saving the pairing', mounting_ddi: 'Preparing developer services', ready: 'Ready', failed: 'Pairing failed', cancelled: 'Pairing cancelled' }[job.state] ?? job.state;
   const dot = job.state === 'ready' ? 'ok' : job.state === 'failed' ? 'bad' : job.state === 'cancelled' ? '' : 'live';
   const pin = job.state === 'pin' && job.pin ? `<div class="pin" role="img" aria-label="PIN ${escape(job.pin.split('').join(' '))}">${job.pin.split('').map(d => `<span>${escape(d)}</span>`).join('')}</div>` : '';
@@ -207,12 +208,14 @@ function renderJob() {
   const note = job.note ? `<p class="note">${escape(job.note)}</p>` : '';
   section.innerHTML = `
     <div class="row"><span class="dot ${dot}" aria-hidden="true"></span><strong>${escape(title)}</strong><span class="spacer"></span>
-      ${live ? '<button id="cancel">Cancel</button>' : '<button id="again">Pair again</button>'}</div>
+      ${live ? '<button id="cancel">Cancel</button>' : retryImage ? '<button id="retry" class="primary">Retry developer image</button>' : '<button id="again">Pair again</button>'}</div>
     ${stepper}${pin}
     <p class="instruction">${escape(job.instruction ?? '')}</p>${detail}${device}${note}`;
-  const cancel = section.querySelector('#cancel'), again = section.querySelector('#again');
+  const cancel = section.querySelector('#cancel'), again = section.querySelector('#again'), retry = section.querySelector('#retry');
   if (cancel) { cancel.hidden = !state.canCall; cancel.onclick = () => act(cancel, async () => { adopt(await call('pairing_cancel', { job: job.job })); await refreshDevices({ adoptJob: false }); }); }
-  if (again) { again.hidden = !state.canCall; again.onclick = () => act(again, startPairing); }
+  if (again) { again.hidden = !state.canCall; again.onclick = () => act(again, () => startPairing()); }
+  // The iPhone is paired; only its developer image failed. Installing it again needs no new PIN.
+  if (retry) { retry.hidden = !state.canCall; retry.onclick = () => act(retry, () => startPairing({ device: job.device.id })); }
 }
 
 function deviceStatus(device) {
@@ -237,9 +240,11 @@ function renderDevices() {
         <span class="name">${escape(device.name)}</span>
         <span class="muted">${escape([device.model, device.osVersion && `iOS ${device.osVersion}`].filter(Boolean).join(' · '))}</span>
         <span class="status">${escape(status)}</span><code>${escape(device.id)}</code></div>
+        ${!confirming && device.display_service === false && !device.pairing_job ? `<button data-image="${escape(device.id)}">Install developer image</button>` : ''}
         ${confirming ? `<button data-keep="${escape(device.id)}">Keep</button><button class="danger confirm" data-unpair="${escape(device.id)}">Remove pairing</button>` : `<button class="danger" data-ask="${escape(device.id)}">Unpair</button>`}</li>`;
     }).join('') + (state.unpaired ? `<li class="note">${escape(state.unpaired)}</li>` : '');
   }
+  for (const button of list.querySelectorAll('[data-image]')) button.onclick = () => act(button, () => startPairing({ device: button.dataset.image }));
   for (const button of list.querySelectorAll('[data-ask]')) button.onclick = () => {
     state.confirm = button.dataset.ask; state.unpaired = undefined; render();
     clearTimeout(confirmTimer); confirmTimer = setTimeout(() => { state.confirm = undefined; render(); }, 6000);
@@ -269,13 +274,14 @@ function render() {
   pair.hidden = !state.loaded || !state.canCall || Boolean(state.job && !state.job.terminal);
 }
 
-async function startPairing() {
-  const started = await call('pair_device');
+// With device: install that paired iPhone's developer image again, without a new pairing.
+async function startPairing(args = {}) {
+  const started = await call('pair_device', args);
   state.unpaired = undefined;
   adopt(started?.job ?? started);
   await refreshDevices({ adoptJob: false });
 }
-$('pair').onclick = () => act($('pair'), startPairing);
+$('pair').onclick = () => act($('pair'), () => startPairing());
 
 // Registered before connect: the host sends the tool result right after initialization, and again
 // whenever it mounts this view anew (an inline view scrolled out and back in).

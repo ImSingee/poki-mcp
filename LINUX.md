@@ -211,8 +211,8 @@ environment (never its secrets), so daemon settings such as
 ### Approval on Linux
 
 Sensitive tools (`install_app`, `uninstall_app`, `build_and_run`,
-`open_url`, `download_app_container`, `get_clipboard`, `set_clipboard`)
-need approval, and `POKI_MCP_APPROVAL_MODE` decides who gives it
+`open_url`, `download_app_container`, `get_clipboard`, `set_clipboard`,
+`unpair_device`) need approval, and `POKI_MCP_APPROVAL_MODE` decides who gives it
 ([details](docs/tools.md#approval--clipboard-behavior)). Without the
 variable, a daemon whose environment has neither `DISPLAY` nor
 `WAYLAND_DISPLAY` (a headless machine, an SSH session, a systemd user
@@ -225,9 +225,7 @@ stdio MCP server on a headless Linux machine reached through
 unless you set them to require approval in the LobeHub connector's
 tool settings. In `host` mode `batch_commands` and `run_code` refuse
 these tools, so the client is always asked about the tool itself.
-`unpair_device` also deletes a saved pairing; it carries
-`destructiveHint`, so set it to require approval as well if you want
-LobeHub to ask. Setting up the connector, binding it to the machine that
+Setting up the connector, binding it to the machine that
 runs Poki, and the pairing view are described in
 [docs/lobehub.md](docs/lobehub.md).
 

@@ -31,6 +31,11 @@ jobs:
       - name: Build
         run: ./bin/setup
 
+      # The native bridge's own tests: pair-host cancellation and mDNS withdrawal, the developer
+      # disk image ops, the helper's request handling. Same target directory as the build above.
+      - name: Rust tests
+        run: cargo test --locked --release --manifest-path native/bridge/Cargo.toml --target-dir build/native-target
+
       - name: Install Poki Agent dependencies
         run: npm ci --prefix agent
 

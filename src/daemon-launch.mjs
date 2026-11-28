@@ -1,8 +1,9 @@
 // Finds the shared daemon for this state directory, and starts one when none is running.
 //
-// Every stdio shim (src/stdio.mjs) calls ensureDaemon() before its first request. Long-lived state
-// (sessions, leases, recordings, the device locks) lives in that one daemon, so MCP clients that
-// start and reap stdio processes freely still share it. The daemon a shim starts runs with --auto:
+// A stdio shim (src/stdio.mjs) calls ensureDaemon() only for a tools/call: nothing else it sends
+// starts a daemon. The device locks and every session's state live in that one daemon, so MCP clients
+// that start and reap stdio processes freely still share it, though a session ends with its shim
+// (daemon.mjs drops it when its heartbeats stop). The daemon a shim starts runs with --auto:
 // it picks a free port, writes mcp.json like `npm start` does, and exits after it has been idle for
 // POKI_DAEMON_IDLE_EXIT_MS. A daemon started with `npm start` is used as it is and never restarted.
 import { open, readFile, unlink, mkdir, stat, utimes } from 'node:fs/promises';
@@ -29,6 +30,9 @@ export function alive(pid) {
 // written in another namespace (another container sharing the state directory) says nothing here, so
 // it is only checked when the namespaces match. On macOS both sides have none.
 export const pidNamespace = (() => { try { return readlinkSync('/proc/self/ns/pid'); } catch { return undefined; } })();
+// One daemon's mcp.json entry: its address and token. Two daemons in different PID namespaces can
+// have the same pid, so pids do not tell them apart.
+export const sameDaemon = (a, b) => Boolean(a && b) && String(a.url) === String(b.url) && a.token === b.token;
 const sameNamespace = record => (record?.pid_ns ?? undefined) === pidNamespace;
 // Known to be gone: its pid is checked only when it is visible from here.
 const deadHere = record => sameNamespace(record) && !alive(record.pid);
@@ -66,7 +70,7 @@ async function waitForExit(endpoint, ms) {
   const end = performance.now() + ms;
   for (;;) {
     const named = await readEndpoint().catch(() => null);
-    if (named?.pid !== endpoint.pid || deadHere(endpoint)) return;
+    if (!sameDaemon(named, endpoint) || deadHere(endpoint)) return;
     if (performance.now() >= end) {
       if (await daemonInfo(endpoint).then(() => false, error => refused(error))) return;
       throw new Error(`Poki MCP (pid ${endpoint.pid}) did not stop within ${ms} ms.`);
@@ -132,24 +136,37 @@ async function lockHolder() {
 // The environment an automatically started daemon gets. It outlives the client that started it and
 // serves every other client of this state directory, so it takes only what it and the host tools it
 // runs need: never the starting client's secrets (POKI_IPHONE_PASSCODE, model API keys, tokens).
-// POKI_DAEMON_ENV names further variables to pass, comma-separated.
+// POKI_DAEMON_ENV names further variables to pass, comma-separated, except those that must never
+// reach it (refusedExtra).
 const systemEnv = new Set(['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'LANGUAGE', 'TZ',
   // Dialogs (ask approval mode), Xcode, usbmuxd, certificates and proxies.
   'DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'DBUS_SESSION_BUS_ADDRESS', 'DEVELOPER_DIR', 'USBMUXD_SOCKET_ADDRESS',
   'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS', 'NODE_USE_ENV_PROXY', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy',
-  'IDEVICE_TOOLS']);
-// Every POKI_ setting the daemon reads. Not POKI_MCP_TOKEN (an automatic daemon makes its own), and
+  // OCR (build/ocr runs tesseract) and the pinned device tool.
+  'TESSDATA_PREFIX', 'IDEVICE_TOOLS']);
+// Every POKI_ setting the daemon or a native helper it runs reads (test/daemon-lifecycle checks this
+// against src/ and native/). Not POKI_MCP_TOKEN (an automatic daemon makes its own), and
 // not POKI_PARENT_PID or POKI_MCP_SESSION, which belong to the shim's own client.
 export const daemonSettings = new Set(['POKI_ALLOW_PLAINTEXT_BIND', 'POKI_BIND_HOST', 'POKI_BUILD_COMMIT', 'POKI_CUA_ACTION_CAP_MS', 'POKI_CUA_BACKEND',
   'POKI_CUA_TREE_MS', 'POKI_DAEMON_IDLE_EXIT_MS', 'POKI_DDI_DIR', 'POKI_HOST_ALLOW', 'POKI_INPUT_LOCK_WAIT_MS', 'POKI_MAX_CONCURRENT_READS', 'POKI_MCP_APPROVAL_MODE',
   'POKI_MCP_CALL_LOG', 'POKI_MCP_NATIVE_TRACE', 'POKI_MCP_STATE_DIR', 'POKI_MCP_TOOLS', 'POKI_NATIVE', 'POKI_NO_UPDATE_CHECK', 'POKI_PYMOBILEDEVICE3',
   'POKI_TLS_CERT', 'POKI_TLS_KEY', 'POKI_TOOL_PROFILE', 'POKI_WDA_URL',
-  // The live screen (src/stream). POKI_TURN_SECRET is the daemon's own: it derives the time-limited
-  // TURN credentials it hands to a screen view, as a TURN server's shared secret is meant to be used.
+  // Read by build/ocr and poki-native.
+  'POKI_OCR_LANGS', 'POKI_OCR_PSM', 'POKI_OCR_UPSCALE', 'POKI_TYPE_KEY_MS',
+  // The live screen (src/stream). POKI_TURN_SECRET and POKI_TURN_PASSWORD are the daemon's own: it
+  // derives (or passes) the TURN credentials it hands to a screen view, as a TURN server's shared
+  // secret is meant to be used. They are named here, never taken through POKI_DAEMON_ENV.
   'POKI_SCREEN_READ_MAX_BYTES', 'POKI_SCREEN_READ_MAX_FRAMES', 'POKI_SCREEN_H264_BITRATE', 'POKI_SCREEN_RTC',
   'POKI_STUN_URL', 'POKI_TURN_URL', 'POKI_TURN_SECRET', 'POKI_TURN_USERNAME', 'POKI_TURN_PASSWORD']);
-export function daemonEnvironment(env = process.env) {
-  const extra = new Set((env.POKI_DAEMON_ENV ?? '').split(',').map(name => name.trim()).filter(Boolean));
+// Never passed, even when POKI_DAEMON_ENV names them: the client's secrets and the shim's own
+// variables (POKI_PARENT_PID would make the detached daemon stop on its parent check).
+const shimOnly = new Set(['POKI_IPHONE_PASSCODE', 'POKI_MCP_TOKEN', 'POKI_PARENT_PID', 'POKI_MCP_SESSION', 'POKI_DAEMON_ENV', 'POKI_MCP_AUTOSTART', 'POKI_MCP_HEARTBEAT_MS']);
+export const refusedExtra = name => shimOnly.has(name) || /(KEY|TOKEN|SECRET|PASSWORD|PASSCODE|CREDENTIAL)/i.test(name);
+export function daemonEnvironment(env = process.env, warn = message => console.error(message)) {
+  const named = (env.POKI_DAEMON_ENV ?? '').split(',').map(name => name.trim()).filter(Boolean);
+  const refused = named.filter(refusedExtra);
+  if (refused.length) warn(`Poki MCP: POKI_DAEMON_ENV names ${refused.join(', ')}, which a shared service never receives; not passed.`);
+  const extra = new Set(named.filter(name => !refusedExtra(name)));
   const passed = name => systemEnv.has(name) || daemonSettings.has(name) || /^(LC_|XDG_)/.test(name) || extra.has(name);
   return Object.fromEntries(Object.entries(env).filter(([name, value]) => value !== undefined && passed(name)));
 }

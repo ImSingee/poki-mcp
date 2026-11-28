@@ -103,7 +103,13 @@ export function ddiFailure(stage, error, device) {
 // Makes sure the phone offers displayservice. Resolves { ready: true, already?, ddi } or throws an
 // Error carrying { failure } from ddiFailure. `request` is nativeRequest bound to the device.
 export async function ensureDeveloperImage(device, request, { resolve = resolveImage, signal, onPhase = () => {} } = {}) {
-  const status = await request({ op: 'ddi_status' });
+  let status = await request({ op: 'ddi_status' });
+  // The tunnel's service list is from when it opened: an image mounted since (over USB with
+  // prepare-device, say) shows only on a new handshake, so reconnect once before installing.
+  if (!status.display_service) {
+    const reconnected = await request({ op: 'reconnect' }).catch(() => undefined);
+    if (reconnected?.connected) status = await request({ op: 'ddi_status' });
+  }
   if (status.display_service) return { ready: true, already: true, ddi: status.ddi ?? null };
   onPhase('image');
   let image;
