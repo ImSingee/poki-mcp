@@ -371,6 +371,47 @@ console.log(JSON.stringify(${JSON.stringify(paired)}));
   await assert.rejects(access(join(dir, 'state/remote/wireless-27')), { code: 'ENOENT' });
 });
 
+test('a cancelled new pairing that cannot be removed again says so and how to clean it up, without a long wait', { timeout: 30000 }, async t => {
+  const { PairingJobs } = await import('../src/pairing/jobs.mjs');
+  const { completeWirelessPairing } = await import('../src/pairing/wireless.mjs');
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const dir = await mkdtemp(join(tmpdir(), 'poki-cancel-rollback-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const native = join(dir, 'pair-host');
+  await writeFile(native, `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
+writeFileSync(process.argv[4], 'record');
+console.log(JSON.stringify(${JSON.stringify(paired)}));
+`, { mode: 0o755 });
+  let registering, finishRegistration;
+  const gate = new Promise(resolve => { finishRegistration = resolve; });
+  const state = join(dir, 'state');
+  const complete = async (...args) => {
+    registering = true;
+    await gate;
+    const device = await completeWirelessPairing(...args);
+    // Another process now holds the registry, so the rollback cannot take it.
+    await writeFile(join(state, 'remote-devices.json.lock'), JSON.stringify({ pid: 1, nonce: 'another process' }));
+    return device;
+  };
+  const jobs = new PairingJobs({ stateDir: state, native, complete, ensureImage: async () => ({ already: true }) });
+  const { job } = jobs.start();
+  while (!registering) await new Promise(resolve => setTimeout(resolve, 10));
+  const cancelling = jobs.cancel(job.job);
+  const started = performance.now();
+  finishRegistration();
+  const cancelled = await cancelling;
+  assert.ok(performance.now() - started < 10000, `the cancel waited ${Math.round(performance.now() - started)} ms`);
+  assert.equal(cancelled.state, 'cancelled');
+  assert.match(cancelled.note, /removing it from this computer again failed/);
+  assert.match(cancelled.note, /stays registered with the new pairing/);
+  assert.match(cancelled.note, /unpair_device with device "wireless-27"/);
+  assert.match(cancelled.note, /remote\/wireless-27/);
+  assert.doesNotMatch(cancelled.note, /earlier/);
+  assert.deepEqual(JSON.parse(await readFile(join(state, 'remote-devices.json'), 'utf8')).map(d => d.id), ['wireless-27']);
+});
+
 test('pairing a registered iPhone again stops its old helper, so the next call uses the new configuration', { timeout: 60000 }, async t => {
   const { f, data, call, until, release } = await pairingFixture(t);
   const first = data(await call('pair_device')).job.job;
@@ -659,12 +700,22 @@ console.log(JSON.stringify(${JSON.stringify(paired)}));
 
 test('the service\'s pairing jobs wait for the device\'s input lock that a running script holds', { timeout: 60000 }, async t => {
   const { f, data, call, until } = await pairingFixture(t, { registered: ['scripted-phone'], env: { POKI_INPUT_LOCK_WAIT_MS: '500' } });
-  const other = await f.connect();
-  // run_code holds its devices' input lock for the whole script.
-  const script = call('run_code', { devices: ['scripted-phone'], code: "await tools.wait({ device: 'scripted-phone', seconds: 3 }); return 1;" }, other);
-  await new Promise(resolve => setTimeout(resolve, 700));
+  const other = await f.connect(), probe = await f.connect();
+  // run_code holds its devices' input lock for the whole script: long enough that, even on a loaded
+  // host, the job's 500 ms lock wait ends well before it (checked below, not assumed).
+  let scriptDone = false;
+  const script = call('run_code', { devices: ['scripted-phone'], code: "await tools.wait({ device: 'scripted-phone', seconds: 12 }); return 1;" }, other).finally(() => { scriptDone = true; });
+  // Wait until the lock is observably the script's: a tap from a third session times out naming it.
+  const deadline = performance.now() + 15000;
+  while (true) {
+    const tap = await call('tap', { device: 'scripted-phone', x: 1, y: 1 }, probe);
+    if (tap.isError && /running run_code/.test(JSON.stringify(tap))) break;
+    assert.ok(performance.now() < deadline, `the script never held the lock: ${JSON.stringify(tap)}`);
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
   const { job } = data(await call('pair_device', { device: 'scripted-phone' })).job;
   const failed = await until(job, j => j.terminal);
+  assert.equal(scriptDone, false, 'the script ended before the job finished waiting, so this run proves nothing');
   assert.equal(failed.reason, 'device_busy', JSON.stringify(failed));
   assert.equal((await f.events()).filter(e => e.remote === 'install_ddi').length, 0, 'nothing was installed under the script');
   const finished = await script;

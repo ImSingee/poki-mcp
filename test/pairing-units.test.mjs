@@ -409,3 +409,51 @@ test('two processes reclaiming the same stale registry lock never both hold it',
   assert.equal(holders.size, 1);
   await other();
 });
+
+test('a break lock its owner left behind does not make contenders spin past their deadline', async t => {
+  const dir = await scratch(t);
+  const { acquireFileLock } = await import('../src/pairing/registry.mjs');
+  const { utimes } = await import('node:fs/promises');
+  const lock = join(dir, 'remote-devices.json.lock');
+  await writeFile(lock, 'left by a process that died');
+  await utimes(lock, new Date(Date.now() - 60000), new Date(Date.now() - 60000));
+  await writeFile(`${lock}.break`, 'a reclaimer that died a moment ago');
+  const started = Date.now();
+  await assert.rejects(acquireFileLock(lock, { waitMs: 500 }), /has been held/);
+  assert.ok(Date.now() - started < 3000, `waited ${Date.now() - started} ms past a 500 ms deadline`);
+});
+
+test('removing a stale break lock never removes a reclaimer\'s live one', async t => {
+  const dir = await scratch(t);
+  const { acquireFileLock, lockHooks } = await import('../src/pairing/registry.mjs');
+  const { utimes } = await import('node:fs/promises');
+  const lock = join(dir, 'remote-devices.json.lock');
+  const old = new Date(Date.now() - 60000);
+  await writeFile(lock, 'left by a process that died');
+  await utimes(lock, old, old);
+  await writeFile(`${lock}.break`, 'a reclaimer that died long ago');
+  await utimes(`${lock}.break`, old, old);
+  // X finds the break lock stale and pauses; Y removes it, takes its own and pauses inside its section.
+  let resumeX, xReached, resumeY, yReached;
+  const xAt = new Promise(resolve => { xReached = resolve; }), yAt = new Promise(resolve => { yReached = resolve; });
+  lockHooks.beforeUnlinkStaleBreaker = () => { lockHooks.beforeUnlinkStaleBreaker = undefined; xReached(); return new Promise(resolve => { resumeX = resolve; }); };
+  t.after(() => { lockHooks.beforeUnlinkStaleBreaker = undefined; lockHooks.beforeUnlinkStale = undefined; });
+  const holders = new Set();
+  const contend = name => acquireFileLock(lock, { waitMs: 5000 }).then(release => { holders.add(name); return async () => { holders.delete(name); await release(); }; });
+  const x = contend('X');
+  await xAt;
+  // Y: the stale break lock is X's to judge; remove it here as Y would have, then let Y in.
+  const { unlink } = await import('node:fs/promises');
+  await unlink(`${lock}.break`);
+  lockHooks.beforeUnlinkStale = () => { lockHooks.beforeUnlinkStale = undefined; yReached(); return new Promise(resolve => { resumeY = resolve; }); };
+  const y = contend('Y');
+  await yAt;
+  resumeX();
+  await new Promise(resolve => setTimeout(resolve, 200));
+  resumeY();
+  const [first, release] = await Promise.race([x.then(r => ['X', r]), y.then(r => ['Y', r])]);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.deepEqual([...holders], [first], 'only one contender holds the lock');
+  await release();
+  await (await (first === 'X' ? y : x))();
+});

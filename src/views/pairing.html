@@ -222,28 +222,33 @@ function renderJob() {
   const job = state.pairing;
   section.hidden = !job;
   if (!job) return;
-  const index = order[job.state];
-  const failedAt = job.state === 'failed' ? ({ pairing: 0, registering: 2, ddi: 3 }[job.stage] ?? 0) : undefined;
+  // Once a preparation for that iPhone started after this pairing failed, its own card follows it,
+  // and what it ended with decides what this card says.
+  const imageFailed = job.state === 'failed' && job.stage === 'ddi' && job.paired && job.device?.id;
+  const later = imageFailed && state.prepares.get(job.device.id);
+  const followUp = later && later.started_at >= job.updated_at ? later : undefined;
+  const retrying = followUp && !followUp.terminal, reinstalled = followUp?.state === 'ready';
+  const retryImage = imageFailed && !retrying && !reinstalled;
+  // While the retry runs, or once it succeeded, this card shows that state instead of the old failure.
+  const shown = reinstalled ? 'ready' : retrying ? 'mounting_ddi' : job.state;
+  const index = order[shown];
+  const failedAt = shown === 'failed' ? ({ pairing: 0, registering: 2, ddi: 3 }[job.stage] ?? 0) : undefined;
   const stepper = job.state === 'cancelled' ? '' : `<ol class="steps" aria-label="Pairing progress">${steps.map(([, label], i) => {
-    const cls = failedAt !== undefined ? (i < failedAt ? 'done' : i === failedAt ? 'failed' : '') : i < index ? 'done' : i === index ? (job.state === 'ready' ? 'done' : 'current') : '';
+    const cls = failedAt !== undefined ? (i < failedAt ? 'done' : i === failedAt ? 'failed' : '') : i < index ? 'done' : i === index ? (shown === 'ready' ? 'done' : 'current') : '';
     return `<li class="${cls}"${i === index ? ' aria-current="step"' : ''}><span>${label}</span></li>`;
   }).join('')}</ol>`;
   const live = !job.terminal;
-  // Once a preparation for that iPhone started after this pairing failed, its own card follows it.
-  const imageFailed = job.state === 'failed' && job.stage === 'ddi' && job.paired && job.device?.id;
-  const retried = imageFailed && state.prepares.get(job.device.id)?.started_at >= job.updated_at;
-  const retryImage = imageFailed && !retried;
-  const title = { starting: 'Starting…', advertising: 'Waiting for the iPhone', pin: 'Enter this PIN on the iPhone', paired: 'Paired', registering: 'Saving the pairing', mounting_ddi: 'Preparing developer services', ready: 'Ready', failed: 'Pairing failed', cancelled: 'Pairing cancelled' }[job.state] ?? job.state;
-  const dot = job.state === 'ready' ? 'ok' : job.state === 'failed' ? 'bad' : job.state === 'cancelled' ? '' : 'live';
+  const title = { starting: 'Starting…', advertising: 'Waiting for the iPhone', pin: 'Enter this PIN on the iPhone', paired: 'Paired', registering: 'Saving the pairing', mounting_ddi: 'Preparing developer services', ready: 'Ready', failed: 'Pairing failed', cancelled: 'Pairing cancelled' }[shown] ?? job.state;
+  const dot = shown === 'ready' ? 'ok' : shown === 'failed' ? 'bad' : shown === 'cancelled' ? '' : 'live';
   const pin = job.state === 'pin' && job.pin ? `<div class="pin" role="img" aria-label="PIN ${escape(job.pin.split('').join(' '))}">${job.pin.split('').map(d => `<span>${escape(d)}</span>`).join('')}</div>` : '';
   const device = job.device ? `<p class="muted">${escape(job.device.name)} · <code>${escape(job.device.id)}</code></p>` : '';
-  const detail = job.state === 'failed' && job.error ? `<p class="note">${escape(job.error)}</p>` : '';
+  const detail = shown === 'failed' && job.error ? `<p class="note">${escape(job.error)}</p>` : '';
   const note = job.note ? `<p class="note">${escape(job.note)}</p>` : '';
   section.innerHTML = `
     <div class="row"><span class="dot ${dot}" aria-hidden="true"></span><strong>${escape(title)}</strong><span class="spacer"></span>
       ${live ? '<button id="cancel">Cancel</button>' : retryImage ? '<button id="retry" class="primary">Retry developer image</button>' : '<button id="again">Pair again</button>'}</div>
     ${stepper}${pin}
-    <p class="instruction">${escape(retried ? 'The developer image is being installed again for this iPhone; see its card below.' : retryImage ? `Try installing the developer image again over Wi-Fi. If it fails again: ${job.instruction ?? ''}` : job.instruction ?? '')}</p>${detail}${device}${note}`;
+    <p class="instruction">${escape(retrying ? 'The developer image is being installed again for this iPhone; see its card below.' : reinstalled ? `The developer image was installed again; the iPhone is ready. Pass device: ${JSON.stringify(job.device.id)} to the device tools.` : retryImage ? `Try installing the developer image again over Wi-Fi. If it fails again: ${job.instruction ?? ''}` : job.instruction ?? '')}</p>${detail}${device}${note}`;
   const cancel = section.querySelector('#cancel'), again = section.querySelector('#again'), retry = section.querySelector('#retry');
   if (cancel) { cancel.hidden = !state.canCall; cancel.onclick = () => act(cancel, async () => { adopt(await call('pairing_cancel', { job: job.job })); await refreshDevices({ adoptJob: false }); }); }
   if (again) { again.hidden = !state.canCall; again.onclick = () => act(again, () => startPairing()); }

@@ -232,12 +232,43 @@ test('a failed developer image offers a retry that needs no new PIN, and a phone
   await retry.getByText('Preparing developer services', { exact: true }).waitFor();
   assert.deepEqual(server.calls.find(c => c.name === 'pair_device').args, { device: 'wireless-2' });
   await view.getByText('The developer image is being installed again for this iPhone; see its card below.').waitFor();
+  // The pairing card shows the retry, not the failure it is retrying.
+  assert.equal(await view.locator('#job .row strong').innerText(), 'Preparing developer services');
+  assert.equal(await view.locator('#job .note').count(), 0, 'the old error is not shown while the retry runs');
   server.state.prepares.get('wireless-2').state = 'ready';
   await retry.getByText('Ready', { exact: true }).waitFor();
   await view.getByRole('button', { name: 'Pair again' }).waitFor();
+  // The pairing card follows how the retry ended, not that one started.
+  const pairing = view.locator('#job');
+  await pairing.getByText('The developer image was installed again; the iPhone is ready. Pass device: "wireless-2" to the device tools.').waitFor();
+  assert.equal(await pairing.getByText(/being installed again|see its card below/).count(), 0, 'the finished retry is not described as running');
+  assert.equal(await pairing.locator('.row strong').innerText(), 'Ready');
+  assert.equal(await pairing.locator('.note').count(), 0, 'the old failure is not shown beside the ready state');
+  await retry.getByRole('button', { name: 'Done' }).click();
+  assert.equal(await retry.count(), 0);
+  assert.equal(await pairing.getByText(/see its card below/).count(), 0, 'no card below is pointed to once it is closed');
+  await pairing.getByText('The developer image was installed again', { exact: false }).waitFor();
   await view.getByRole('button', { name: 'Install developer image' }).click();
   await until(() => server.calls.filter(c => c.name === 'pair_device').length === 2);
   assert.deepEqual(server.calls.filter(c => c.name === 'pair_device')[1].args, { device: 'wireless-1' });
+});
+
+test('a developer image retry that fails again sends the pairing card back to its retry', { skip, timeout: 60000 }, async t => {
+  const { view, server, mount } = await open(t);
+  server.state.job = true;
+  server.state.jobState = 'failed';
+  await mount({ content: [], structuredContent: server.jobView() });
+  const pairing = view.locator('#job');
+  await pairing.getByRole('button', { name: 'Retry developer image' }).click();
+  const retry = view.locator('[data-prepare="wireless-2"]');
+  await retry.getByText('Preparing developer services', { exact: true }).waitFor();
+  await pairing.getByText('The developer image is being installed again for this iPhone; see its card below.').waitFor();
+  server.state.prepares.get('wireless-2').state = 'failed';
+  await retry.getByText('Developer image failed', { exact: true }).waitFor();
+  await pairing.getByRole('button', { name: 'Retry developer image' }).waitFor();
+  assert.equal(await pairing.locator('.row strong').innerText(), 'Pairing failed');
+  await pairing.getByText('Try installing the developer image again over Wi-Fi. If it fails again: Connect the iPhone with a USB cable once.').waitFor();
+  assert.equal(await pairing.getByText(/being installed again|see its card below/).count(), 0, 'the failed retry is not described as running');
 });
 
 test('preparing another phone keeps a running pairing and its PIN on screen, and both are followed', { skip, timeout: 60000 }, async t => {
@@ -260,7 +291,9 @@ test('preparing another phone keeps a running pairing and its PIN on screen, and
   server.state.jobState = 'mounting_ddi';
   await view.locator('#job').getByText('Preparing developer services', { exact: true }).waitFor();
   server.state.jobState = 'ready';
-  await view.locator('#job').getByText('Ready', { exact: true }).waitFor();
+  // The title and instruction, not the stepper's "Ready" label that every state shows.
+  await view.locator('#job .row strong').getByText('Ready', { exact: true }).waitFor();
+  await view.locator('#job .instruction').getByText('Paired and ready.', { exact: true }).waitFor();
   await prepare.getByRole('button', { name: 'Done' }).click();
   assert.equal(await prepare.count(), 0, 'a finished preparation card can be closed');
 });
