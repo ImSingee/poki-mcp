@@ -348,7 +348,9 @@ test('an iPhone disconnected on purpose is not reconnected by the panel until th
 });
 
 test('over WebRTC the panel learns of a disconnect at once, not when the peer times out', { skip, timeout: 60000 }, async t => {
-  const h = await open(t, { settings: { rtc: true } });
+  if (!(await ffmpegAvailable())) return t.skip('ffmpeg is not installed, so no JPEG to stream');
+  // Any browser decodes JPEG; a loaded machine gets longer for ICE (what is measured is the notice).
+  const h = await open(t, { settings: { rtc: true, codecs: ['jpeg'], rtcTimeoutMs: 10000 } });
   await h.mount(showResult);
   await until(async () => (await h.screen()).transport === 'webrtc');
   await until(() => painted(h.frame()));
