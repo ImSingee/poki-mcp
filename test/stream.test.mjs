@@ -619,3 +619,18 @@ test('a device disconnected on purpose opens again only with reconnect, or once 
   active = performance.now();
   await screens.open(target, { codecs: ['hevc'] });
 });
+
+test('a disconnect while a screen is still checking its codecs is not undone when the check ends', async t => {
+  const native = fakeNative();
+  let probed;
+  const probe = new Promise(resolve => { probed = resolve; });
+  const screens = new Screens({ ...native, ffmpeg: () => probe });
+  t.after(() => screens.closeAll());
+  const opening = screens.open(target, { codecs: ['hevc', 'jpeg'] });
+  await delay(10);
+  screens.closeDevice(target.id);
+  probed(true);
+  await assert.rejects(opening, error => error.reason === 'device_disconnected');
+  assert.equal(native.subscriptions.length, 0, 'the opening subscribed a phone disconnected meanwhile');
+  assert.equal(screens.active, 0);
+});

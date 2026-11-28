@@ -333,8 +333,12 @@ export class Screens {
     const disconnected = this.disconnected.get(target.id);
     if (disconnected && !reconnect && (this.deps.activity?.(target.id) ?? 0) <= disconnected.at) throw Object.assign(new Error(disconnected.message), { reason: disconnected.reason });
     this.disconnected.delete(target.id);
+    const asked = performance.now();
     // HEVC is served as the phone sends it: a view that wants nothing else needs no ffmpeg.
     const served = codecs.every(codec => codec === 'hevc') ? ['hevc'] : await this.codecs();
+    // A disconnect that came while ffmpeg was being checked wins over this opening.
+    const overtaken = this.disconnected.get(target.id);
+    if (overtaken && overtaken.at >= asked) throw Object.assign(new Error(overtaken.message), { reason: overtaken.reason });
     // A codec whose encoder kept failing for this device is not offered again while its hub lives.
     const failed = this.hubs.get(target.id)?.failed ?? new Map();
     const codec = codecs.find(c => served.includes(c) && !failed.has(c));
