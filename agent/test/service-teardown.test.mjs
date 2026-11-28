@@ -12,10 +12,18 @@ import { PokiClient } from '../poki-client.mjs';
 test('closing the phone service while a client stays connected starts no service', { timeout: 30000 }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'poki-service-teardown-'));
   const state = join(directory, 'mcp');
-  process.env.POKI_MCP_STATE_DIR = state; process.env.POKI_NO_UPDATE_CHECK = '1';
+  // A daemon this test fails to prevent must not run real device discovery.
+  process.env.POKI_MCP_STATE_DIR = state; process.env.POKI_NO_UPDATE_CHECK = '1'; process.env.IDEVICE_TOOLS = process.execPath;
   const services = await taskServices(state);
   const client = new PokiClient();
-  t.after(async () => { await client.close(); await rm(directory, { recursive: true, force: true }); });
+  t.after(async () => {
+    await client.close();
+    // Any daemon the shim started anyway is stopped, so a failing run leaves nothing behind.
+    for (const line of (await readFile(join(state, 'daemon.log'), 'utf8').catch(() => '')).split('\n')) {
+      try { const event = JSON.parse(line); if (event.event === 'ready') process.kill(event.pid, 'SIGKILL'); } catch {}
+    }
+    await rm(directory, { recursive: true, force: true });
+  });
   await client.open('teardown');
   assert.ok(!(await client.call('poki_mcp_status')).isError);
   await services.close();
