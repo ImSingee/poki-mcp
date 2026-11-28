@@ -30,9 +30,10 @@ export function alive(pid) {
 // written in another namespace (another container sharing the state directory) says nothing here, so
 // it is only checked when the namespaces match. On macOS both sides have none.
 export const pidNamespace = (() => { try { return readlinkSync('/proc/self/ns/pid'); } catch { return undefined; } })();
-// One daemon's mcp.json entry: its address and token. Two daemons in different PID namespaces can
-// have the same pid, so pids do not tell them apart.
-export const sameDaemon = (a, b) => Boolean(a && b) && String(a.url) === String(b.url) && a.token === b.token;
+// One daemon's mcp.json entry: its address, token and instance id. Two daemons in different PID
+// namespaces can have the same pid, and a restart on a fixed port with a fixed token the same address
+// and token, so only the instance id (from every daemon since 0.2.0) tells them apart.
+export const sameDaemon = (a, b) => Boolean(a && b) && String(a.url) === String(b.url) && a.token === b.token && a.instance === b.instance;
 const sameNamespace = record => (record?.pid_ns ?? undefined) === pidNamespace;
 // Known to be gone: its pid is checked only when it is visible from here.
 const deadHere = record => sameNamespace(record) && !alive(record.pid);
@@ -42,7 +43,7 @@ export async function readEndpoint() {
   if (!entry) return null;
   const url = new URL(entry.url);
   if (!entry.enabled || url.hostname !== '127.0.0.1' || url.protocol !== 'http:' || url.pathname !== '/mcp') throw new Error(`Invalid local MCP endpoint in ${endpointFile}`);
-  return { url, token: entry.token, pid: entry.pid, pid_ns: entry.pid_ns };
+  return { url, token: entry.token, pid: entry.pid, pid_ns: entry.pid_ns, instance: entry.instance };
 }
 
 // a < b for x.y.z versions; anything unparsable counts as different, so as older.
