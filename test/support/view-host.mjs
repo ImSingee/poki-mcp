@@ -4,7 +4,7 @@
 // allow-same-origin (origin null, as in LobeHub), and every resources/read and tools/call sent to a
 // real Poki stdio server (src/stdio.mjs) through MCP.
 //
-//   node test/support/view-host.mjs [--port 4790] [--stub] [--view pairing|screen]
+//   node test/support/view-host.mjs [--port 4790] [--stub [--two-phones]] [--view pairing|screen]
 //   GET /calls lists every tools/call with its time, its source (agent, view, direct) and the job state.
 //
 // --stub runs Poki from a temporary copy of this checkout with a stand-in poki-native
@@ -12,6 +12,7 @@
 // without an iPhone: the page's "iPhone accepts the PIN" button plays the phone's part.
 // --view screen opens the screen panel (show_screen) instead; with --stub the paired iPhone sends
 // the sample stream in native/bridge/tests/fixtures, and its taps are logged to commands.jsonl.
+// --two-phones (with --stub) pairs a second iPhone, Desk iPhone, for choosing another phone in a view.
 import http from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { mkdtemp, cp, mkdir, writeFile, symlink, rm } from 'node:fs/promises';
@@ -24,7 +25,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { root } from '../../src/config.mjs';
 import { pairingNative } from './pairing-native.mjs';
 
-const { values: options } = parseArgs({ options: { port: { type: 'string', default: '4790' }, stub: { type: 'boolean', default: false }, view: { type: 'string', default: 'pairing' } } });
+const { values: options } = parseArgs({ options: { port: { type: 'string', default: '4790' }, stub: { type: 'boolean', default: false }, view: { type: 'string', default: 'pairing' }, 'two-phones': { type: 'boolean', default: false } } });
 const shown = { pairing: { uri: 'ui://poki/pairing', tool: 'pair_device', args: {}, displayMode: 'inline' }, screen: { uri: 'ui://poki/screen', tool: 'show_screen', args: options.stub ? { device: 'lab-iphone' } : {}, displayMode: 'fullscreen' } }[options.view];
 if (!shown) throw new Error('--view is pairing or screen.');
 
@@ -34,7 +35,7 @@ if (options.stub) {
   await cp(join(root, 'src'), join(stubDir, 'src'), { recursive: true });
   await cp(join(root, 'package.json'), join(stubDir, 'package.json'));
   await symlink(join(root, 'node_modules'), join(stubDir, 'node_modules'));
-  for (const directory of ['build', 'bin', 'state/remote/lab-iphone', 'ddi']) await mkdir(join(stubDir, directory), { recursive: true });
+  for (const directory of ['build', 'bin', 'state/remote/lab-iphone', 'state/remote/desk-iphone', 'ddi']) await mkdir(join(stubDir, directory), { recursive: true });
   await writeFile(join(stubDir, 'build/poki-native'), pairingNative, { mode: 0o755 });
   // No USB devices and no simulators: only the wireless ones.
   await writeFile(join(stubDir, 'bin/python3'), '#!/bin/sh\necho "[]"\n', { mode: 0o755 });
@@ -45,7 +46,7 @@ if (options.stub) {
   await writeFile(join(stubDir, 'pairing.json'), JSON.stringify({
     pairHost: [{ event: 'advertising', port: 53124 }, { event: 'connected', peer: '192.0.2.27' }, { event: 'pin', pin: '482916' }, { await: 'accept' },
       { event: 'paired', device: { udid: 'new-iphone', name: 'New iPhone', model: 'iPhone17,1' }, peer: '192.0.2.27' }],
-    names: { 'lab-iphone': 'Lab iPhone', 'new-iphone': 'New iPhone' },
+    names: { 'lab-iphone': 'Lab iPhone', 'desk-iphone': 'Desk iPhone', 'new-iphone': 'New iPhone' },
     // Long enough to see the view's "Preparing developer services" step.
     remote: { installDelayMs: 4000, displayService: true, video: join(stubDir, 'video.json') },
   }));
@@ -53,7 +54,13 @@ if (options.stub) {
   await writeFile(join(stubDir, 'video.json'), JSON.stringify(sampleFrames().map(f => ({ key: f.key, config: f.config?.toString('base64'), data: f.data.toString('base64') }))));
   const labConfig = join(stubDir, 'state/remote/lab-iphone/config.json');
   await writeFile(labConfig, JSON.stringify({ id: 'lab-iphone', host: '192.0.2.10', port: 49152, pairing_file: join(stubDir, 'state/remote/lab-iphone/pairing.plist') }));
-  await writeFile(join(stubDir, 'state/remote-devices.json'), JSON.stringify([{ id: 'lab-iphone', name: 'Lab iPhone', config_path: labConfig }]));
+  const paired = [{ id: 'lab-iphone', name: 'Lab iPhone', config_path: labConfig }];
+  if (options['two-phones']) {
+    const deskConfig = join(stubDir, 'state/remote/desk-iphone/config.json');
+    await writeFile(deskConfig, JSON.stringify({ id: 'desk-iphone', host: '192.0.2.11', port: 49152, pairing_file: join(stubDir, 'state/remote/desk-iphone/pairing.plist') }));
+    paired.push({ id: 'desk-iphone', name: 'Desk iPhone', config_path: deskConfig });
+  }
+  await writeFile(join(stubDir, 'state/remote-devices.json'), JSON.stringify(paired));
   pokiRoot = stubDir;
   env = { ...env, HOME: stubDir, PATH: `${join(stubDir, 'bin')}:${process.env.PATH}`, POKI_MCP_STATE_DIR: join(stubDir, 'state'), POKI_NO_UPDATE_CHECK: '1',
     POKI_DDI_DIR: join(stubDir, 'ddi'), FIXTURE_STATE: join(stubDir, 'fixture.json'), FIXTURE_LOG: join(stubDir, 'commands.jsonl'), POKI_MCP_APPROVAL_MODE: 'host',
