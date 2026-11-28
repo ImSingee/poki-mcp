@@ -1,28 +1,35 @@
 import { checkWork, phase, stopped, stoppingReason } from './work.mjs';
 import { managementTools } from './coordination.mjs';
-import { definitions } from './tools.mjs';
+import { definitions, stepSchema, hostGated } from './tools.mjs';
+import { approvalMode } from './human.mjs';
 import { closestTo } from './interaction.mjs';
 import { flagOn } from './element-flags.mjs';
 
 const json = value => ({ type: 'text', text: JSON.stringify(value) });
 const receipt = value => ({ type: 'text', text: JSON.stringify(value, null, 2) });
 export const offDevice = new Set(['wait', 'list_devices', 'poki_mcp_status', 'request_human_action']);
-export const changesDevice = new Set(['select_device', 'start_simulator', 'shut_down_simulator']);
+export const changesDevice = new Set(['start_simulator', 'shut_down_simulator']);
 // Clients show tools under a prefixed name, and models copy it into a step.
 export const stepTool = tool => tool.replace(/^mcp__poki-mcp__/, '');
 // A step's stop_reason that ends the run, for batch_commands and run_code alike. An ordinary error
 // and a touch with no observed change are left to the caller: stop_on_error, or the script.
 export const stopsRun = reason => Boolean(reason) && reason !== 'error' && reason !== 'no_change';
 
-export function invalidStep(command) {
+// A batch step runs on the batch's device and so names none (step: true); a run_code call names its
+// own, as a direct call does.
+export function invalidStep(command, { step = true } = {}) {
   if (command.tool === 'batch_commands' || command.tool === 'run_code') return 'Nested batches are not supported, and neither is run_code.';
   if (managementTools.has(command.tool)) return 'Call device management tools outside a batch.';
+  const gated = hostGated(command.tool, approvalMode());
+  if (gated) return gated;
   const definition = definitions.find(([name]) => name === command.tool);
   if (!definition) {
     const closest = closestTo(command.tool, definitions.map(([name]) => name));
     return `Unknown tool: ${command.tool}.${closest.length ? ` Did you mean ${closest.join(', ')}?` : ''}`;
   }
-  const schema = definition[2], parsed = schema.safeParse(command.arguments ?? {});
+  if (step && command.arguments?.device !== undefined) return 'A step names no device: every step runs on the batch\'s device. Send steps for another device in their own batch_commands call.';
+  if (step && command.tool === 'start_simulator' && (command.arguments?.model !== undefined || command.arguments?.simulator !== undefined)) return 'In a batch, start_simulator boots the batch\'s device and takes no simulator or model. Create a simulator with its own start_simulator call.';
+  const schema = step ? stepSchema(command.tool) : definition[2], parsed = schema.safeParse(command.arguments ?? {});
   if (parsed.success) return null;
   const issues = parsed.error.issues.map(issue => `${issue.path.join('.') || 'arguments'}: ${issue.message}`).join('; ');
   return `Invalid arguments for ${command.tool}: ${issues}. It accepts: ${Object.keys(schema.shape ?? {}).join(', ')}.`;
@@ -91,8 +98,6 @@ export async function runBatch(ctx, args) {
   // Reading a simulator that a step just shut down would boot it again.
   const last = commands.slice(0, ran).findLast(command => !offDevice.has(command.tool));
   if (last && last.tool !== 'shut_down_simulator') {
-    // dispatch restores both when this batch ends.
-    if (last.arguments?.device) { ctx.requested = last.arguments.device; ctx.resolved = undefined; }
     try {
       const { screen, stop_reason } = await phase('batch_readback', () => ctx.readback(undefined, { once: unverified }));
       stopReason ??= stop_reason;

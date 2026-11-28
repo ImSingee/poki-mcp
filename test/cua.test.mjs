@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
-import { Devices } from '../src/device.mjs';
+import { DeviceContext } from '../src/device.mjs';
 import { fixture } from './fixture.mjs';
 
 // "Jot", an app invented for these tests: a home screen with its icon, a note with a title field and
@@ -31,8 +31,8 @@ class Jot {
   }
 }
 
-class JotPhone extends Devices {
-  constructor() { super(); this.app = new Jot(); this.size = { device: 'phone-1', width: W, height: H }; this.sent = []; this.clipboard = { items: [{ index: 0, uti: 'public.utf8-plain-text', state: 'inline', size: 5 }], text: 'mine!' }; }
+class JotPhone extends DeviceContext {
+  constructor() { super(undefined, 'phone-1'); this.app = new Jot(); this.size = { device: 'phone-1', width: W, height: H }; this.sent = []; this.clipboard = { items: [{ index: 0, uti: 'public.utf8-plain-text', state: 'inline', size: 5 }], text: 'mine!' }; }
   async inventory() { return [{ id: 'phone-1', kind: 'physical', name: 'Test Phone', state: 'Booted' }]; }
   liveScreen() { return undefined; }
   async bridge(request) {
@@ -314,8 +314,8 @@ test('a do that may have delivered an action stops a run_code script that catche
   assert.equal((await refused.call('do', { actions: [{ launch: 'local.jot' }] }))._meta?.stop_reason, 'not_sent');
   phone.sent = [];
   const script = await phone.call('run_code', { code: `async () => {
-    try { await tools.do({ actions: [{ tap: [45, 105] }] }); } catch {}
-    await tools.tap({ x: 170, y: 105 });
+    try { await tools.do({ device: 'phone-1', actions: [{ tap: [45, 105] }] }); } catch {}
+    await tools.tap({ device: 'phone-1', x: 170, y: 105 });
     return 'went on';
   }` });
   const summary = JSON.parse(text(script));

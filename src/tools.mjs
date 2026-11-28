@@ -6,13 +6,32 @@ import { version } from './build-info.mjs';
 
 const catalog = JSON.parse(readFileSync(new URL('./data/tools.json', import.meta.url), 'utf8'));
 const defaultTools = new Set([
-  'poki_mcp_status', 'list_devices', 'select_device', 'list_elements', 'take_screenshot',
+  'poki_mcp_status', 'list_devices', 'list_elements', 'take_screenshot',
   'get_foreground_app', 'launch_app', 'open_url', 'tap', 'tap_text', 'fill', 'type_text',
   'scroll', 'swipe', 'press_key', 'go_back', 'wait_for', 'handle_alert', 'batch_commands',
   'long_press', 'double_tap', 'drag', 'hide_keyboard', 'press_button',
   'scroll_to', 'terminate_app', 'pinch', 'list_apps', 'get_clipboard',
 ]);
-const instructions = 'When the request already says what to do on the device, use batch_commands for launch_app and steps whose targets are already known; use fill without field for a single visible input, and use exact observed labels when a selector is needed; it is usually the only device call needed. Tapping steps wait for their target, and the reply ends with the visible text. With one device available, skip list_devices and select_device; use them when a call reports several devices. Consecutive calls do not require an explicit device lease. Single-step tools remain for exploring an unknown screen.';
+const instructions = 'When the request already says what to do on the device, use batch_commands for launch_app and steps whose targets are already known; use fill without field for a single visible input, and use exact observed labels when a selector is needed; it is usually the only device call needed. Tapping steps wait for their target, and the reply ends with the visible text. Every device tool takes device: call list_devices once and pass the id it reports (its default when it names one) on every call. Calls to different devices may run at the same time; calls to one device run in the order sent. Consecutive calls do not require an explicit device lease. Single-step tools remain for exploring an unknown screen.';
+// The tools that need approval before they run (approvedTools). Their annotations let an MCP client
+// ask instead of Poki, which is how POKI_MCP_APPROVAL_MODE=host works. They are set in every mode, so
+// tools/list does not depend on which process answers it. get_clipboard reads, but what it reads
+// leaves the device, so a client that runs read-only tools without asking must not take it as one.
+export const approvalHints = {
+  install_app: { destructiveHint: true, openWorldHint: false },
+  uninstall_app: { destructiveHint: true, openWorldHint: false },
+  build_and_run: { destructiveHint: true, openWorldHint: false },
+  open_url: { destructiveHint: true, openWorldHint: true },
+  download_app_container: { destructiveHint: false, openWorldHint: true },
+  get_clipboard: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+  set_clipboard: { destructiveHint: true, openWorldHint: true },
+};
+export const approvedTools = new Set(Object.keys(approvalHints));
+// In host mode only the client approves, and it sees only the tool it is asked about. A gated tool
+// inside batch_commands or run_code would run under the wrapper's approval, so there it is refused.
+export const hostGated = (tool, mode) => mode === 'host' && approvedTools.has(tool)
+  ? `${tool} needs approval, and in host approval mode the MCP client gives it. Inside batch_commands or run_code the client would not be asked, so it does not run there: call ${tool} on its own.`
+  : null;
 const readOnly = new Set(['observe_device','list_devices', 'get_device_info', 'take_screenshot', 'get_foreground_app', 'list_elements', 'list_apps', 'get_clipboard', 'list_crashes', 'get_crash', 'wait_for', 'wait']);
 const guidance = {
   acquire_device: 'Only needed to keep other sessions off a device across several calls. One batch_commands call already runs without interruption, so a single-call task needs no lease. If you take one, keep the returned lease_id, renew before expiry, then release.',
@@ -55,7 +74,13 @@ const strokeChecks = {
 // behavior and the upstream stroke timing refinements are preserved.
 const actionObservationTools = new Set(['tap', 'double_tap', 'long_press', 'tap_text', 'swipe',
   'drag', 'scroll', 'pinch', 'type_text', 'fill', 'press_key', 'press_button', 'go_back', 'handle_alert']);
-const schemaOf = tool => {
+// A batch step runs on its batch's device, so its schema has no device.
+const withoutDevice = schema => {
+  const { device: _device, ...properties } = schema.properties ?? {};
+  return { ...schema, properties, ...(schema.required ? { required: schema.required.filter(name => name !== 'device') } : {}) };
+};
+const schemaOf = (tool, { step = false } = {}) => {
+  tool = step ? { ...tool, inputSchema: withoutDevice(tool.inputSchema) } : tool;
   const schemaWithObservations = actionObservationTools.has(tool.name)
     ? { ...tool.inputSchema, properties: { ...tool.inputSchema.properties,
       return_observation: { type: 'boolean', description: 'Request a ref-bearing post-input observation when available.' },
@@ -68,12 +93,29 @@ const schemaOf = tool => {
   return strokeChecks[tool.name] ? schema.superRefine(strokeChecks[tool.name]) : schema;
 };
 export const definitions = catalog.tools.map(tool => [tool.name, [tool.description, guidance[tool.name]].filter(Boolean).join('\n\n'), schemaOf(tool), readOnly.has(tool.name)]);
-definitions.push(['disconnect_device', 'Close the selected remote device connection and its local helper. Cellular reconnection may require returning the iPhone to Wi-Fi. Does not undo input.', z.object({ device: z.string().optional() }), false]);
-definitions.push(['reconnect_device', 'Re-establish the selected RemotePairing tunnel. Does not replay input. A new session may require Wi-Fi when iOS closes its remote pairing listener.', z.object({ device: z.string().optional() }), false]);
-definitions.push(['poki_mcp_status', 'Report Poki MCP version, current Git commit, native bridge build time, tool count, connected-device count, selected device, approval mode for this session, and any available Poki update with release notes and the update command.', z.object({}), true]);
+// Built on first use: every stdio process imports this module, and most never run a batch.
+const stepSchemas = new Map(catalog.tools.map(tool => [tool.name, () => schemaOf(tool, { step: true })]));
+const device = z.string().min(1).describe('The device to act on: its id from list_devices (or its exact name).');
+const extra = [
+  ['disconnect_device', 'Close the device\'s remote connection and its local helper. Cellular reconnection may require returning the iPhone to Wi-Fi. Does not undo input.', z.object({ device }), false],
+  ['reconnect_device', 'Re-establish the device\'s RemotePairing tunnel. Does not replay input. A new session may require Wi-Fi when iOS closes its remote pairing listener.', z.object({ device }), false],
+  ['poki_mcp_status', 'Report Poki MCP version, current Git commit, native bridge build time, tool count, connected-device count, approval mode, and any available Poki update with release notes and the update command.', z.object({}), true],
+];
+for (const definition of extra) { definitions.push(definition); stepSchemas.set(definition[0], () => definition[0] === 'poki_mcp_status' ? definition[2] : z.object({})); }
 
 // The computer-use profile (POKI_TOOL_PROFILE=cua, cua.mjs): look and do, plus device and status tools.
-for (const [name, description, schema, readOnlyHint] of cua.definitions) definitions.push([name, description, z.fromJSONSchema(schema), readOnlyHint]);
+for (const [name, description, schema, readOnlyHint] of cua.definitions) { definitions.push([name, description, z.fromJSONSchema(schema), readOnlyHint]); stepSchemas.set(name, () => z.fromJSONSchema(withoutDevice(schema))); }
+// The arguments a tool takes once its device is known: inside a batch step, or after a call was routed to its device.
+export const stepSchema = name => {
+  const schema = stepSchemas.get(name);
+  if (typeof schema !== 'function') return schema;
+  const built = schema();
+  stepSchemas.set(name, built);
+  return built;
+};
+// Tools that act on no device (and so take none), and tools that name several.
+export const sessionTools = new Set(['poki_mcp_status', 'list_devices']);
+const annotationsOf = (name, readOnlyHint) => ({ readOnlyHint, ...approvalHints[name] });
 const profile = (env = process.env) => env.POKI_TOOL_PROFILE ?? 'default';
 const listedFor = name => (name === 'cua' ? cua.tools : defaultTools);
 
@@ -81,8 +123,8 @@ export function createServer(call) {
   const computerUse = profile() === 'cua', listed = listedFor(profile());
   const server = new McpServer({ name: 'poki-mcp', version }, { instructions: computerUse ? cua.instructions : instructions });
   for (const [name, description, inputSchema, readOnlyHint] of definitions) {
-    server.registerTool(name, { description, inputSchema, annotations: { readOnlyHint } }, async (args, extra) => {
-      try { return await call(name, args, { signal: extra.mcpReq?.signal ?? extra.signal, requestId: extra.mcpReq?._meta?.['poki/request_id'] }); }
+    server.registerTool(name, { description, inputSchema, annotations: annotationsOf(name, readOnlyHint) }, async (args, extra) => {
+      try { return await call(name, args, { signal: extra.mcpReq?.signal ?? extra.signal, requestId: extra.mcpReq?._meta?.['poki/request_id'], order: extra.mcpReq?._meta?.['poki/order'] }); }
       catch (error) { return { isError: true, content: [{ type: 'text', text: error.message }] }; }
     });
   }
@@ -90,7 +132,7 @@ export function createServer(call) {
     server.server.setRequestHandler('tools/list', () => ({
       tools: definitions.filter(([name]) => listed.has(name)).map(([name, description, inputSchema, readOnlyHint]) => ({
         name, description, inputSchema: z.toJSONSchema(inputSchema, { io: 'input', target: 'draft-2020-12' }),
-        annotations: { readOnlyHint },
+        annotations: annotationsOf(name, readOnlyHint),
       })),
     }));
   }

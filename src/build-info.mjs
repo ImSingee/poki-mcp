@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { readdir, stat, access, constants, readFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { root } from './config.mjs';
@@ -23,10 +24,22 @@ async function codeMarker() {
 }
 
 const startupCode = await codeMarker();
+// Identifies the code this process loaded, so a shim can tell whether a running daemon loaded the same.
+const fingerprint = marker => createHash('sha256').update(marker).digest('hex').slice(0, 16);
+export const codeFingerprint = fingerprint(startupCode);
+// The code on disk now, which a running daemon must match (see daemon-launch.mjs).
+export const currentCodeFingerprint = async () => fingerprint(await codeMarker());
 
+// How this process was started: 'auto' when a stdio shim started it (daemon.mjs --auto), which a
+// shim replaces by itself; 'manual' for npm start, which only its operator restarts.
+let serviceStart = 'manual';
+export function setServiceStart(value) { serviceStart = value; }
+// Thrown before a tool touches a device, so the call can be sent again to a restarted service.
 export async function requireCurrentCode() {
   if (await codeMarker() !== startupCode) {
-    throw new Error('The service is running old code. Stop the running service and restart it with npm start.');
+    throw Object.assign(new Error(serviceStart === 'auto'
+      ? 'The service is running old code: its files changed after it started. It is replaced once it is idle; send the call again.'
+      : 'The service is running old code. Stop the running service and restart it with npm start.'), { code: 'stale_code', serviceStart });
   }
 }
 

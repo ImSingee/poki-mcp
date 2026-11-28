@@ -48,18 +48,14 @@ node bin/prepare-device.mjs
 
 pymobiledevice3 経由で DeveloperDiskImage をインストールします。すでにインストール済みの場合は、その旨を報告するだけで何もしません。
 
-サーバーを起動し、動かし続けます。
-
-```sh
-npm start
-```
-
 同じディレクトリから、MCP サーバーをクライアントに登録します。
 
 ```sh
 claude mcp add --scope user poki-mcp -- node "$PWD/src/stdio.mjs"   # Claude Code
 codex mcp add poki-mcp -- node "$PWD/src/stdio.mjs"                 # Codex
 ```
+
+最初のツール呼び出しで Poki デーモンがバックグラウンドで起動します。10 分間アイドルが続くと終了し、次の呼び出しで再び起動します。`npm start` は、常時稼働やネットワーク越しのサービスが必要な場合にだけ使います。[LINUX.md](LINUX.md#running-the-daemon-as-a-user-service) を参照してください。
 
 状態データは `POKI_MCP_STATE_DIR` が設定されていない限り `$XDG_STATE_HOME/PokiMCP`（デフォルトは `~/.local/state/PokiMCP`）に保存されます。
 
@@ -70,7 +66,9 @@ node bin/call.mjs list_devices   # デバイスの UUID を確認
 node bin/call.mjs list_elements '{"device":"<device UUID>"}'
 ```
 
-> **注意:** Poki はあなたの実際の iPhone を操作します。メッセージの送信や支払いを頼めば、本当に実行します。画面の内容は、あなたが設定したモデルサービスに送信されます。機微なツールは先に承認を求めます。Linux では承認ダイアログに `zenity` を使い、zenity がなければ機微なツールは黙って続行せず、明示的にエラーを返します。
+デバイスを操作するツールにはすべて `device`（`list_devices` が返す id）が必要です。0.2.0 でツールのインターフェースが変わりました。[0.2.0 の互換性のない変更](docs/tools.md#breaking-changes-in-020) を参照してください。
+
+> **注意:** Poki はあなたの実際の iPhone を操作します。メッセージの送信や支払いを頼めば、本当に実行します。画面の内容は、あなたが設定したモデルサービスに送信されます。機微なツール（アプリのインストール、URL を開く、クリップボード）には承認が必要です。ディスプレイがある環境では、Poki は `zenity` のダイアログで確認します。ディスプレイのない Linux ホストでは `host` モードで動作し、ダイアログを出さず、MCP クライアントが判断します。LobeHub は既定で確認なしに MCP ツールを実行する（`auto`）ため、コネクタの設定でこれらのツールを承認必須にしてください。[承認について](docs/tools.md#approval--clipboard-behavior) を参照してください。
 
 **Poki Agent。** スタンドアロンのターミナルエージェントも Linux でそのまま動作します（`npm ci --prefix agent` の後 `poki login`）。[Poki Agent の実行](agent/README.md) を参照してください。唯一の例外は iMessage チャネルで、BlueBubbles サーバーが必要ですが、それ自体に Mac が必要です。Telegram チャネルは問題ありません。
 

@@ -48,18 +48,14 @@ node bin/prepare-device.mjs
 
 Esto instala la imagen de disco de desarrollador mediante pymobiledevice3. Si la imagen ya está instalada, lo informa y no hace nada.
 
-Inicia el servidor y déjalo en ejecución:
-
-```sh
-npm start
-```
-
 Desde el mismo directorio, registra el servidor MCP en tu cliente:
 
 ```sh
 claude mcp add --scope user poki-mcp -- node "$PWD/src/stdio.mjs"   # Claude Code
 codex mcp add poki-mcp -- node "$PWD/src/stdio.mjs"                 # Codex
 ```
+
+La primera llamada a una herramienta inicia el daemon de Poki en segundo plano. Se detiene tras 10 minutos inactivo, y la siguiente llamada lo vuelve a iniciar. Usa `npm start` solo para un servicio permanente o accesible por red; consulta [LINUX.md](LINUX.md#running-the-daemon-as-a-user-service).
 
 El estado se guarda en `$XDG_STATE_HOME/PokiMCP` (por defecto `~/.local/state/PokiMCP`), salvo que se defina `POKI_MCP_STATE_DIR`.
 
@@ -70,7 +66,9 @@ node bin/call.mjs list_devices   # Encuentra el UUID de tu dispositivo
 node bin/call.mjs list_elements '{"device":"<device UUID>"}'
 ```
 
-> **Nota:** Poki controla tu iPhone real. Si le pides que envíe mensajes o haga pagos, lo hará. El contenido de la pantalla se envía al servicio de modelo que hayas configurado. Las herramientas sensibles piden aprobación antes: en Linux el diálogo de aprobación usa `zenity`, y sin zenity las herramientas sensibles devuelven un error explícito en lugar de continuar en silencio.
+Toda herramienta que actúa sobre un dispositivo necesita `device`, un id de `list_devices`. La versión 0.2.0 cambió la interfaz de las herramientas; consulta [Cambios incompatibles en 0.2.0](docs/tools.md#breaking-changes-in-020).
+
+> **Nota:** Poki controla tu iPhone real. Si le pides que envíe mensajes o haga pagos, lo hará. El contenido de la pantalla se envía al servicio de modelo que hayas configurado. Las herramientas sensibles (instalar apps, abrir URL, el portapapeles) necesitan aprobación. Con pantalla, Poki pregunta con un diálogo de `zenity`. En un host Linux sin pantalla funciona en modo `host`: no muestra ningún diálogo y decide tu cliente MCP. LobeHub ejecuta las herramientas MCP sin preguntar por defecto (`auto`), así que configura estas herramientas para que requieran aprobación en los ajustes de su conector. Consulta [la aprobación](docs/tools.md#approval--clipboard-behavior).
 
 **Poki Agent.** El agente de terminal independiente funciona igual en Linux (`npm ci --prefix agent` y luego `poki login`); consulta [Ejecutar Poki Agent](agent/README.md). La única excepción es el canal de iMessage: necesita un servidor BlueBubbles, que a su vez requiere un Mac. Telegram funciona.
 

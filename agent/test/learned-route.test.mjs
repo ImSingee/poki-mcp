@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
 import { createServer } from '../../src/tools.mjs';
+import { daemonVersion } from './fixtures/task-services.mjs';
 import { RouteStore } from '../routes.mjs';
 import { recorded, settingsPhone } from './fixtures/settings-phone.mjs';
 
@@ -44,7 +45,7 @@ async function phone(directory, stack) {
   const dispatch = async (name, args) => {
     calls.push(name);
     let result;
-    if (name === 'poki_mcp_status') result = { connected: 1, selected: 'synthetic-device' };
+    if (name === 'poki_mcp_status') result = { connected: 1 };
     else if (name === 'get_foreground_app') result = app;
     else if (name === 'launch_app') result = { ...app, launched: true, foreground_verified: true };
     else if (['acquire_device', 'renew_device', 'release_device'].includes(name)) result = { lease_id: 'fixture-lease', device: 'synthetic-device', released: true };
@@ -63,6 +64,7 @@ async function phone(directory, stack) {
 async function serve(directory, dispatch) {
   const server = http.createServer(async (req, res) => {
     if (req.headers.authorization !== 'Bearer local-mcp-fixture') { res.writeHead(401).end(); return; }
+    if (req.url === '/version') { res.end(daemonVersion()); return; }
     if (req.url !== '/mcp') { res.end('{}'); return; }
     const mcp = createServer(dispatch);
     const transport = new NodeStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
@@ -72,7 +74,7 @@ async function serve(directory, dispatch) {
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  await writeFile(join(directory, 'mcp.json'), JSON.stringify({ url: `http://127.0.0.1:${server.address().port}/mcp`, token: 'local-mcp-fixture', enabled: true }), { mode: 0o600 });
+  await writeFile(join(directory, 'mcp.json'), JSON.stringify({ url: `http://127.0.0.1:${server.address().port}/mcp`, token: 'local-mcp-fixture', enabled: true, pid: process.pid }), { mode: 0o600 });
   return { close: () => { server.closeAllConnections(); return new Promise(done => server.close(done)); } };
 }
 
@@ -122,7 +124,7 @@ test('A route a model run taught opens Settings once and lets each next look con
   // The phone was left on About, two pages into the route, as the test iPhone reports Settings: by name, with no bundle identifier.
   const settings = settingsPhone({ open: ['top', 'scrolled', 'general', 'about'] });
   const device = await serve(join(directory, 'mcp'), (name, args) => name === 'poki_mcp_status'
-    ? { content: [{ type: 'text', text: JSON.stringify({ connected: 1, selected: 'synthetic-device' }) }] } : settings.call(name, args));
+    ? { content: [{ type: 'text', text: JSON.stringify({ connected: 1 }) }] } : settings.call(name, args));
   t.after(async () => { await device.close(); await rm(directory, { recursive: true, force: true }); });
   const { code, output, record } = await poki(directory, run.prompt);
   assert.equal(code, 0, output);

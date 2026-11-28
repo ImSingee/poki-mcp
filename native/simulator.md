@@ -1,6 +1,6 @@
 # Simulator and platform adapter
 
-`src/platform.mjs` exposes `platformTool(devices, name, arguments)` and returns JSON values. Its context supplies `target()` and the selected-device/frame fields. `src/simulator.mjs` exposes `simulatorRequest(udid, request)` with screen coordinates in points.
+`src/platform.mjs` exposes `platformTool(context, name, arguments)` and returns JSON values. Its context, the `DeviceContext` of the device a call names (`src/device.mjs`), supplies `target()` and the device/frame fields. `src/simulator.mjs` exposes `simulatorRequest(udid, request)` with screen coordinates in points.
 
 The simulator executable reads one JSON request on stdin, except for input, which has its own session mode described below. It selects the active Xcode from `DEVELOPER_DIR` or `xcode-select -p` and connects directly to CoreSimulator services. It does not click macOS screen coordinates.
 

@@ -42,7 +42,7 @@ Not supported on Linux:
   access and app-container export, which macOS reaches through
   `xcrun devicectl`
 - Optional: `zenity`, used for the human-approval dialogs of sensitive
-  tools
+  tools in `ask` mode, on a host with a display
 
 ## Setup
 
@@ -72,8 +72,12 @@ Then prepare the iPhone (once):
    and installs it. Set `POKI_PYMOBILEDEVICE3` if the binary is not on
    `PATH`. Run it with a single iPhone connected.
 
-Run the daemon the same way as on macOS (`npm start`, or
-`node bin/call.mjs <tool>` for one-off calls). State lives in
+There is no daemon to start by hand, as on macOS: the stdio server a
+client registers starts the shared daemon on its first tool call and
+lets it exit after 10 idle minutes (see
+[docs/install.md](docs/install.md#1-build-from-source)).
+`node bin/call.mjs <tool>` makes one-off calls the same way. `npm start`
+runs a long-lived daemon instead. State lives in
 `$XDG_STATE_HOME/PokiMCP` (default `~/.local/state/PokiMCP`) unless
 `POKI_MCP_STATE_DIR` is set.
 
@@ -97,8 +101,10 @@ route should use Tailscale.
 
 ## Running the daemon as a user service
 
-On a host that should keep Poki available, run the daemon under
-systemd's user manager instead of a terminal. Save as
+On a host that should keep Poki available, or serve clients on other
+machines, run the daemon under systemd's user manager. Clients find it
+in `mcp.json` and use it instead of starting their own; it never exits
+on idle. Save as
 `~/.config/systemd/user/poki-mcp.service`:
 
 ```ini
@@ -130,6 +136,14 @@ with an `Environment=` line in the unit when the state directory
 should differ from the default — and pass the same value to every
 client, as described next.
 
+The unit's environment also decides the approval mode. A user service
+normally has neither `DISPLAY` nor `WAYLAND_DISPLAY`, so it runs in
+`host` mode unless the unit sets `POKI_MCP_APPROVAL_MODE` (see
+[Approval](#approval-on-linux) below).
+
+A stdio process never restarts this service. After an update, restart it
+yourself with `systemctl --user restart poki-mcp.service`.
+
 The Linux device-service paths (`terminate_app`, crash reports,
 app-container export) shell out to `pymobiledevice3`. When it is
 installed in a virtualenv it is not on the service's `PATH`, and
@@ -144,14 +158,17 @@ Environment=POKI_PYMOBILEDEVICE3=/path/to/venv/bin/pymobiledevice3
 
 ## Connecting an MCP client
 
-The daemon serves HTTP on a random loopback port with a random
-bearer token, and rewrites both on every start in `mcp.json` inside
-the state directory. **Never copy that URL or token into a client
+The daemon serves HTTP on a loopback port with a random bearer
+token, and rewrites both on every start in `mcp.json` inside the
+state directory. **Never copy that URL or token into a client
 configuration** — it is stale the moment the daemon restarts.
 Clients connect through the stdio bridge in this repository,
-`src/stdio.mjs`, which reads the current endpoint file on startup
-and re-reads it when the daemon rejects a stale endpoint (401) or
-is unreachable, so a daemon restart needs no client-side change.
+`src/stdio.mjs`, which finds the daemon through that file, starts one
+when none is running, and re-reads the file when the daemon rejects a
+stale endpoint (401) or is unreachable, so a daemon restart needs no
+client-side change. Several stdio processes share one daemon, so a
+client that starts and stops them as it needs them, such as LobeHub's
+`lh connect`, keeps its sessions and leases in that daemon.
 
 Claude Code:
 
@@ -173,9 +190,34 @@ Pi (an entry in `~/.pi/agent/mcp.json`):
 }
 ```
 
-With a non-default state directory, give the bridge the same
-`POKI_MCP_STATE_DIR` the daemon runs with: the `--env` flag for
-`claude mcp add`, or an `env` object next to `args` for Pi.
+With a non-default state directory, give every client the same
+`POKI_MCP_STATE_DIR` (and the user service, if you run one): the
+`--env` flag for `claude mcp add`, or an `env` object next to `args`
+for Pi. A daemon a client starts takes its settings from that client's
+environment (never its secrets), so daemon settings such as
+`POKI_MCP_APPROVAL_MODE` go in the same place.
+
+### Approval on Linux
+
+Sensitive tools (`install_app`, `uninstall_app`, `build_and_run`,
+`open_url`, `download_app_container`, `get_clipboard`, `set_clipboard`)
+need approval, and `POKI_MCP_APPROVAL_MODE` decides who gives it
+([details](docs/tools.md#approval--clipboard-behavior)). Without the
+variable, a daemon whose environment has neither `DISPLAY` nor
+`WAYLAND_DISPLAY` (a headless machine, an SSH session, a systemd user
+service) runs in `host` mode: Poki shows no dialog, and the MCP client
+decides from the tools' `destructiveHint`/`openWorldHint` annotations.
+
+**LobeHub's MCP tool permission defaults to `auto`.** With Poki as a
+stdio MCP server on a headless Linux machine reached through
+`lh connect`, these tools therefore run with no confirmation at all
+unless you set them to require approval in the LobeHub connector's
+tool settings. In `host` mode `batch_commands` and `run_code` refuse
+these tools, so the client is always asked about the tool itself.
+
+With a display, the default is `ask`, which shows a `zenity` question
+dialog. `POKI_MCP_APPROVAL_MODE=allow` lets the tools run with nobody
+asked.
 
 To serve clients on other machines (a home server or a router, as in
 [deploy/istoreos](deploy/istoreos/README.md)), set `POKI_BIND_HOST` to
@@ -262,10 +304,13 @@ and the test fixture did not stub `zenity` — both fixed since.
   protected (`PERM_DENIED`), so pulling the root itself always
   aborts. `SystemData` is system-managed and the service denies
   reading it, so it is not part of the export.
-- Human approval for sensitive tools uses a `zenity` question dialog.
-  Without zenity the tools raise an explicit error instead of silently
-  proceeding; `POKI_MCP_APPROVAL_MODE=allow` remains available for hosts
-  where unapproved sensitive actions are acceptable.
+- In `ask` mode, human approval for sensitive tools uses a `zenity`
+  question dialog. Without zenity the tools raise an explicit error
+  instead of silently proceeding. Without a display the default is
+  `host` mode, where the MCP client decides; see
+  [Approval on Linux](#approval-on-linux).
+  `POKI_MCP_APPROVAL_MODE=allow` remains available for hosts where
+  unapproved sensitive actions are acceptable.
 - On some Linux npm setups, `npm ci` silently skips sharp's prebuilt
   `@img` packages and sharp then fails trying to build from source.
   `bin/setup` installs with `--ignore-scripts` on Linux and runs
@@ -292,7 +337,9 @@ and the test fixture did not stub `zenity` — both fixed since.
   through pymobiledevice3 instead of the Xcode `iOS_DDI` directory
 - `src/config.mjs`: default state directory follows the XDG state
   convention on Linux (macOS path unchanged)
-- `src/human.mjs`: approval dialogs fall back to `zenity` on Linux
+- `src/human.mjs`: approval dialogs fall back to `zenity` on Linux;
+  without a display the default approval mode is `host`, where the MCP
+  client decides
 - `src/platform.mjs` and `src/work.mjs`: app-package and property-list
   work uses `plistutil` and zip/unzip on Linux in place of the
   macOS-only `plutil` and `ditto` (the macOS tools are unchanged);

@@ -5,6 +5,10 @@ import { join } from 'node:path';
 import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
 import { createServer } from '../../../src/tools.mjs';
 import { runBatch } from '../../../src/batch.mjs';
+import { version } from '../../../src/build-info.mjs';
+
+// What a current daemon answers on /version, so the stdio shim uses this fixture instead of starting one.
+export const daemonVersion = () => JSON.stringify({ version, code: 'fixture', stale: false, auto: false, pid: process.pid, approval_mode: 'ask', sessions: 0, busy: false, busy_reasons: [] });
 
 function respond(res, tool, index, opening, finalText = 'Finished the local fixture task.') {
   const item = tool ? { type: 'function_call', id: `fc_${index}`, call_id: `call_${index}`, name: tool[0],
@@ -81,6 +85,8 @@ export async function taskServices(directory, { route = false, appSearch = false
   const active = new Set();
   const phone = http.createServer(async (req, res) => {
     if (req.headers.authorization !== 'Bearer local-mcp-fixture') { res.writeHead(401).end(); return; }
+    if (req.url === '/version') { res.end(daemonVersion()); return; }
+    if (req.url === '/session/heartbeat') { res.end('{}'); return; }
     if (req.url === '/session/close' || req.url === '/request/cancel') { fixture.events.push({ type: req.url, foreground: fixture.foreground }); res.end('{}'); return; }
     if (req.url !== '/mcp') { res.writeHead(404).end(); return; }
     const dispatch = async (name, args) => {
@@ -89,8 +95,9 @@ export async function taskServices(directory, { route = false, appSearch = false
       fixture.events.push({ type: name, foreground: fixture.foreground });
       await beforeDeviceCall?.(name, args);
       let result;
-      if (name === 'poki_mcp_status') result = { connected: 1, selected: 'synthetic-device' };
-      else if (name === 'list_devices') result = { devices };
+      if (name === 'poki_mcp_status') result = { connected: 1 };
+      // As the daemon does: a sole device is named as the default.
+      else if (name === 'list_devices') result = { devices, ...(devices.length === 1 ? { default: devices[0].id } : {}) };
       else if (name === 'list_apps') result = { apps: [{ name: 'Channel fixture', bundle_id: 'org.example.channel-fixture', path: '/large/private/path', metadata: 'x'.repeat(2000) }, ...Array.from({ length: 400 }, (_, index) => ({ name: `Unused fixture app ${index}`, bundle_id: `org.example.unused-${index}`, metadata: 'x'.repeat(200) }))] };
       else if (name === 'get_foreground_app') {
         result = fixture.foregroundError ? { isError: true, error: 'Synthetic foreground unavailable' } : fixture.foreground;
@@ -147,7 +154,7 @@ export async function taskServices(directory, { route = false, appSearch = false
   });
   phone.listen(0, '127.0.0.1'); await once(phone, 'listening');
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  await writeFile(join(directory, 'mcp.json'), JSON.stringify({ url: `http://127.0.0.1:${phone.address().port}/mcp`, token: 'local-mcp-fixture', enabled: true }), { mode: 0o600 });
+  await writeFile(join(directory, 'mcp.json'), JSON.stringify({ url: `http://127.0.0.1:${phone.address().port}/mcp`, token: 'local-mcp-fixture', enabled: true, pid: process.pid }), { mode: 0o600 });
   fixture.close = async () => {
     await Promise.allSettled([...active].map(server => server.close()));
     await Promise.all([phone, model].map(server => {

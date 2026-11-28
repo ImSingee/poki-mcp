@@ -98,6 +98,9 @@ Configuration goes through these environment variables of `src/daemon.mjs`. The 
 | `POKI_HOST_ALLOW` | unset, so `localhostHostValidation()` applies | `127.0.0.1` plus the `br-lan` address |
 | `POKI_MCP_TOKEN` | random per start | the contents of `$BASE_DIR/token` |
 | `POKI_TLS_CERT`, `POKI_TLS_KEY` | unset, so every listener is plain HTTP | `/tls/cert.pem` and `/tls/key.pem` when `$BASE_DIR/tls` holds them |
+| `POKI_MCP_APPROVAL_MODE` | `host` on Linux without `DISPLAY` or `WAYLAND_DISPLAY`, as in this container; otherwise `ask` | unset, so `host` |
+
+In `host` approval mode Poki shows no dialog for `install_app`, `open_url`, the clipboard tools and the other gated tools; the MCP client decides whether they run. A client that runs tools without asking, such as LobeHub with its default `auto` tool permission, runs them unconfirmed. See [Approval & Clipboard Behavior](../../docs/tools.md#approval--clipboard-behavior).
 
 When `POKI_HOST_ALLOW` is set it replaces `localhostHostValidation()`, which otherwise rejects any non-loopback `Host` with `403`. It must contain `127.0.0.1` itself: local clients are pinned to that name, so an entry for `localhost` or `[::1]` does not cover the `Host: 127.0.0.1:47825` they send, and they are locked out.
 

@@ -48,18 +48,14 @@ node bin/prepare-device.mjs
 
 pymobiledevice3를 통해 DeveloperDiskImage를 설치합니다. 이미 설치되어 있으면 그 사실만 보고하고 아무것도 하지 않습니다.
 
-서버를 시작하고 계속 실행합니다.
-
-```sh
-npm start
-```
-
 같은 디렉터리에서 MCP 서버를 클라이언트에 등록합니다.
 
 ```sh
 claude mcp add --scope user poki-mcp -- node "$PWD/src/stdio.mjs"   # Claude Code
 codex mcp add poki-mcp -- node "$PWD/src/stdio.mjs"                 # Codex
 ```
+
+첫 도구 호출 때 Poki 데몬이 백그라운드에서 시작됩니다. 10분 동안 유휴 상태이면 종료되고, 다음 호출에서 다시 시작됩니다. `npm start`는 계속 실행되거나 네트워크로 제공되는 서비스가 필요할 때만 사용합니다. [LINUX.md](LINUX.md#running-the-daemon-as-a-user-service)를 참조하세요.
 
 상태 데이터는 `POKI_MCP_STATE_DIR`가 설정되지 않은 한 `$XDG_STATE_HOME/PokiMCP`(기본값 `~/.local/state/PokiMCP`)에 저장됩니다.
 
@@ -70,7 +66,9 @@ node bin/call.mjs list_devices   # 기기의 UUID 찾기
 node bin/call.mjs list_elements '{"device":"<device UUID>"}'
 ```
 
-> **참고:** Poki는 당신의 실제 iPhone을 조종합니다. 메시지를 보내거나 결제하라고 하면 실제로 실행합니다. 화면 내용은 당신이 설정한 모델 서비스로 전송됩니다. 민감한 도구는 먼저 승인을 요청합니다. Linux에서는 승인 대화 상자가 `zenity`를 사용하며, zenity가 없으면 민감한 도구는 조용히 진행하지 않고 명시적으로 오류를 반환합니다.
+기기를 조작하는 모든 도구에는 `device`(`list_devices`가 반환하는 id)가 필요합니다. 0.2.0에서 도구 인터페이스가 바뀌었습니다. [0.2.0의 호환되지 않는 변경](docs/tools.md#breaking-changes-in-020)을 참조하세요.
+
+> **참고:** Poki는 당신의 실제 iPhone을 조종합니다. 메시지를 보내거나 결제하라고 하면 실제로 실행합니다. 화면 내용은 당신이 설정한 모델 서비스로 전송됩니다. 민감한 도구(앱 설치, URL 열기, 클립보드)는 승인이 필요합니다. 디스플레이가 있으면 Poki가 `zenity` 대화 상자로 묻습니다. 디스플레이가 없는 Linux 호스트에서는 `host` 모드로 실행되어 대화 상자를 띄우지 않고 MCP 클라이언트가 결정합니다. LobeHub는 기본적으로 묻지 않고 MCP 도구를 실행하므로(`auto`), 커넥터 설정에서 이 도구들을 승인 필요로 설정하세요. [승인 안내](docs/tools.md#approval--clipboard-behavior)를 참조하세요.
 
 **Poki Agent.** 독립 터미널 에이전트도 Linux에서 동일하게 동작합니다(`npm ci --prefix agent` 후 `poki login`). [Poki Agent 실행](agent/README.md)을 참조하세요. 유일한 예외는 iMessage 채널인데, BlueBubbles 서버가 필요하고 그 서버 자체에 Mac이 필요합니다. Telegram 채널은 문제없습니다.
 

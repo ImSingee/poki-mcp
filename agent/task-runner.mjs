@@ -19,6 +19,12 @@ import { reusableActionObservation, receiptForModel } from './post-action-observ
 const terminal = new Set(['completed', 'failed', 'stopped']);
 const allowedTools = new Set(['poki_mcp_status', 'get_foreground_app', 'list_apps', 'launch_app', 'take_screenshot', 'observe_device', 'list_elements', 'tap', 'tap_text', 'fill', 'type_text', 'press_key', 'hide_keyboard', 'scroll', 'swipe', 'go_back', 'handle_alert', 'batch_commands']);
 const object = (properties, required) => ({ type: 'object', properties, required, additionalProperties: false });
+// The task's device is filled in by #validate, so the model is shown each tool without one.
+const withoutDevice = schema => {
+  if (!schema?.properties?.device) return schema;
+  const { device: _device, ...properties } = schema.properties;
+  return { ...schema, properties, ...(schema.required ? { required: schema.required.filter(name => name !== 'device') } : {}) };
+};
 const string = { type: 'string' };
 const textResult = text => ({ success: true, contentItems: [{ type: 'inputText', text }] });
 const structuredObservations = new Set(['observe_device', 'list_elements', 'post_action_observation']);
@@ -141,8 +147,10 @@ export class PhoneTask extends EventEmitter {
       this.snapshot.metrics.mcpStatusMilliseconds = performance.now() - statusStarted;
       if (status.isError) throw Object.assign(new Error('Poki is unavailable. No phone action has run.'), { code: 'phone' });
       if (!this.device) {
-        const report = JSON.parse(status.content.find(item => item.type === 'text')?.text ?? '{}');
-        this.device = report.selected ?? null;
+        // Every device tool names its device. Without one given, only a sole listed device is chosen.
+        const listed = await this.#call('list_devices', {});
+        this.device = (listed.isError ? null : JSON.parse(listed.content.find(item => item.type === 'text')?.text ?? '{}').default) ?? null;
+        if (!this.device) throw Object.assign(new Error('Several devices, or none, are connected, and the task names none. No phone action has run.'), { code: 'no_device' });
       }
       try {
         const foreground = await this.poki.call('get_foreground_app', { device: this.device });
@@ -213,7 +221,7 @@ export class PhoneTask extends EventEmitter {
       this.snapshot.metrics.modelSetupMilliseconds = performance.now() - modelStarted;
       await this.#startModel(definitions);
     } catch (error) {
-      if (error.code === 'device_setup') this.fail(error);
+      if (error.code === 'device_setup' || error.code === 'no_device') this.fail(error);
       else this.emit('warning', safeModelError(error));
     }
   }
@@ -223,7 +231,7 @@ export class PhoneTask extends EventEmitter {
     this.modelToolMilliseconds = this.snapshot.metrics.toolMilliseconds;
     const instructions = [await readFile(new URL('./prompts/pi-app.md', import.meta.url), 'utf8'), this.poki.instructions, await readFile(new URL('./prompts/call-draft.md', import.meta.url), 'utf8'), await readFile(new URL('./skills/iphone-unlock/SKILL.md', import.meta.url), 'utf8')].join('\n\n');
     const dynamicTools = definitions.filter(tool => allowedTools.has(tool.name) && !['poki_mcp_status', 'get_foreground_app'].includes(tool.name)).map(tool => ({
-      type: 'function', name: tool.name, description: tool.description + (!observations.has(tool.name) ? '\nA successful action also returns a fresh structured observation, including foreground and element refs. Use it before requesting another observation.' : ''), inputSchema: tool.inputSchema,
+      type: 'function', name: tool.name, description: tool.description + (!observations.has(tool.name) ? '\nA successful action also returns a fresh structured observation, including foreground and element refs. Use it before requesting another observation.' : ''), inputSchema: withoutDevice(tool.inputSchema),
     }));
     const apps = dynamicTools.find(tool => tool.name === 'list_apps');
     if (apps) {
@@ -518,11 +526,13 @@ export class PhoneTask extends EventEmitter {
   #validate(name, args) {
     if (!allowedTools.has(name)) throw new Error('Tool is not authorized for this task');
     if (name === 'list_apps' && (typeof args.query !== 'string' || !args.query.trim())) throw new Error('list_apps requires a specific app name or bundle identifier in query.');
-    if (name === 'batch_commands') return { commands: args.commands.map(command => {
+    // A batch runs on the task's device; its steps name none.
+    if (name === 'batch_commands') return { device: this.device, commands: args.commands.map(command => {
       const tool = command.tool.replace(/^mcp__poki-mcp__/, '');
       if (tool === 'batch_commands') throw new Error('Nested batches are not allowed');
       if (tool === 'list_apps') throw new Error('Call list_apps separately with a specific query.');
-      return { tool, arguments: this.#validate(tool, command.arguments ?? {}) };
+      const { device: _device, ...stepArgs } = this.#validate(tool, command.arguments ?? {});
+      return { tool, arguments: stepArgs };
     }), stop_on_error: true };
     return name === 'poki_mcp_status' ? {} : { ...args, device: this.device,
       ...(reusableInputTools.has(name) ? { return_observation: true } : {}) };

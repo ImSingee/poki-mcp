@@ -1,26 +1,36 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fixture, value } from './fixture.mjs';
+import { fixture } from './fixture.mjs';
 
 const text = result => result.content.find(item => item.type === 'text')?.text ?? '';
 
-test('CUA cannot use a screen element number from iPhone A after switching to iPhone B', { timeout: 35000 }, async t => {
+test('CUA element numbers belong to the device they were read on', { timeout: 35000 }, async t => {
   const f = await fixture(t, { toolsProfile: 'cua' });
   await f.set({ twoPhones: true, label: 'Ready' });
-  assert.equal(value(await f.call('select_device', { device: 'fixture-phone' })).selected, 'fixture-phone');
-  const onA = await f.call('look');
+  const onA = await f.call('look', { device: 'fixture-phone' });
   assert.match(text(onA), /1 (?:Button|StaticText) "Ready"/);
-  assert.equal(value(await f.call('select_device', { device: 'fixture-phone-2' })).selected, 'fixture-phone-2');
-  const result = await f.call('do', { actions: [{ tap: 1 }] });
+  // iPhone B has not been read in this session, so A's numbers mean nothing there.
+  const result = await f.call('do', { device: 'fixture-phone-2', actions: [{ tap: 1 }] });
   assert.equal(result.isError, true, text(result));
   assert.match(text(result), /element 1 is not in the latest read; nothing was sent/i);
-  const inputs = (await f.events()).filter(e => e.op === 'tap');
-  assert.equal(inputs.length, 0, 'switching devices must not dispatch a tap using another device’s coordinates');
-  const fresh = await f.call('look');
+  assert.equal((await f.events()).filter(e => e.op === 'tap').length, 0, 'no tap is dispatched with another device’s coordinates');
+  const fresh = await f.call('look', { device: 'fixture-phone-2' });
   assert.match(text(fresh), /1 (?:Button|StaticText) "Ready"/);
-  const onB = await f.call('do', { actions: [{ tap: 1 }] });
+  const onB = await f.call('do', { device: 'fixture-phone-2', actions: [{ tap: 1 }] });
   assert.match(text(onB), /did: tap 1 \(sent,/);
-  assert.equal((await f.events()).filter(e => e.op === 'tap').length, 1, 'a fresh observation on iPhone B permits its own elements');
+  // Reading B left A's own read alone.
+  const backOnA = await f.call('do', { device: 'fixture-phone', actions: [{ tap: 1 }] });
+  assert.match(text(backOnA), /did: tap 1 \(sent,/);
+  assert.deepEqual((await f.events()).filter(e => e.op === 'tap').map(e => e.device), ['fixture-phone-2', 'fixture-phone']);
+});
+
+test('look and do need device', { timeout: 35000 }, async t => {
+  const f = await fixture(t, { toolsProfile: 'cua' });
+  for (const [name, args] of [['look', {}], ['do', { actions: [] }]]) {
+    const result = await f.a.callTool({ name, arguments: args });
+    assert.equal(result.isError, true, name);
+    assert.match(text(result), /device/);
+  }
 });
 
 // The native helper serves one request at a time, so a screenshot waits behind a slow accessibility

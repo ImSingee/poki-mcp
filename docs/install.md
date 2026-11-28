@@ -23,13 +23,12 @@ For remote access, see [Remote iPhone over LAN or Tailscale](remote-iphone.md). 
 
 If you received the optional `poki-v0.1.1-macos-arm64.tar.gz` build, follow its bundled README; the source installation below does not depend on that archive.
 
-## 1. Build from Source and Start the Daemon
+## 1. Build from Source
 
 ```sh
 git clone https://github.com/ImSingee/poki-mcp.git
 cd poki-mcp
 ./bin/setup
-npm start
 ```
 
 `./bin/setup` takes a few minutes on a first build. What it does:
@@ -40,11 +39,20 @@ npm start
 
 Setup does **not** install Xcode, developer disk images, device profiles, or signing identities.
 
-Keep `npm start` running while using an MCP client:
+You do not need to start the daemon yourself. The stdio server that every client registers (`src/stdio.mjs`, next step) answers `tools/list` itself. On its first `tools/call`, it finds the one daemon for its state directory or starts one:
 
-- The daemon listens on `127.0.0.1:47825` by default, so it is not exposed to external networks and is not registered as a login item. `POKI_BIND_HOST` and `POKI_HOST_ALLOW` can move it onto a LAN or tailnet; see [Configuration](configuration.md).
-- Its endpoint and bearer token are written to `~/Library/Application Support/PokiMCP/mcp.json` (`0600`) and removed on normal shutdown.
-- The stdio wrapper (`src/stdio.mjs`) connects to this running daemon; it does not auto-start the service.
+- It takes `daemon.lock` in the state directory, starts `node src/daemon.mjs --auto` in the background, and waits until the daemon answers. The process holding the lock touches it while it waits, so a lock untouched for 20 seconds, or left by a process that is gone, is broken. A call that still cannot start the service names the lock file and its holder.
+- Only a tool call starts the daemon. Listing tools, the client's background stream, closing a session and heartbeats never do, so a daemon you stopped stays stopped while clients remain connected, until one of them calls a tool. Set `POKI_MCP_AUTOSTART=0` for a client that must only use a daemon that already runs (for example a container whose daemon runs in another container). The daemon's output goes to `daemon.log` (`0600`) in the state directory.
+- The daemon listens on a free port on `127.0.0.1`, so it is not exposed to external networks, and it is not registered as a login item. Its endpoint and bearer token are written to `mcp.json` (`0600`) in the state directory (`~/Library/Application Support/PokiMCP` by default) and removed on normal shutdown. The token is internal; you never configure it.
+- Several stdio processes share that daemon: several clients, or one client that starts and stops stdio processes as it needs them, such as LobeHub's `lh connect`. Device locks and the queues of other sessions live in the daemon. A session belongs to one stdio process: when that process exits, or stops sending its heartbeat (every `POKI_MCP_HEARTBEAT_MS`, default 10 seconds) for three intervals because it was killed, the daemon closes its session, which ends its leases, element refs, recordings and simulated locations. A pool that reaps stdio processes, as `lh connect` does, therefore loses that state with the process; acquire a lease again in the next one. State that has to outlast a stdio process belongs to the daemon itself, not to a session. The daemon judges this by the heartbeat and by its answer to `/version`, never by process ids, and every daemon has its own instance id, so one restarted on a fixed port with a fixed token is still found as a new one; so a client and a daemon in different PID namespaces (separate containers sharing the state directory) work together.
+- The daemon exits after it has been idle for `POKI_DAEMON_IDLE_EXIT_MS` (default 10 minutes): no session, no lease, no call in progress, and no background recording or simulated location.
+- If the daemon is gone, the next call starts a new one. A call that never reached the daemon (a refused connection, or a token the daemon rejects) is sent once more. A connection lost during a call is reported and not sent again, because the device may already have acted.
+- After an update, the next call stops an idle automatic daemon that runs the old code and starts a new one. That holds for a new stdio process and for one that stayed connected: the old daemon refuses the call before it touches a device, and the stdio process replaces it and sends the call again. If the old daemon is still busy (leases, calls in progress, background work), the call fails with an error that names that work; retry when it ends, or stop the pid it names. A daemon from before 0.2.0 counts as a `npm start` service (see below).
+- The daemon takes its settings from the client that started it, but only those: the `POKI_` settings it reads, `PATH`, `HOME`, locale, display, Xcode, certificate and proxy variables (see [configuration](configuration.md#environment-of-a-daemon-a-client-starts)). It never takes that client's secrets, such as `POKI_IPHONE_PASSCODE`, model API keys or `POKI_MCP_TOKEN`. Set daemon settings, such as `POKI_MCP_APPROVAL_MODE` or `POKI_MCP_STATE_DIR`, in the MCP `env` of every client of the state directory: whichever client starts the daemon decides them for all.
+
+### Run a long-lived service (optional)
+
+`npm start` runs the daemon in the foreground until you stop it. Use it, or a user service as described in [LINUX.md](../LINUX.md#running-the-daemon-as-a-user-service), when the daemon should keep running, serve clients on other machines (`POKI_BIND_HOST` and `POKI_HOST_ALLOW`; see [Configuration](configuration.md)), or run with settings of its own. It listens on `127.0.0.1:47825` by default, never exits on idle, and is never restarted by a stdio process. Clients that find it in `mcp.json` use it instead of starting their own. Start it before its clients; if an automatic daemon already runs for that state directory, stop it first (its pid is in `mcp.json`). After an update, stop it and start it again yourself.
 
 ## 2. Connect an MCP Client
 
@@ -95,13 +103,13 @@ Paste this prompt into your agent:
 Install https://github.com/ImSingee/poki-mcp following its root AGENTS.md, including the MCP skill, and stop whenever you need me to act.
 ```
 
-[AGENTS.md](../AGENTS.md) covers prerequisites, source setup, the background daemon, registration in your own client, skill installation, iPhone pairing, Poki Agent, optional iMessage, and verification. It names each user-only stop, including Xcode setup, Trust This Computer, Developer Mode, UI Automation, and model login.
+[AGENTS.md](../AGENTS.md) covers prerequisites, source setup, registration in your own client, skill installation, iPhone pairing, Poki Agent, optional iMessage, and verification. It names each user-only stop, including Xcode setup, Trust This Computer, Developer Mode, UI Automation, and model login.
 
 The default MCP `tools/list` exposes the tools for phone tasks. `poki_mcp_status.total_tools` reports the size of the complete catalog. Set `POKI_MCP_TOOLS=all` in the client's environment and reconnect to discover the complete catalog. Read and report the actual values. Neither count proves that the phone is ready.
 
 ## 3. Verify from the Terminal
 
-Each stdio MCP client gets its own session, keeping its `select_device` choice until the client exits. `bin/call.mjs` works differently: each run opens a session named `terminal`, makes a single call, and closes the session on exit. Even though runs use the same session name, they do not share state, so device selections and recordings do not carry over to the next run. Pass `device` in each call, or use an MCP client session to persist your selection:
+Each stdio MCP client gets its own session, which keeps its leases and recordings until the client exits. `bin/call.mjs` works differently: each run starts its own stdio process, which starts the daemon if none is running, opens a session named `terminal`, makes a single call, and closes the session on exit. Even though runs use the same session name, they do not share state, so leases and recordings do not carry over to the next run. Every device tool needs `device`, an id from `list_devices` or an exact device name:
 
 ```sh
 node bin/call.mjs poki_mcp_status
@@ -111,7 +119,7 @@ node bin/call.mjs take_screenshot '{"device":"YOUR_DEVICE_NAME_OR_ID"}'
 node bin/call.mjs list_elements '{"device":"YOUR_DEVICE_NAME_OR_ID","source":"accessibility"}'
 ```
 
-`list_devices` with `{"include_all_simulators":true}` lists the models that `start_simulator` can create. `start_simulator` names a new simulator `Poki MCP <model>`.
+`list_devices` with `{"include_all_simulators":true}` lists the models that `start_simulator` can create. `start_simulator` names a new simulator `Poki MCP <model>` and returns its id; pass that id as `device` in later calls.
 
 To use a physical iPhone, first pair it with your Mac over USB. After that, keep both devices on the same local network with the phone unlocked. See [Physical iPhone setup](physical-iphone.md).
 
@@ -122,11 +130,19 @@ To use a physical iPhone, first pair it with your Mac over USB. After that, keep
 | `Missing prerequisite: <tool>` from `./bin/setup` | Install what the message names, then run `./bin/setup` again. Setup keeps the existing `.deps/idevice` checkout, and Cargo continues its build. |
 | `Poki MCP needs the full Xcode` from `./bin/setup` | Only the Command Line Tools are active. Install Xcode and run the commands in the message. |
 | `STATUS=94`, `This device isn't eligible for the requested build`, or `ddi_refused` while installing a developer disk image | Check the Xcode and iOS versions in the error. The image may be too old for the phone, for example Xcode 26.6 with iOS 27.2. Update Xcode to support this iOS version (iOS 27 requires Xcode 27). Open Xcode once and wait for its components to finish installing. Rerun the same `prepare-device` or `install-iphone` command. Poki does not need to be reinstalled. If you passed `--image`, replace it with the updated Xcode image first. An unavailable or unknown version means detection failed, not that compatibility was confirmed. |
-| `Local Poki MCP is not running` | Run `npm start` in the checkout. If you set `POKI_MCP_STATE_DIR`, set the same value for the daemon and the client. |
+| `Poki MCP could not start` or `Poki MCP did not become ready` | The automatic daemon failed to start. The message ends with the last lines of `daemon.log` in the state directory. Fix what they name and retry the call. If you set `POKI_MCP_STATE_DIR`, set the same value for every client. |
+| `... runs older code ... and is still busy` | An automatic daemon from before an update still has leases, calls or background work. Retry when that work ends, or stop it with the `kill` command in the message. |
+| `... was started with npm start and runs older code` | Stop that service and start it again with `npm start`, or stop it and let the client start its own daemon. |
+| `The service is running old code. Stop the running service and restart it with npm start.` | A `npm start` service whose files changed after it started (an update). Stop it and start it again. An automatic daemon in the same state is replaced by the stdio process on the next call, so this message does not reach its clients. |
+| `... was started with npm start and runs older code (before 0.2.0 ...)` | A service from before 0.2.0 is still running. Stop it; the next call starts a current one, or run `npm start` again. |
+| `This MCP session was closed. Start a new one.` | The client's session ended (its stdio process closed it, or `bin/call.mjs` finished) while a call was still on its way. Send the call again from a connected client. |
 | `usbmuxd answered, but no iPhone is attached over USB` | macOS has not attached the iPhone. Check the Finder sidebar. If Finder does not show it either, connect it directly with a data cable, unlock it, and accept **Trust This Computer**. Poki cannot use an iPhone that `devicectl` reaches only over the network. |
-| `Multiple devices match` | Name the device: call `select_device` in an MCP client session, or pass `device` in each call. |
-| The default port is in use | Run `npm start -- --port <port>`. Clients read the port from `mcp.json`. |
-| A second daemon on one Mac | Give each daemon its own `POKI_MCP_STATE_DIR`. Both write `mcp.json` in that folder, and a normal shutdown removes it. |
+| An input validation error on `device`, such as `expected string, received undefined` | Every device tool takes `device` since 0.2.0. Call `list_devices` once and pass its id on every call. |
+| `Several devices match "<name>"` | Pass the device's id from `list_devices` as `device`. |
+| `No connected device is named "<name>"` | Call `list_devices` and pass one of its ids as `device`. |
+| `npm start` reports that the default port is in use | Run `npm start -- --port <port>`. Clients read the port from `mcp.json`. |
+| A second daemon on one Mac | Give each daemon, and the clients that use it, its own `POKI_MCP_STATE_DIR`. Each writes `mcp.json` in its folder, and a normal shutdown removes it. |
+| Sensitive tools run without any confirmation | The daemon runs in `host` approval mode, and the client runs tools without asking. Set those tools to require approval in the client, or see [Approval & Clipboard Behavior](tools.md#approval--clipboard-behavior). |
 | `tap_text` cannot find English text | A new simulator uses the language of the Mac. Target the text as it appears on screen. |
 | Screenshots work, but touch fails with `no display service` | The developer disk image on the iPhone lacks the display service. See [Touch and text input fail](physical-iphone.md#touch-and-text-input-fail). |
 | `This device is not recording` from `bin/call.mjs` | A recording ends when its session closes. Record from one MCP client session. |

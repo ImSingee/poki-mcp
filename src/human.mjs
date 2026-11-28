@@ -1,8 +1,31 @@
 import { platform } from 'node:os';
 import { execute } from './work.mjs';
 
+// Who approves the tools that change apps, open links, or read and write the clipboard
+// (approvedTools in device.mjs):
+//   ask   Poki shows a dialog on this machine (osascript on macOS, zenity on Linux) and waits.
+//   host  Poki shows nothing. The MCP client decides, from the annotations on those tools and its own
+//         tool permissions. The default on a Linux host without a display, where no dialog can appear.
+//   allow Nobody is asked; the operator accepted that.
+// An explicit POKI_MCP_APPROVAL_MODE always wins over the display check.
+export function approvalMode(env = process.env, host = platform()) {
+  const configured = env.POKI_MCP_APPROVAL_MODE?.trim();
+  if (configured) {
+    if (configured === 'ask-human') return 'ask';
+    if (!['ask', 'host', 'allow'].includes(configured)) throw new Error(`POKI_MCP_APPROVAL_MODE=${configured} is not one of ask, host or allow.`);
+    return configured;
+  }
+  return host === 'linux' && !env.DISPLAY && !env.WAYLAND_DISPLAY ? 'host' : 'ask';
+}
+
+// ask (a dialog on this machine) is stricter than host (the MCP client's own prompts), which is
+// stricter than allow (nobody asked).
+const strictness = { allow: 0, host: 1, ask: 2 };
+export const stricterApproval = (a, b) => strictness[a] > strictness[b];
+
 // A real macOS dialog is the acknowledgment. A successful notification alone is not.
 export async function askHuman(message, seconds = 120) {
+    if (approvalMode() === 'host') throw new Error('This Poki MCP service runs in host approval mode, so it shows no dialog on its machine. Ask the user in the conversation instead, then inspect the device.');
     if (platform() === 'linux') return askHumanLinux(message, seconds);
     const script = `on run argv
       set promptText to item 1 of argv
@@ -29,7 +52,7 @@ async function askHumanLinux(message, seconds) {
         await execute('zenity', ['--question', '--title=Poki MCP', `--text=${message}`, '--ok-label=确认', '--cancel-label=取消', `--timeout=${Math.ceil(seconds)}`], { timeout: (seconds + 10) * 1000 });
         return { status: 'done', completed: true, message: 'The user confirmed the dialog. Inspect the device before continuing.' };
     } catch (error) {
-        if (error.code === 'ENOENT') throw new Error('No approval dialog is available on this Linux host because zenity is not installed. Install zenity, or set POKI_MCP_APPROVAL_MODE=allow only if unapproved sensitive actions are acceptable here.');
+        if (error.code === 'ENOENT') throw new Error('No approval dialog is available on this Linux host because zenity is not installed. Install zenity, or set POKI_MCP_APPROVAL_MODE=host to let the MCP client approve them, or allow only if unapproved sensitive actions are acceptable here.');
         const status = error.code === 5 ? 'timeout' : 'cancelled';
         return { status, completed: false, message: 'The user did not confirm completion.' };
     }

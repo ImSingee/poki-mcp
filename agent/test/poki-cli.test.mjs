@@ -99,7 +99,10 @@ test('device discovery lists ambiguous phones and status reports service failure
       assert.doesNotMatch(status.output, /synthetic-api-secret/);
     } finally { await services.close(); }
   }
-  const unavailable = await run(['status'], { POKI_MCP_STATE_DIR: join(dir, 'missing'), OPENAI_API_KEY: 'synthetic-api-secret', POKI_AGENT_AUTH: 'api-key', OPENAI_BASE_URL: '' });
+  // The service starts itself when none runs, so it is unavailable only when it cannot start: here its
+  // state directory would have to be created inside a file.
+  await writeFile(join(dir, 'not-a-directory'), '');
+  const unavailable = await run(['status'], { POKI_MCP_STATE_DIR: join(dir, 'not-a-directory', 'state'), OPENAI_API_KEY: 'synthetic-api-secret', POKI_AGENT_AUTH: 'api-key', OPENAI_BASE_URL: '' });
   assert.equal(unavailable.code, 1);
   assert.match(unavailable.output, /Poki MCP: unavailable/);
 });

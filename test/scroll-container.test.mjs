@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
-import { Devices } from '../src/device.mjs';
+import { DeviceContext } from '../src/device.mjs';
 import { whatMoved } from '../src/interaction.mjs';
 
 // A page invented for these tests: a header, two buttons and a sideways row of chips ("Recent")
@@ -9,9 +9,9 @@ import { whatMoved } from '../src/interaction.mjs';
 const W = 200, H = 400, app = { pid: 501, bundle_id: 'local.rows' };
 const el = (role, label, x, y, width, height) => ({ role, type: role, label, x, y, width, height });
 
-class RowPhone extends Devices {
+class RowPhone extends DeviceContext {
   offset = 0; drags = [];
-  constructor() { super(); this.size = { device: 'phone-1', width: W, height: H }; }
+  constructor() { super(undefined, 'phone-1'); this.size = { device: 'phone-1', width: W, height: H }; }
   screen() {
     return { foreground: app, elements: [el('StaticText', 'Accounts', 10, 40, 100, 20), el('Button', 'Entries', 10, 100, 180, 40), el('Button', 'Settings', 10, 150, 180, 40),
       el('CollectionView', 'Recent', 0, 200, 200, 60), ...[1, 2, 3, 4, 5, 6].map(n => el('Cell', `Chip ${n}`, 10 + (n - 1) * 70 + this.offset, 210, 60, 40)).filter(e => e.x < W && e.x + e.width > 0)] };

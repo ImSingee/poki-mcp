@@ -41,7 +41,6 @@ try {
   await client.connect(new StdioClientTransport({ command: process.execPath, args: [join(root, 'src/stdio.mjs')], env: { ...process.env, POKI_MCP_SESSION: `fixture-${Date.now()}` } }));
   const listing = await call('list_devices');
   assert.ok(listing.devices.some(d => d.id === device && d.kind === 'simulator' && d.name === 'Poki MCP QA'), 'Only operate the dedicated QA simulator');
-  await call('select_device');
   await call('launch_app', { bundle_id: 'local.pokimcp.fixture', ...(resumeInput ? {} : { arguments: ['-MCPReset', 'YES'] }) });
   const info = await call('get_device_info');
   assert.ok(info.screen.scale > 1 && info.screen.width > 100);

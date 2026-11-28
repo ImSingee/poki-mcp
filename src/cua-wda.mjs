@@ -100,21 +100,14 @@ export function wdaContext(ctx, url = process.env.POKI_WDA_URL) {
   const view = Object.create(ctx);
   Object.assign(view, {
     wda, size: undefined, cua: undefined, typesEverything: true,
-    // The phone WDA drives is the session's device, resolved and checked the way the bridge's is: a
+    // The phone WDA drives is the call's device, resolved and checked the way the bridge's is: a
     // lease another session holds refuses the call, and the operation records the device it used.
-    // Only a host that sees no iPhone at all (WDA reached over the network alone) falls back to an
-    // identity of the WDA address, which is coordinated the same way.
+    // A host that sees no iPhone at all (WDA reached over the network alone) lists it as
+    // wda:<POKI_WDA_URL> (Session.inventory), which is coordinated the same way.
     async target() {
-      try {
-        const device = await ctx.target();
-        if (device.kind !== 'physical') throw new Error('POKI_CUA_BACKEND=wda drives a physical iPhone; select it with select_device.');
-        return device;
-      } catch (error) {
-        if (!/^No device is connected/.test(error.message)) throw error;
-        const standalone = { id: `wda:${wda.url}`, kind: 'physical', name: 'WebDriverAgent' };
-        ctx.access(standalone);
-        return standalone;
-      }
+      const device = await ctx.target();
+      if (device.kind !== 'physical') throw new Error('POKI_CUA_BACKEND=wda drives a physical iPhone; pass its id as device.');
+      return device;
     },
     liveScreen() { return undefined; },
     async screenSize() {

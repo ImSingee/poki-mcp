@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import sharp from 'sharp';
-import { Devices } from '../src/device.mjs';
+import { DeviceContext, Session } from '../src/device.mjs';
 import { wdaContext } from '../src/cua-wda.mjs';
 import { Coordination } from '../src/coordination.mjs';
+import { fixture, value } from './fixture.mjs';
 
 // A stand-in for WebDriverAgent on a phone: W3C sessions plus the WDA routes the backend uses, over
 // a two-screen app (a home screen with its icon, a note with a title field).
@@ -49,7 +50,8 @@ async function fakeWda(t) {
   return { state, server, url: `http://127.0.0.1:${server.address().port}` };
 }
 
-class AnyPhone extends Devices {
+class AnyPhone extends DeviceContext {
+  constructor(coordinator) { super(new Session(coordinator), 'phone-1'); }
   async inventory() { return [{ id: 'phone-1', kind: 'physical', name: 'Test Phone', state: 'Booted' }]; }
   liveScreen() { return undefined; }
   async bridge() { throw new Error('the bridge is not used with the WebDriverAgent backend'); }
@@ -190,4 +192,16 @@ test('a device lease excludes other sessions on the WebDriverAgent backend', { t
   }
   assert.equal(wda.state.calls.length, before, 'nothing reached WebDriverAgent for the other session');
   assert.match(text(await owner.call('look', {})), /^app: SpringBoard/m, 'the owner keeps using the phone');
+});
+
+test('a phone reached only through WebDriverAgent is listed by its address and can be named as device', { timeout: 30000 }, async t => {
+  const wda = await fakeWda(t);
+  const f = await fixture(t, { toolsProfile: 'cua', extraEnv: () => ({ POKI_CUA_BACKEND: 'wda', POKI_WDA_URL: wda.url }) });
+  await f.set({ simulatorOnly: true });
+  const listed = value(await f.call('list_devices'));
+  const id = `wda:${wda.url}`;
+  assert.ok(listed.devices.some(device => device.id === id && device.kind === 'physical'), JSON.stringify(listed));
+  const home = await f.call('look', { device: id });
+  assert.notEqual(home.isError, true, text(home));
+  assert.match(text(home), /^app: SpringBoard/m);
 });

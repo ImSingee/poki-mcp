@@ -21,5 +21,4 @@ try {
     } else if (content.type === 'text') console.log(content.text);
   }
   if (result.isError) process.exitCode = 1;
-  else if (name === 'select_device') console.error('Note: this selection lasts only for this run. bin/call.mjs closes its session on exit, so pass "device" in each later call, or use an MCP client session to keep a selection.');
 } finally { await client.close(); }
