@@ -107,7 +107,8 @@ function backend({ rtcConfig, rtcConfigDelayMs = 0, noFrames = false, busy = fal
 
 let shared, server;
 test.after(async () => { await shared?.then(({ browser }) => browser.close()); server?.close(); });
-async function open(t, { settings = {}, width = 720, height = 1000, context, backendOptions } = {}) {
+// preScript runs in the view before its own code (to stand in for a browser API, say).
+async function open(t, { settings = {}, width = 720, height = 1000, context, backendOptions, preScript } = {}) {
   shared ??= launch();
   const { browser, channel } = await shared;
   server ??= await new Promise(resolve => { const s = http.createServer((_, res) => { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(hostPage); }).listen(0, '127.0.0.1', () => resolve(s)); });
@@ -119,7 +120,7 @@ async function open(t, { settings = {}, width = 720, height = 1000, context, bac
   page.on('pageerror', error => errors.push(error.message));
   await page.exposeFunction('hostCall', (name, args) => poki.handle(name, args));
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
-  await page.evaluate(html => { window.viewHtml = html; }, viewHtml.replace('<head>', `<head><script>globalThis.pokiScreenSettings=${JSON.stringify(settings)}</script>`));
+  await page.evaluate(html => { window.viewHtml = html; }, viewHtml.replace('<head>', `<head><script>globalThis.pokiScreenSettings=${JSON.stringify(settings)}</script>${preScript ? `<script>${preScript}</script>` : ''}`));
   const view = page.frameLocator('iframe');
   const frame = () => page.frames().find(f => f !== page.mainFrame());
   const mount = result => page.evaluate(([r, c]) => window.mount(r, c), [result, context]);
@@ -430,14 +431,13 @@ test('a stalled JPEG decode that fails after its picture was sent again does not
 });
 
 test('a video picture stuck decoding still trips the watchdog after an earlier one was output', { skip, timeout: 60000 }, async t => {
-  const h = await open(t, { settings: { rtc: false, codecs: ['hevc'] }, backendOptions: { noFrames: true } });
+  // A decoder that outputs only what the test tells it to, whatever this browser can decode.
+  const preScript = 'globalThis.VideoDecoder = class { constructor(init) { this.init = init; globalThis.fakeDecoder = this; } configure() {} decode() {} close() {} get decodeQueueSize() { return 0; } };';
+  const h = await open(t, { settings: { rtc: false, codecs: ['hevc'] }, backendOptions: { noFrames: true }, preScript });
   await h.mount(showResult);
-  await until(() => h.frame().evaluate(() => globalThis.pokiScreenInternals.decoder()?.codec === 'hevc'));
+  await until(() => h.frame().evaluate(() => globalThis.pokiScreenInternals.decoder()?.codec === 'hevc' && Boolean(globalThis.fakeDecoder)));
   await h.frame().evaluate(() => {
-    // A decoder that outputs only what the test tells it to.
-    globalThis.VideoDecoder = class { constructor(init) { this.init = init; globalThis.fakeDecoder = this; } configure() {} decode() {} close() {} get decodeQueueSize() { return 0; } };
     const decoder = globalThis.pokiScreenInternals.decoder();
-    decoder.open();
     const data = new Uint8Array([0, 0, 0, 1, 0x26, 0x01]);
     void decoder.decode({ seq: 1, key: true, data });
     void decoder.decode({ seq: 2, key: false, data });
