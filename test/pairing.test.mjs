@@ -52,8 +52,8 @@ async function pairingFixture(t, { pairHost = happyPath, remote = {}, approvalMo
 }
 
 // A stopped process can stay a zombie until its parent reaps it: wait for that, briefly.
-async function waitGone(pid, message) {
-  const deadline = performance.now() + 3000;
+async function waitGone(pid, message, ms = 3000) {
+  const deadline = performance.now() + ms;
   while (true) {
     try { process.kill(pid, 0); } catch (error) { assert.equal(error.code, 'ESRCH'); return; }
     if (performance.now() > deadline) assert.fail(message);
@@ -519,4 +519,17 @@ console.log(JSON.stringify(${JSON.stringify(paired)}));
     assert.deepEqual(disconnected, [], `${label}: the old helper was not disconnected`);
     assert.equal(await readFile(join(stateDir, 'remote/wireless-27/config.json'), 'utf8'), before, `${label}: the registration was not replaced`);
   }
+});
+
+test('unpair_device returns only after the helper has finished shutting down', { timeout: 60000 }, async t => {
+  // The helper answers the disconnect, then takes a while to release its session and remove its socket.
+  const { f, data, call, until, release } = await pairingFixture(t, { remote: { exitDelayMs: 1500 } });
+  const { job } = data(await call('pair_device')).job;
+  await release('accept');
+  await until(job, j => j.terminal);
+  const helperPid = (await f.events()).find(e => e.helper === '--remote-server').pid;
+  const result = data(await call('unpair_device', { device: 'wireless-27' }));
+  assert.equal(result.helper.disconnected, true);
+  // Only the reaping by its parent may still be pending, not the helper's own cleanup.
+  await waitGone(helperPid, 'unpair_device returned while the helper was still shutting down', 300);
 });

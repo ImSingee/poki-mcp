@@ -268,3 +268,18 @@ test('jobs preparing two phones at once share one download of the image', async 
   assert.equal(await readFile(join(first.directory, 'Image.dmg'), 'utf8'), 'image');
   assert.deepEqual((await readdir(first.directory)).filter(name => name.endsWith('.tmp')), []);
 });
+
+test('two processes changing the registry at once lose no entry', { timeout: 60000 }, async t => {
+  const dir = await scratch(t);
+  const registry = new URL('../src/pairing/registry.mjs', import.meta.url).href;
+  const writer = prefix => spawn(process.execPath, ['--input-type=module', '-e', `
+    import { registerRemote } from ${JSON.stringify(registry)};
+    await Promise.all(Array.from({ length: 25 }, (_, i) => registerRemote('${prefix}-' + i, 'P', '192.0.2.1', 49152, '/tmp/p.plist', { stateDir: ${JSON.stringify(dir)} })));
+  `], { stdio: ['ignore', 'ignore', 'pipe'] });
+  // Their output stays out of this test's own report stream.
+  const writers = ['a', 'b'].map(prefix => { const child = writer(prefix); child.errors = ''; child.stderr.on('data', chunk => { child.errors += chunk; }); child.exited = once(child, 'exit'); return child; });
+  for (const child of writers) assert.equal((await child.exited)[0], 0, child.errors);
+  const ids = JSON.parse(await readFile(join(dir, 'remote-devices.json'), 'utf8')).map(d => d.id);
+  assert.equal(ids.length, 50, `entries lost: ${50 - ids.length}`);
+  await assert.rejects(stat(join(dir, 'remote-devices.json.lock')), { code: 'ENOENT' }, 'the lock is released');
+});

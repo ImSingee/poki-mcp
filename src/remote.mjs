@@ -70,8 +70,19 @@ export async function disconnectRemote(target, { timeoutMs = 5000 } = {}) {
   try { socket = await connect(path); }
   catch (error) { if (['ENOENT', 'ECONNREFUSED'].includes(error.code)) return { running: false, disconnected: false }; throw error; }
   const result = await askToDisconnect(socket, path, timeoutMs);
-  if (result.disconnected) { helperPids.delete(path); return result; }
   const pid = helperPids.get(path);
+  if (result.disconnected) {
+    // The helper answers before it finishes: it still releases its input session and removes its
+    // socket file. Returning earlier would let a replacement start at the same path and lose its
+    // socket to the old helper's cleanup, so wait for the process to end (and end it if it lingers).
+    if (pid) {
+      for (let waited = 0; !processGone(pid) && waited < 10000; waited += 50) await new Promise(resolve => setTimeout(resolve, 50));
+      if (!processGone(pid)) await stopProcess(pid);
+    }
+    helperPids.delete(path);
+    await unlink(path).catch(() => {});
+    return result;
+  }
   if (!pid) return { ...result, stopped: false, note: 'The helper did not confirm and its process is unknown to this service; it ends when its tunnel closes or the computer restarts.' };
   const stopped = await stopProcess(pid);
   helperPids.delete(path);
@@ -118,12 +129,9 @@ function askToDisconnect(socket, path, timeoutMs) {
       socket.end();
     });
     socket.on('error', () => {});
-    socket.once('close', async () => {
+    socket.once('close', () => {
       clearTimeout(timer); lines.close();
-      const disconnected = reply?.disconnected === true;
-      // The helper is gone, and so is the configuration its socket is named after: nothing reuses it.
-      if (disconnected) await unlink(path).catch(() => {});
-      resolve({ running: true, disconnected });
+      resolve({ running: true, disconnected: reply?.disconnected === true });
     });
   });
 }
