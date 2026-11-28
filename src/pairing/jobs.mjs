@@ -38,8 +38,8 @@ const deviceOf = job => job.device?.id ?? job.paired_device?.udid;
 export class PairingJobs {
   jobs = new Map();
   // now: the clock for start, end and retention times (tests pass their own).
-  constructor({ stateDir = defaultStateDir, native = pokiNative, limitMs = pairingLimitMs, retainMs = retentionMs, nativeRequest = jobRequest, inventoryChanged = () => {}, ensureImage = ensureDeveloperImage, now = Date.now, complete = completeWirelessPairing } = {}) {
-    Object.assign(this, { stateDir, native, limitMs, retainMs, nativeRequest, inventoryChanged, ensureImage, now, complete });
+  constructor({ stateDir = defaultStateDir, native = pokiNative, limitMs = pairingLimitMs, retainMs = retentionMs, nativeRequest = jobRequest, inventoryChanged = () => {}, ensureImage = ensureDeveloperImage, now = Date.now, complete = completeWirelessPairing, disconnect = disconnectRemote } = {}) {
+    Object.assign(this, { stateDir, native, limitMs, retainMs, nativeRequest, inventoryChanged, ensureImage, now, complete, disconnect });
   }
   running() { return [...this.jobs.values()].filter(job => !isTerminal(job.state)); }
   // The pairing that owns this host's Bonjour name and listener: one at a time.
@@ -143,11 +143,20 @@ export class PairingJobs {
       // running from before, holding the old address and record: stop it, so the next call starts
       // one with the new configuration.
       const previous = (await registeredTargets({ stateDir: this.stateDir }).catch(() => [])).find(d => d.id === result.device?.udid);
-      if (previous) await disconnectRemote(previous).catch(() => {});
+      // Replacing a registered phone's helper and configuration disturbs whatever other sessions are
+      // doing with it: a lease refuses it, and the device's input lock is held from here through the
+      // developer image, so a call in progress finishes first.
+      let held;
+      if (previous) {
+        held = await this.lockDevice(job, previous.id, 'registering');
+        if (!held) return;
+        await this.disconnect(previous).catch(() => {});
+      }
       let device;
       try { device = await this.complete(result, { pairing: staging.pairing, stateDir: this.stateDir }); }
-      catch (error) { return this.fail(job, 'registering', { reason: 'registration_failed', error: error.message, action: 'Pass the iPhone\'s .local name or LAN address: run node bin/prepare-remote.mjs --wireless HOST on this computer.' }); }
+      catch (error) { held?.(); return this.fail(job, 'registering', { reason: 'registration_failed', error: error.message, action: 'Pass the iPhone\'s .local name or LAN address: run node bin/prepare-remote.mjs --wireless HOST on this computer.' }); }
       if (job.state === 'cancelled') {
+        held?.();
         if (previous) job.note = 'The iPhone had already accepted the pairing. It was registered on this computer before this job, so it stays registered with the new pairing. Use unpair_device to remove it.';
         else { await unregisterRemote(device.id, { stateDir: this.stateDir }).catch(() => {}); job.note = 'The iPhone had already accepted the pairing; it was removed from this computer again.'; }
         this.inventoryChanged(device.id);
@@ -155,9 +164,9 @@ export class PairingJobs {
       }
       job.device = { id: device.id, name: device.name, host: device.host, model: device.model };
       this.inventoryChanged(device.id);
-      if (isTerminal(job.state)) return;
+      if (isTerminal(job.state)) { held?.(); return; }
       clearTimeout(job.timer);
-      await this.mount(job, { id: device.id, name: device.name, kind: 'physical', connection: 'RemotePairing', remote: device.config_path });
+      await this.mount(job, { id: device.id, name: device.name, kind: 'physical', connection: 'RemotePairing', remote: device.config_path }, held);
     } finally {
       clearTimeout(job.timer);
       await discardStaging(staging.directory).catch(() => {});
@@ -167,17 +176,24 @@ export class PairingJobs {
     job.controller = new AbortController();
     await this.mount(job, target);
   }
-  // The last step: the developer disk image over the tunnel (ddi.mjs).
-  async mount(job, target) {
-    if (!this.transition(job, 'mounting_ddi')) return;
-    // The installation releases the device's input session and holds its helper for minutes: it
-    // takes the device's input lock, so other sessions' input waits instead of colliding with it.
-    let release;
-    try { release = await this.coordinator?.inputLock.acquire([target.id], { session: `pairing job ${job.id}`, tool: 'pair_device' }, job.controller.signal); }
-    catch (error) {
-      if (job.state !== 'cancelled') this.fail(job, 'ddi', { reason: 'device_busy', error: error.message, action: `Another session is using ${target.id}. Call pair_device with device ${JSON.stringify(target.id)} again once it is done.`, paired: true });
-      return;
-    }
+  // Takes the device's input lock for this job, after checking no other session leases the device.
+  // Resolves the release function, or nothing after failing the job as device_busy.
+  async lockDevice(job, id, stage) {
+    const busy = error => {
+      if (job.state !== 'cancelled') this.fail(job, stage, { reason: 'device_busy', error, action: `Another session is using ${id}. Call pair_device with device ${JSON.stringify(id)} again once it is done.`, paired: true });
+    };
+    const lease = this.coordinator?.leases?.get(id);
+    if (lease) { busy(`${id} is leased by another session until ${lease.expires_at ?? 'it releases it'}.`); return; }
+    try { return (await this.coordinator?.inputLock.acquire([id], { session: `pairing job ${job.id}`, tool: 'pair_device' }, job.controller.signal)) ?? (() => {}); }
+    catch (error) { busy(error.message); }
+  }
+  // The last step: the developer disk image over the tunnel (ddi.mjs). The installation releases the
+  // device's input session and holds its helper for minutes, so it holds the device's input lock
+  // (taken here, or already by a re-pairing) and other sessions' input waits instead of colliding.
+  async mount(job, target, held) {
+    if (!this.transition(job, 'mounting_ddi')) { held?.(); return; }
+    const release = held ?? await this.lockDevice(job, target.id, 'ddi');
+    if (!release) return;
     try {
       const prepared = await this.ensureImage(target.id, (request, options) => this.nativeRequest(target, request, options, job.controller.signal), { signal: job.controller.signal });
       this.transition(job, 'ready', { ddi: { ready: true, already_mounted: prepared.already, ...(prepared.ddi?.version ? { version: prepared.ddi.version } : {}), ...(prepared.source ? { source: prepared.source } : {}) } });
@@ -185,7 +201,7 @@ export class PairingJobs {
       if (job.state === 'cancelled') return;
       const failure = error.failure ?? { reason: 'ddi_tunnel_install_failed', error: error.message, action: `Keep the iPhone unlocked on the same network and call pair_device with device ${JSON.stringify(target.id)} to try again, or connect it by USB once and run node bin/prepare-device.mjs ${target.id}.` };
       this.fail(job, 'ddi', { ...failure, paired: true });
-    } finally { release?.(); }
+    } finally { release(); }
   }
   timeout(job) {
     return this.fail(job, 'pairing', { reason: 'timeout', error: `Pairing was not finished on the iPhone within ${Math.round(this.limitMs / 60000)} minutes.`, action: 'Call pair_device again and finish the steps on the iPhone within 10 minutes.' });

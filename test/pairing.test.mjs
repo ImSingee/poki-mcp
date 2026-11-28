@@ -475,3 +475,37 @@ console.log(JSON.stringify(${JSON.stringify(paired)}));
   assert.equal(prepared, false, 'no developer image preparation after the unpair');
   assert.deepEqual(JSON.parse(await readFile(join(stateDir, 'remote-devices.json'), 'utf8')), [], 'the pairing was not registered again');
 });
+
+test('pairing a registered iPhone again leaves its helper alone while another session holds the device', { timeout: 30000 }, async t => {
+  const { PairingJobs } = await import('../src/pairing/jobs.mjs');
+  const { registerRemote } = await import('../src/pairing/registry.mjs');
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const dir = await mkdtemp(join(tmpdir(), 'poki-repair-busy-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const stateDir = join(dir, 'state');
+  await registerRemote('wireless-27', 'Wireless iPhone', '192.0.2.99', 49152, join(dir, 'old.plist'), { stateDir });
+  const before = await readFile(join(stateDir, 'remote/wireless-27/config.json'), 'utf8');
+  const native = join(dir, 'pair-host');
+  await writeFile(native, `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
+writeFileSync(process.argv[4], 'record');
+console.log(JSON.stringify(${JSON.stringify(paired)}));
+`, { mode: 0o755 });
+  for (const [label, coordinator] of [
+    ['input lock taken', { leases: new Map(), inputLock: { acquire: async () => { throw new Error('Device wireless-27 is busy: tap by session other'); } } }],
+    ['leased', { leases: new Map([['wireless-27', { expires_at: '2026-11-28T00:00:00Z' }]]), inputLock: { acquire: async () => { throw new Error('the lock must not be tried under a lease'); } } }],
+  ]) {
+    const disconnected = [];
+    const jobs = new PairingJobs({ stateDir, native, disconnect: async target => { disconnected.push(target.id); return { running: true, disconnected: true }; }, ensureImage: async () => ({ already: true }) });
+    jobs.coordinator = coordinator;
+    const { job } = jobs.start();
+    await jobs.jobs.get(job.job).done;
+    const failed = jobs.get(job.job);
+    assert.equal(failed.state, 'failed', label);
+    assert.equal(failed.stage, 'registering', label);
+    assert.equal(failed.reason, 'device_busy', label);
+    assert.deepEqual(disconnected, [], `${label}: the old helper was not disconnected`);
+    assert.equal(await readFile(join(stateDir, 'remote/wireless-27/config.json'), 'utf8'), before, `${label}: the registration was not replaced`);
+  }
+});
