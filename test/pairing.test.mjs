@@ -542,3 +542,31 @@ test('the session that leases a phone can reinstall its developer image', { time
   const done = await until(job, j => j.terminal);
   assert.equal(done.state, 'ready', JSON.stringify(done));
 });
+
+test('unpairing waits for a slow re-registration to settle, however long it takes', { timeout: 60000 }, async t => {
+  const { PairingJobs } = await import('../src/pairing/jobs.mjs');
+  const { completeWirelessPairing } = await import('../src/pairing/wireless.mjs');
+  const { registerRemote, unregisterRemote } = await import('../src/pairing/registry.mjs');
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const dir = await mkdtemp(join(tmpdir(), 'poki-unpair-slow-registering-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const stateDir = join(dir, 'state');
+  await registerRemote('wireless-27', 'Wireless iPhone', '192.0.2.27', 49152, join(dir, 'old.plist'), { stateDir });
+  const native = join(dir, 'pair-host');
+  await writeFile(native, `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
+writeFileSync(process.argv[4], 'record');
+console.log(JSON.stringify(${JSON.stringify(paired)}));
+`, { mode: 0o755 });
+  let registering;
+  // Longer than any fixed cap on the wait: an old helper slow to shut down, say.
+  const jobs = new PairingJobs({ stateDir, native, complete: async (...args) => { registering = true; await new Promise(resolve => setTimeout(resolve, 11000)); return completeWirelessPairing(...args); }, ensureImage: async () => ({ already: true }) });
+  const { job } = jobs.start();
+  while (!registering) await new Promise(resolve => setTimeout(resolve, 10));
+  await jobs.cancelForDevice('wireless-27');
+  await unregisterRemote('wireless-27', { stateDir });
+  await jobs.jobs.get(job.job).done;
+  assert.equal(jobs.get(job.job).state, 'cancelled');
+  assert.deepEqual(JSON.parse(await readFile(join(stateDir, 'remote-devices.json'), 'utf8')), [], 'the pairing was not registered again');
+});

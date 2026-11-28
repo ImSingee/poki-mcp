@@ -102,8 +102,10 @@ export class PairingJobs {
       : saving ? 'The iPhone had already accepted the pairing; it is being removed from this computer again.' : undefined;
     this.transition(job, 'cancelled', note ? { note } : {});
     if (child && child.exitCode === null && child.signalCode === null) await stopChild(child);
-    // The registration in flight finishes first, then run() undoes it (and corrects the note).
-    if (saving) await Promise.race([job.done, new Promise(resolve => setTimeout(resolve, 10000).unref?.())]);
+    // The registration in flight finishes first, then run() undoes it (and corrects the note). Not cut
+    // short: unpair_device deletes the pairing once this returns, and a registration still running
+    // would write it back. Each step it waits on (input lock, helper shutdown) has its own limit.
+    if (saving) await job.done;
     return view(job);
   }
   // Stops every job (daemon shutdown).
