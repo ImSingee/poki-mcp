@@ -30,6 +30,9 @@ export function alive(pid) {
 // written in another namespace (another container sharing the state directory) says nothing here, so
 // it is only checked when the namespaces match. On macOS both sides have none.
 export const pidNamespace = (() => { try { return readlinkSync('/proc/self/ns/pid'); } catch { return undefined; } })();
+// One daemon's mcp.json entry: its address and token. Two daemons in different PID namespaces can
+// have the same pid, so pids do not tell them apart.
+export const sameDaemon = (a, b) => Boolean(a && b) && String(a.url) === String(b.url) && a.token === b.token;
 const sameNamespace = record => (record?.pid_ns ?? undefined) === pidNamespace;
 // Known to be gone: its pid is checked only when it is visible from here.
 const deadHere = record => sameNamespace(record) && !alive(record.pid);
@@ -67,7 +70,7 @@ async function waitForExit(endpoint, ms) {
   const end = performance.now() + ms;
   for (;;) {
     const named = await readEndpoint().catch(() => null);
-    if (named?.pid !== endpoint.pid || deadHere(endpoint)) return;
+    if (!sameDaemon(named, endpoint) || deadHere(endpoint)) return;
     if (performance.now() >= end) {
       if (await daemonInfo(endpoint).then(() => false, error => refused(error))) return;
       throw new Error(`Poki MCP (pid ${endpoint.pid}) did not stop within ${ms} ms.`);

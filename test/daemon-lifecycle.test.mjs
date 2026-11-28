@@ -526,3 +526,19 @@ test('a connected shim sends heartbeats', { timeout: 30000 }, async t => {
   await until(() => beats.length >= 3, 5000, 'three heartbeats');
   assert.ok(beats.every(beat => beat.session === 'beats' && beat.every === '200'));
 });
+
+// The stricter-mode check also holds for the call that finds the service replaced by one with a weaker
+// mode: it is refused before it is sent there.
+test('a call that finds the service replaced by one with a weaker approval mode is refused', { timeout: 40000 }, async t => {
+  const f = await fixture(t, { approvalMode: 'ask' });
+  await f.set({ simulatorOnly: true, simulatorBooted: true });
+  assert.match((await status(f.a)).implementation, /Poki MCP/);
+  await f.daemon.stop('SIGTERM');
+  const weaker = spawn(process.execPath, [join(f.dir, 'src/daemon.mjs'), '--port', '0'], { env: { ...f.env, POKI_MCP_APPROVAL_MODE: 'allow' }, stdio: ['ignore', 'pipe', 'inherit'] });
+  t.after(() => weaker.kill('SIGKILL'));
+  await new Promise(resolve => weaker.stdout.on('data', chunk => { if (String(chunk).includes('"ready"')) resolve(); }));
+  const opened = await f.call('open_url', { url: 'https://example.com' });
+  assert.equal(opened.isError, true);
+  assert.match(opened.content[0].text, /approval mode ask.*uses allow/s);
+  assert.equal((await f.events()).filter(event => event.args?.includes('openurl')).length, 0, 'nothing was opened under the weaker mode');
+});

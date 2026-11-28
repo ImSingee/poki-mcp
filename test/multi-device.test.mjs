@@ -194,3 +194,18 @@ test('stopping one device\'s work leaves the background work a script started on
   const stopped = await f.call('stop_recording', { device: B });
   assert.notEqual(stopped.isError, true, `B still records: ${text(stopped)}`);
 });
+
+// The dispatch layer refuses a gated tool that is not a direct call in host mode on its own, whatever
+// the caller checked before (batch_commands and run_code check first).
+test('in host mode a gated tool dispatched other than directly is refused by the dispatch layer', async t => {
+  const before = process.env.POKI_MCP_APPROVAL_MODE;
+  process.env.POKI_MCP_APPROVAL_MODE = 'host';
+  t.after(() => { if (before === undefined) delete process.env.POKI_MCP_APPROVAL_MODE; else process.env.POKI_MCP_APPROVAL_MODE = before; });
+  const context = new Session().context('no-such-device');
+  for (const tool of ['open_url', 'set_clipboard', 'install_app']) {
+    const args = { open_url: { url: 'https://example.org' }, set_clipboard: { text: 'x' }, install_app: { path: '/tmp/none.ipa' } }[tool];
+    const result = await context.dispatch(tool, args);
+    assert.equal(result.isError, true, tool);
+    assert.match(text(result), new RegExp(`call ${tool} on its own`));
+  }
+});
