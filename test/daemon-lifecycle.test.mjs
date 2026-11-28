@@ -467,6 +467,20 @@ test('POKI_DAEMON_ENV cannot pass the client\'s secrets or the shim\'s own varia
   assert.match(warnings[0], /POKI_IPHONE_PASSCODE, OPENAI_API_KEY, POKI_PARENT_PID, POKI_MCP_TOKEN, POKI_MCP_SESSION/);
 });
 
+test('POKI_DAEMON_ENV refuses secrets by whole words and does not call a passed setting refused', async () => {
+  const { daemonEnvironment, refusedExtra } = await import('../src/daemon-launch.mjs');
+  assert.equal(refusedExtra('KEYBOARD_LAYOUT'), false);
+  assert.equal(refusedExtra('MONKEY_PATH'), false);
+  assert.equal(refusedExtra('OPENAI_API_KEY'), true);
+  assert.equal(refusedExtra('GITHUB_TOKEN'), true);
+  const warnings = [];
+  // POKI_TYPE_KEY_MS and POKI_TLS_KEY are the daemon's own settings: passed, so not reported as refused.
+  const env = daemonEnvironment({ POKI_DAEMON_ENV: 'KEYBOARD_LAYOUT,POKI_TYPE_KEY_MS,POKI_TLS_KEY,MY_SECRET', KEYBOARD_LAYOUT: 'us', POKI_TYPE_KEY_MS: '20', POKI_TLS_KEY: '/k.pem', MY_SECRET: 's' }, message => warnings.push(message));
+  assert.deepEqual(Object.keys(env).sort(), ['KEYBOARD_LAYOUT', 'POKI_TLS_KEY', 'POKI_TYPE_KEY_MS']);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /names MY_SECRET, which/);
+});
+
 // A session kept by heartbeats alone (no request open, as when a client's background stream is gone)
 // must not be dropped because the daemon itself was stopped for longer than the heartbeat window:
 // the daemon read no heartbeats meanwhile.

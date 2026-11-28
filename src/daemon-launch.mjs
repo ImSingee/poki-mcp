@@ -156,13 +156,18 @@ export const daemonSettings = new Set(['POKI_ALLOW_PLAINTEXT_BIND', 'POKI_BIND_H
 // Never passed, even when POKI_DAEMON_ENV names them: the client's secrets and the shim's own
 // variables (POKI_PARENT_PID would make the detached daemon stop on its parent check).
 const shimOnly = new Set(['POKI_IPHONE_PASSCODE', 'POKI_MCP_TOKEN', 'POKI_PARENT_PID', 'POKI_MCP_SESSION', 'POKI_DAEMON_ENV', 'POKI_MCP_AUTOSTART', 'POKI_MCP_HEARTBEAT_MS']);
-export const refusedExtra = name => shimOnly.has(name) || /(KEY|TOKEN|SECRET|PASSWORD|PASSCODE|CREDENTIAL)/i.test(name);
+// A secret is named by one of its _-separated words (OPENAI_API_KEY, POKI_TURN_SECRET), not by a part of
+// one (KEYBOARD_LAYOUT).
+const secretWords = new Set(['KEY', 'APIKEY', 'TOKEN', 'SECRET', 'PASSWORD', 'PASSWD', 'PASSCODE', 'CREDENTIAL', 'CREDENTIALS']);
+export const refusedExtra = name => shimOnly.has(name) || name.toUpperCase().split('_').some(word => secretWords.has(word));
 export function daemonEnvironment(env = process.env, warn = message => console.error(message)) {
   const named = (env.POKI_DAEMON_ENV ?? '').split(',').map(name => name.trim()).filter(Boolean);
-  const refused = named.filter(refusedExtra);
+  // A name the daemon receives anyway (one of its own settings) is passed, not refused.
+  const listed = name => systemEnv.has(name) || daemonSettings.has(name) || /^(LC_|XDG_)/.test(name);
+  const refused = named.filter(name => refusedExtra(name) && !listed(name));
   if (refused.length) warn(`Poki MCP: POKI_DAEMON_ENV names ${refused.join(', ')}, which a shared service never receives; not passed.`);
   const extra = new Set(named.filter(name => !refusedExtra(name)));
-  const passed = name => systemEnv.has(name) || daemonSettings.has(name) || /^(LC_|XDG_)/.test(name) || extra.has(name);
+  const passed = name => listed(name) || extra.has(name);
   return Object.fromEntries(Object.entries(env).filter(([name, value]) => value !== undefined && passed(name)));
 }
 
