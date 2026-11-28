@@ -615,3 +615,19 @@ test('a service restarted on the same port with the same token is treated as a n
   assert.match(opened.content[0].text, /approval mode ask.*uses allow/s);
   assert.equal((await f.events()).filter(event => event.args?.includes('openurl')).length, 0);
 });
+
+test('a SIGTERM as soon as the service is ready stops it cleanly and removes its mcp.json entry', { timeout: 60000 }, async t => {
+  // The window between writing mcp.json and handling stop signals is short: try a few times.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const state = await mkdtemp(join(tmpdir(), 'poki-sigterm-ready-'));
+    t.after(() => rm(state, { recursive: true, force: true }));
+    const child = spawn(process.execPath, ['src/daemon.mjs', '--port', '0'], { cwd: join(import.meta.dirname, '..'), env: { ...process.env, POKI_MCP_STATE_DIR: state, POKI_NO_UPDATE_CHECK: '1' }, stdio: ['ignore', 'pipe', 'ignore'] });
+    const exited = once(child, 'exit');
+    let output = '';
+    child.stdout.on('data', chunk => { output += chunk; if (output.includes('"event":"ready"') && child.signalCode === null && child.exitCode === null) child.kill('SIGTERM'); });
+    const [code, signal] = await exited;
+    assert.equal(signal, null, `attempt ${attempt}: the service was killed by ${signal} instead of stopping`);
+    assert.equal(code, 0);
+    await assert.rejects(readFile(join(state, 'mcp.json')), { code: 'ENOENT' }, `attempt ${attempt}: mcp.json was left behind`);
+  }
+});
