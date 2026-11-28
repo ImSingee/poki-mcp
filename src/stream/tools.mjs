@@ -94,7 +94,9 @@ export async function screenInput(session, viewer, args, { signal, native = nati
     coordinator.operations.add(dispatch);
     try {
       if (taken) coordinator.renew(viewer.owner, viewer.takeover.lease_id, TAKEOVER_TTL_SECONDS);
-      const reply = await native(target, request);
+      // Sent under the dispatch's own signal too: cancel_device, a takeover or a lease expiry stops
+      // it, which the tool call's signal (no device keys) would not.
+      const reply = await work.run({ signal: signal ? AbortSignal.any([signal, dispatch.controller.signal]) : dispatch.controller.signal, timings: [] }, () => native(target, request));
       coordinator.changed(target.id);
       if (reply?.isError) return failure(reply.error ?? 'The input was not sent.', { outcome: reply.outcome });
       return result({ sent: reply?.sent !== false, kind: args.kind });

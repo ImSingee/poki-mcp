@@ -193,9 +193,16 @@ class Decoder {
   }
   // frame: { seq, key, data (Uint8Array) }. A chain starts at a key frame.
   async decode(frame) {
+    if (this.closed) return;
     if (this.codec === 'jpeg') {
       this.submittedAt ||= performance.now();
-      try { present(await createImageBitmap(new Blob([frame.data], { type: 'image/jpeg' }))); this.shown(); stats.decoded++; this.onDecoded(frame.seq); }
+      try {
+        const picture = await createImageBitmap(new Blob([frame.data], { type: 'image/jpeg' }));
+        // Replaced while decoding (another iPhone, another codec): the picture and its number
+        // belong to the old stream.
+        if (this.closed) { picture.close(); return; }
+        present(picture); this.shown(); stats.decoded++; this.onDecoded(frame.seq);
+      }
       catch { if (++this.errors > 3) this.onFailure('decode'); }
       return;
     }
@@ -219,7 +226,7 @@ class Decoder {
     try { this.open(); } catch { this.onFailure('decode'); }
   }
   get backlog() { return this.video?.decodeQueueSize ?? 0; }
-  close() { clearInterval(this.watchdog); try { this.video?.close(); } catch {} }
+  close() { this.closed = true; clearInterval(this.watchdog); try { this.video?.close(); } catch {} }
 }
 
 // ---- The stream: open, receive (A or B), acknowledge, fall back. -------------------------------
@@ -392,8 +399,7 @@ async function attemptRtc(generation, attempt) {
     // Given up meanwhile: tool calls carry the stream now.
     if (attempt.cancelled) { pc.close(); return false; }
     if (generation !== state.generation) { pc.close(); return true; }
-    rtc = { pc, send: value => { if (control.readyState === 'open') control.send(JSON.stringify(value)); } };
-    state.transport = 'webrtc';
+    installPeer({ pc, send: value => { if (control.readyState === 'open') control.send(JSON.stringify(value)); } });
     const heartbeat = setInterval(() => { if (generation !== state.generation) { clearInterval(heartbeat); return; } rtc?.send({ type: 'ping' }); }, 3000);
     pc.addEventListener('connectionstatechange', () => {
       // A peer lost after it worked: carry on over tool calls with the same stream.
@@ -404,6 +410,13 @@ async function attemptRtc(generation, attempt) {
     pc?.close();
     return false;
   }
+}
+// The peer carries the stream from now on. Frames decoded while it was still getting ready were
+// not acknowledged (acknowledgements went nowhere yet): their credit goes back now.
+function installPeer(peer) {
+  rtc = peer;
+  state.transport = 'webrtc';
+  if (decodedSeq) peer.send({ type: 'ack', seq: decodedSeq });
 }
 // Messages on the WebRTC control channel. It is not ordered with the media channel, so nothing
 // here touches the decoding chain (a key frame on the media channel starts a chain by itself).
@@ -463,7 +476,7 @@ function sendInput(args) {
 }
 globalThis.pokiScreenInput = sendInput;
 // For tests: the WebRTC receive path, without a peer.
-globalThis.pokiScreenInternals = { receivePacket: packet => receivePacket(packet, state.generation), receiveControl: message => receiveControl(message, state.generation), lastSeq: () => lastSeq, held: () => held.length, waitingKey: () => decoder?.waitingKey };
+globalThis.pokiScreenInternals = { installPeer, decoder: () => decoder, decodedSeq: () => decodedSeq, receivePacket: packet => receivePacket(packet, state.generation), receiveControl: message => receiveControl(message, state.generation), lastSeq: () => lastSeq, held: () => held.length, waitingKey: () => decoder?.waitingKey };
 
 // Normalized position (0..1) of a pointer on the phone's screen.
 function position(event) {

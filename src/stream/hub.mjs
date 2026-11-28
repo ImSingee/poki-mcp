@@ -84,6 +84,8 @@ class ScreenHub {
       const transcoder = new Transcoder(codec, {
         bitrate: this.bitrate(codec), spawn: this.deps.spawn,
         onFrame: frame => { track.push({ ...frame, seq: ++seq, at: performance.now() }); this.pushed(codec); },
+        // It resumes only at a key frame, which a still screen sends only when asked.
+        onStall: () => this.askSourceKeyframe(),
         onExit: ({ closed, code, stderr }) => {
           if (closed) return;
           transcoder.lastExit = stderr || `exit code ${code}`;
@@ -110,8 +112,15 @@ class ScreenHub {
     const hevc = this.tracks.get('hevc');
     const key = hevc.latestKey();
     if (key) { for (const frame of hevc.since(key.seq - 1)) transcoder.write(frame); return; }
+    this.askSourceKeyframe();
+  }
+
+  // Asks the phone for a key frame for an encoder, at most once a second.
+  askSourceKeyframe() {
     const now = performance.now();
-    if (now - (this.chainKeyframeAt ?? -Infinity) >= KEYFRAME_INTERVAL_MS) { this.chainKeyframeAt = now; this.deps.keyframe(this.target).catch(() => {}); }
+    if (now - (this.chainKeyframeAt ?? -Infinity) < KEYFRAME_INTERVAL_MS) return;
+    this.chainKeyframeAt = now;
+    this.deps.keyframe(this.target).catch(() => {});
   }
 
   bitrate(codec) {

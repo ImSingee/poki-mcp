@@ -382,3 +382,26 @@ test('a codec string that arrives after the first key frame does not tear down a
   }, [key, delta]);
   assert.equal(waiting, false, 'the decoder was reset and waits for another key frame');
 });
+
+test('frames decoded before the WebRTC peer is ready are acknowledged once it is, and a replaced decoder\'s late picture is dropped', { skip, timeout: 60000 }, async t => {
+  const h = await open(t, { settings: { rtc: false, codecs: (await ffmpegAvailable()) ? ['jpeg'] : undefined } });
+  await h.mount(showResult);
+  await until(() => painted(h.frame()));
+  const result = await h.frame().evaluate(async () => {
+    const r = globalThis.pokiScreenInternals;
+    // Frames were decoded (acknowledged nowhere: no peer yet); then the peer becomes ready.
+    const sent = [];
+    const seq = r.decodedSeq();
+    r.installPeer({ pc: { close() {} }, send: value => sent.push(value) });
+    // A decoder replaced while it was decoding a JPEG.
+    const old = r.decoder();
+    old.close();
+    const canvas = Object.assign(document.createElement('canvas'), { width: 4, height: 4 });
+    const jpeg = new Uint8Array(await (await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg'))).arrayBuffer());
+    await old.decode({ seq: seq + 100000, key: true, data: jpeg });
+    return { seq, sent, after: r.decodedSeq() };
+  });
+  assert.ok(result.seq > 0);
+  assert.deepEqual(result.sent, [{ type: 'ack', seq: result.seq }], 'the credit of frames decoded before readiness never came back');
+  assert.ok(result.after < result.seq + 100000, 'a closed decoder\'s late picture moved the acknowledgement past the new stream');
+});

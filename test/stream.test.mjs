@@ -378,3 +378,18 @@ test('H.264 from ffmpeg is cut into whole pictures however its pipe pauses', { s
   for (let at = 0; at < flv.length; at += 997) { splitter.push(flv.subarray(at, at + 997)); await delay(20); }
   assert.deepEqual(split.map(u => u.data.length), whole.map(u => u.data.length));
 });
+
+test('input dropped behind a backed-up encoder asks the phone for a key frame', async t => {
+  const native = fakeNative();
+  // An encoder that never reads its input.
+  const spawnFake = () => Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough({ highWaterMark: 1024 }), kill() {} });
+  const screens = new Screens({ ...native, spawn: spawnFake, ffmpeg: async () => true });
+  t.after(() => screens.closeAll());
+  await screens.open(target, { codecs: ['hevc'] });
+  const [key] = sampleFrames();
+  native.subscriptions[0].send(key);
+  await screens.open(target, { codecs: ['jpeg'] });
+  const before = native.keyframes.length;
+  for (let seq = 2; seq <= 4; seq++) native.subscriptions[0].send({ ...key, seq, key: false, data: Buffer.alloc(2 * 1024 * 1024, 1) });
+  assert.equal(native.keyframes.length, before + 1, 'the encoder dropped input and nobody asked for a key frame to resume on');
+});

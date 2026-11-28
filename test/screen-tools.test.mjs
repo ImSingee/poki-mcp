@@ -208,3 +208,17 @@ test('a takeover whose panel closes while the agent\'s work stops takes no lease
   assert.equal(taken.structuredContent?.reason, 'stream_closed', JSON.stringify(taken));
   assert.equal(coordinator.leases.has(target.id), false, 'a closed panel kept the agent off the device');
 });
+
+test('stopping the device\'s work stops a gesture that is still being sent', async t => {
+  const { coordinator, view, viewer } = await setup(t);
+  const { signal: workSignal } = await import('../src/work.mjs');
+  let aborted = false;
+  // A long text input: the native request runs until its signal aborts.
+  const slow = () => new Promise(resolve => { const s = workSignal(); s?.addEventListener('abort', () => { aborted = true; resolve({ isError: true, error: 'cancelled' }); }, { once: true }); });
+  const sending = screenInput(view, viewer, { kind: 'text', text: 'a long message' }, { native: slow });
+  await until(() => [...coordinator.operations].some(op => op.devices.has(target.id)));
+  const stopped = coordinator.end(view, 'cancelled', [target.id]);
+  await sending;
+  await stopped;
+  assert.equal(aborted, true, 'the native request went on after cancel_device');
+});
