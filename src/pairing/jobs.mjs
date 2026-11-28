@@ -33,6 +33,8 @@ const instructions = {
   cancelled: () => 'Pairing was cancelled. On the iPhone, the "Pair with" entry disappears; nothing was saved.',
 };
 
+const deviceOf = job => job.device?.id ?? job.paired_device?.udid;
+
 export class PairingJobs {
   jobs = new Map();
   // now: the clock for start, end and retention times (tests pass their own).
@@ -103,11 +105,13 @@ export class PairingJobs {
   }
   // Stops every job (daemon shutdown).
   async close() { await Promise.allSettled([...this.jobs.values()].filter(job => !isTerminal(job.state)).map(job => this.cancel(job.id))); }
-  // Stops the job preparing this device, if one is (unpair_device).
+  // Stops every job working on this device (unpair_device), and waits for a registration in flight
+  // to settle, so nothing registers the device again after it is removed. A pairing knows its device
+  // from the iPhone's answer (paired_device) before registration sets job.device.
   async cancelForDevice(device) {
-    for (const job of this.jobs.values()) if (!isTerminal(job.state) && job.device?.id === device) await this.cancel(job.id);
+    for (const job of this.running()) if (deviceOf(job) === device) await this.cancel(job.id);
   }
-  preparing(device) { return [...this.jobs.values()].find(job => !isTerminal(job.state) && job.device?.id === device); }
+  preparing(device) { return this.running().find(job => deviceOf(job) === device); }
 
   async run(job) {
     job.controller = new AbortController();
