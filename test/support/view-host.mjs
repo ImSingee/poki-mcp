@@ -6,6 +6,7 @@
 //
 //   node test/support/view-host.mjs [--port 4790] [--stub [--two-phones]] [--view pairing|screen]
 //   GET /calls lists every tools/call with its time, its source (agent, view, direct) and the job state.
+// "Hide view" hides the mounted view with display:none, as LobeHub does with a side-panel tab not shown.
 //
 // --stub runs Poki from a temporary copy of this checkout with a stand-in poki-native
 // (test/support/pairing-native.mjs) and one iPhone already paired, so pairing can be walked through
@@ -93,6 +94,7 @@ const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta n
   <button id="call">Agent calls ${shown.tool}</button>
   <button id="remount" disabled>Remount view</button>
   <button id="unmount" disabled>Unmount view</button>
+  <button id="hide" disabled>Hide view</button>
   ${options.stub ? '<button id="accept">iPhone accepts the PIN</button>' : ''}
   <label>Width <select id="width"><option>360</option><option>520</option><option selected>760</option></select></label>
   <label>Theme <select id="theme"><option>light</option><option>dark</option></select></label>
@@ -119,7 +121,7 @@ const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta n
     bridge.onsizechange = ({ height }) => { if (height) frame.style.height = height + 'px'; };
     bridge.oninitialized = () => { if (lastResult) bridge.sendToolResult(lastResult); };
     await bridge.connect(new MockHost.PostMessageTransport(frame.contentWindow, frame.contentWindow));
-    document.getElementById('remount').disabled = document.getElementById('unmount').disabled = false;
+    document.getElementById('remount').disabled = document.getElementById('unmount').disabled = document.getElementById('hide').disabled = false;
   }
   document.getElementById('call').onclick = async () => {
     log('agent → ${shown.tool}');
@@ -129,6 +131,13 @@ const page = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta n
   };
   document.getElementById('remount').onclick = mount;
   document.getElementById('unmount').onclick = () => { document.getElementById('slot').replaceChildren(); document.getElementById('unmount').disabled = true; };
+  // As LobeHub does with a side-panel tab that is not shown: the view stays mounted, display:none.
+  document.getElementById('hide').onclick = () => {
+    const slot = document.getElementById('slot'), hidden = slot.style.display !== 'none';
+    slot.style.display = hidden ? 'none' : '';
+    document.getElementById('hide').textContent = hidden ? 'Show view' : 'Hide view';
+    log(hidden ? 'view hidden (still mounted)' : 'view shown');
+  };
   document.getElementById('accept')?.addEventListener('click', async () => { await post('/stub/accept'); log('iPhone accepted the PIN'); });
   for (const id of ['width', 'theme']) document.getElementById(id).onchange = mount;
   window.mountView = mount;
