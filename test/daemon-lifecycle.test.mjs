@@ -466,3 +466,63 @@ test('POKI_DAEMON_ENV cannot pass the client\'s secrets or the shim\'s own varia
   assert.equal(warnings.length, 1);
   assert.match(warnings[0], /POKI_IPHONE_PASSCODE, OPENAI_API_KEY, POKI_PARENT_PID, POKI_MCP_TOKEN, POKI_MCP_SESSION/);
 });
+
+// A session kept by heartbeats alone (no request open, as when a client's background stream is gone)
+// must not be dropped because the daemon itself was stopped for longer than the heartbeat window:
+// the daemon read no heartbeats meanwhile.
+test('a daemon that was stopped for a while keeps the sessions whose heartbeats it could not read', { timeout: 40000 }, async t => {
+  const f = await fixture(t);
+  const endpoint = await endpointOf(f);
+  const headers = session => ({ Authorization: `Bearer ${endpoint.token}`, 'x-poki-mcp-session': session, 'x-poki-mcp-heartbeat-ms': '300', 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' });
+  const call = async (session, name, args) => {
+    const response = await fetch(endpoint.url, { method: 'POST', headers: headers(session), body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }) });
+    return (await response.json()).result;
+  };
+  const lease = await call('beating', 'acquire_device', { device: 'fixture-phone', ttl_seconds: 60 });
+  assert.notEqual(lease.isError, true, lease.content?.[0]?.text);
+  let beating = true, paused = false;
+  const beats = (async () => { while (beating) { if (!paused) await fetch(new URL('/session/heartbeat', endpoint.url), { method: 'POST', headers: headers('beating') }).then(r => r.body?.cancel(), () => {}); await sleep(300); } })();
+  t.after(async () => { beating = false; await beats; });
+  await sleep(600);
+  // Longer than 3 heartbeats + 1 s. No heartbeat waits in the socket meanwhile (a shim's times out),
+  // so on waking the daemon checks its sessions before it reads the next one.
+  paused = true; await sleep(350);
+  process.kill(f.daemon.pid, 'SIGSTOP');
+  await sleep(3000);
+  process.kill(f.daemon.pid, 'SIGCONT');
+  await sleep(200); paused = false;
+  await sleep(1500);
+  const intruder = await call('intruder', 'acquire_device', { device: 'fixture-phone' });
+  assert.equal(intruder.isError, true, 'the beating session still holds the phone');
+  assert.match(intruder.content[0].text, /occupied/);
+  beating = false; await beats;
+});
+
+// The shim is what keeps its session: it sends a heartbeat while it lives, also with no call made.
+test('a connected shim sends heartbeats', { timeout: 30000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'poki-heartbeat-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const { createServer: mcpServer } = await import('../src/tools.mjs');
+  const { NodeStreamableHTTPServerTransport } = await import('@modelcontextprotocol/node');
+  const { version } = await import('../src/build-info.mjs');
+  const beats = [];
+  const server = createServer(async (req, res) => {
+    if (req.url === '/version') { res.end(JSON.stringify({ version, stale: false, auto: false, pid: process.pid, approval_mode: 'ask', busy: false, busy_reasons: [] })); return; }
+    if (req.url === '/session/heartbeat') { beats.push({ session: req.headers['x-poki-mcp-session'], every: req.headers['x-poki-mcp-heartbeat-ms'] }); res.end('{}'); return; }
+    if (req.url !== '/mcp') { res.end('{}'); return; }
+    const mcp = mcpServer(async () => ({ content: [{ type: 'text', text: '{}' }] }));
+    const transport = new NodeStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    res.once('close', () => void mcp.close());
+    await mcp.connect(transport); await transport.handleRequest(req, res);
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  await mkdir(join(dir, 'state'), { recursive: true });
+  await writeFile(join(dir, 'state/mcp.json'), JSON.stringify({ url: `http://127.0.0.1:${server.address().port}/mcp`, token: 'heartbeat-fixture', enabled: true, pid: process.pid }), { mode: 0o600 });
+  const client = new Client({ name: 'beats', version: '1' });
+  await client.connect(new StdioClientTransport({ command: process.execPath, args: [join(import.meta.dirname, '../src/stdio.mjs')], env: { ...process.env, POKI_MCP_STATE_DIR: join(dir, 'state'), POKI_MCP_SESSION: 'beats', POKI_MCP_HEARTBEAT_MS: '200', POKI_NO_UPDATE_CHECK: '1' } }));
+  t.after(() => client.close());
+  await client.callTool({ name: 'poki_mcp_status', arguments: {} });
+  await until(() => beats.length >= 3, 5000, 'three heartbeats');
+  assert.ok(beats.every(beat => beat.session === 'beats' && beat.every === '200'));
+});

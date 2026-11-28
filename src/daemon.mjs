@@ -90,6 +90,18 @@ let posting = 0;
 // a client may run in another PID namespace. A session without heartbeats (a direct HTTP client) is
 // dropped only once it owns nothing and has been idle for as long as an automatic daemon waits.
 const lastSeen = new Map(), heartbeats = new Map(), open = new Map();
+// Session silence is measured on the time this daemon was running. While it was stopped (SIGSTOP, a
+// paused container) or blocked, it read no heartbeats, so that stretch is not held against its shims:
+// a tick every awakeTickMs notices a longer gap in its own event loop and leaves it out.
+const awakeTickMs = 250, awakeSlackMs = 1000;
+let awakeOffset = 0, lastTick = performance.now();
+const awake = () => {
+  const now = performance.now(), gap = now - lastTick;
+  if (gap > awakeTickMs + awakeSlackMs) awakeOffset += gap - awakeTickMs;
+  lastTick = now;
+  return now - awakeOffset;
+};
+setInterval(awake, awakeTickMs).unref();
 let lastActivity = performance.now();
 const sessionBusy = session => [...coordinator.operations].some(op => op.owner === session)
   || [...coordinator.leases.values()].some(lease => lease.owner === session) || session.backgroundDevices?.size > 0;
@@ -104,7 +116,7 @@ const busyReasons = () => {
 const forget = id => { sessions.delete(id); lastSeen.delete(id); heartbeats.delete(id); };
 const silent = (id, session) => {
   if (open.get(id)) return false;
-  const quiet = performance.now() - (lastSeen.get(id) ?? 0), beat = heartbeats.get(id);
+  const quiet = awake() - (lastSeen.get(id) ?? 0), beat = heartbeats.get(id);
   return beat ? quiet > 3 * beat + 1000 : quiet > idleExitMs && !sessionBusy(session);
 };
 async function pruneSessions() {
@@ -155,7 +167,7 @@ async function handle(req, res) {
   // Only an MCP request starts a session; a heartbeat, close or cancel for one this daemon does not
   // know (dropped, or held by a daemon that was replaced) changes nothing.
   if (req.url !== '/mcp' && !sessions.has(session)) { res.writeHead(req.method === 'POST' ? 404 : 405); res.end(); return; }
-  lastSeen.set(session, performance.now());
+  lastSeen.set(session, awake());
   const beat = Number(req.headers['x-poki-mcp-heartbeat-ms']);
   if (Number.isFinite(beat) && beat > 0) heartbeats.set(session, Math.min(60000, Math.max(100, beat)));
   if (req.url === '/session/heartbeat') { if (req.method !== 'POST') { res.writeHead(405); res.end(); return; } res.end('{}'); return; }
@@ -165,7 +177,7 @@ async function handle(req, res) {
   devices.label ??= session;
   // A request still open keeps its session: its client is plainly there.
   open.set(session, (open.get(session) ?? 0) + 1);
-  res.once('close', () => { open.set(session, open.get(session) - 1); if (!open.get(session)) open.delete(session); if (sessions.has(session)) lastSeen.set(session, performance.now()); });
+  res.once('close', () => { open.set(session, open.get(session) - 1); if (!open.get(session)) open.delete(session); if (sessions.has(session)) lastSeen.set(session, awake()); });
   if (req.url === '/session/close') {
     if (req.method !== 'POST') { res.writeHead(405); res.end(); return; }
     await devices.close(); forget(session); res.end('{}'); return;
