@@ -39,9 +39,11 @@ test('the input lock reads its limits from the environment, and is always on', (
 
 test('a read from another session runs while input holds the device', async () => {
   const coordinator = new Coordination(); coordinator.inputLock = lockWith();
-  const log = [], a = session('a', log, 80), b = session('b', log, 10);
+  const log = [], a = session('a', log, 400), b = session('b', log, 10);
   await Promise.all([coordinator.call(a, 'tap', { device: 'phone-a' }), sleep(5).then(() => coordinator.call(b, 'take_screenshot', { device: 'phone-a' }))]);
-  assert.deepEqual(log, ['a:tap@phone-a:start', 'b:take_screenshot@phone-a:start', 'b:take_screenshot@phone-a:end', 'a:tap@phone-a:end']);
+  // The read starts while the tap still holds the device (which of them ends first is only timing).
+  assert.equal(log[0], 'a:tap@phone-a:start');
+  assert.ok(log.indexOf('b:take_screenshot@phone-a:start') < log.indexOf('a:tap@phone-a:end'), log.join(', '));
 });
 
 test('input from two sessions to one device runs one at a time', async () => {

@@ -2,7 +2,9 @@
 // and <state>/remote/<id>/ holds its config.json and pairing record. Both bin/prepare-remote.mjs and
 // the daemon's pairing jobs write it; src/remote.mjs reads it on every inventory, so a change shows in
 // list_devices at once.
-import { mkdir, readFile, writeFile, rename, chmod, rm } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, chmod, rm, open, stat, unlink } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { join } from 'node:path';
 import { isIP } from 'node:net';
 import { stateDir as defaultStateDir } from '../config.mjs';
@@ -27,14 +29,73 @@ export async function writeJson(file, value) {
   await rename(temporary, file);
 }
 
-// Writes within this process run one at a time, so a pairing that finishes while another device is
-// being removed cannot drop either change.
+// A registry change reads the file, changes it and writes it back. Changes run one at a time within a
+// process (this chain) and across processes (a lock file next to the registry), so bin/prepare-remote
+// registering one phone while the service unpairs another cannot bring a removed entry back or drop a
+// new one.
 let writes = Promise.resolve();
-const serialized = task => {
-  const result = writes.then(task);
+const serialized = (stateDir, task) => {
+  const result = writes.then(() => withRegistryLock(stateDir, task));
   writes = result.catch(() => {});
   return result;
 };
+const lockStaleMs = 10000, lockWaitMs = 15000;
+// Test hook: lets a test pause a process after it confirmed a lock is stale and before it removes it.
+export const lockHooks = { beforeUnlinkStale: undefined };
+
+async function createExclusive(path, content) {
+  const handle = await open(path, 'wx', 0o600);
+  try { await handle.writeFile(content); } finally { await handle.close(); }
+}
+const ageOf = async path => Date.now() - ((await stat(path).catch(() => null))?.mtimeMs ?? Date.now());
+
+// Removes a stale lock that still holds `held`. Two processes may find the same stale lock; the one
+// that removes it may already have taken a new lock by the time the other gets here. So removal
+// happens only under a second, exclusive lock, and the content is read again under it: a lock that
+// changed since is someone's live lock and stays.
+async function reclaimStale(lock, held) {
+  const breaker = `${lock}.break`;
+  try { await createExclusive(breaker, String(process.pid)); }
+  catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    // A breaker that died holding it: removing it races only with other breakers of a dead lock.
+    if (await ageOf(breaker) > lockStaleMs) await unlink(breaker).catch(() => {});
+    return;
+  }
+  try {
+    if (await readFile(lock, 'utf8').catch(() => null) !== held) return;
+    await lockHooks.beforeUnlinkStale?.();
+    await unlink(lock).catch(() => {});
+  } finally { await unlink(breaker).catch(() => {}); }
+}
+
+export async function acquireFileLock(lock, { waitMs = lockWaitMs } = {}) {
+  const mine = JSON.stringify({ pid: process.pid, nonce: randomBytes(8).toString('hex') });
+  const deadline = Date.now() + waitMs;
+  while (true) {
+    try { await createExclusive(lock, mine); break; }
+    catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      // A change takes milliseconds: a lock this old was left by a process that died holding it.
+      const held = await readFile(lock, 'utf8').catch(() => null);
+      const age = await ageOf(lock);
+      if (held !== null && age > lockStaleMs) {
+        await reclaimStale(lock, held);
+        continue;
+      }
+      if (Date.now() > deadline) throw new Error(`${lock} has been held for ${Math.round(age / 1000)} s by ${held ?? 'another process'}. If no pairing is being saved, delete it.`);
+      await delay(10 + Math.random() * 20);
+    }
+  }
+  return async () => { if (await readFile(lock, 'utf8').catch(() => null) === mine) await unlink(lock).catch(() => {}); };
+}
+
+async function withRegistryLock(stateDir, task) {
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  const release = await acquireFileLock(`${registryFile(stateDir)}.lock`);
+  try { return await task(); }
+  finally { await release(); }
+}
 
 async function readRegistry(stateDir) {
   try {
@@ -47,10 +108,17 @@ async function readRegistry(stateDir) {
   }
 }
 
-export function registerRemote(id, name, host, port, pairingFile, { stateDir = defaultStateDir } = {}) {
-  return serialized(async () => {
+// record: a pairing record to move to pairingFile in the same transaction, so a removal running in
+// another process cannot delete it between the move and the registration.
+export function registerRemote(id, name, host, port, pairingFile, { stateDir = defaultStateDir, record } = {}) {
+  return serialized(stateDir, async () => {
     const directory = remoteDirectory(id, stateDir);
     await mkdir(directory, { recursive: true, mode: 0o700 });
+    await chmod(directory, 0o700);
+    if (record) {
+      await rename(record, pairingFile);
+      await chmod(pairingFile, 0o600);
+    }
     const configPath = join(directory, 'config.json');
     await writeJson(configPath, { id, host, port, pairing_file: pairingFile });
     const configs = (await readRegistry(stateDir)).filter(d => d.id !== id);
@@ -63,7 +131,7 @@ export function registerRemote(id, name, host, port, pairingFile, { stateDir = d
 // Removes the device's registry entry and its private directory (config and pairing record).
 // Returns the entry that was removed, or undefined when the device was not registered.
 export function unregisterRemote(id, { stateDir = defaultStateDir } = {}) {
-  return serialized(async () => {
+  return serialized(stateDir, async () => {
     const directory = remoteDirectory(id, stateDir);
     const configs = await readRegistry(stateDir);
     const removed = configs.find(d => d.id === id);

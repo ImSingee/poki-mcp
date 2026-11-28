@@ -101,12 +101,20 @@ const CANCELLED_MESSAGE: &str = "Wireless pairing was cancelled.";
 const PARENT_GONE_MESSAGE: &str =
     "Wireless pairing stopped: the process that started it is gone (its standard input closed).";
 
-/// Resolves once standard input reaches end of file or fails.
-async fn input_closed() {
-    use tokio::io::AsyncReadExt;
-    let mut stdin = tokio::io::stdin();
-    let mut buffer = [0u8; 256];
-    while matches!(stdin.read(&mut buffer).await, Ok(n) if n > 0) {}
+/// Resolves once `reader` reaches end of file or fails. The read blocks, so it runs on a plain thread
+/// of its own: a tokio blocking task could not be cancelled, and shutting the runtime down after a
+/// successful pairing would wait for it forever while the parent keeps the pipe open. Nothing waits
+/// for this thread; it ends with the process.
+fn watch_input<R: std::io::Read + Send + 'static>(
+    mut reader: R,
+) -> tokio::sync::oneshot::Receiver<()> {
+    let (closed, receiver) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let mut buffer = [0u8; 256];
+        while matches!(reader.read(&mut buffer), Ok(n) if n > 0) {}
+        let _ = closed.send(());
+    });
+    receiver
 }
 
 /// Everything that ends a pairing early, registered before anything is advertised: a SIGTERM or
@@ -116,12 +124,14 @@ fn stop_sources(watch_input: bool) -> Result<impl std::future::Future<Output = S
     use tokio::signal::unix::{SignalKind, signal};
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
+    let input = watch_input.then(|| self::watch_input(std::io::stdin()));
     Ok(async move {
         let parent = async {
-            if watch_input {
-                input_closed().await
-            } else {
-                std::future::pending::<()>().await
+            match input {
+                Some(closed) => {
+                    let _ = closed.await;
+                }
+                None => std::future::pending::<()>().await,
             }
         };
         tokio::select! {
@@ -351,6 +361,49 @@ mod tests {
         };
         assert_eq!(stop, Stop::Timeout);
         assert_eq!(started.elapsed(), PAIRING_LIMIT);
+    }
+
+    #[test]
+    fn watching_an_open_input_never_holds_up_runtime_shutdown() {
+        // A pipe the other end keeps open, as the daemon does with the helper's standard input.
+        let (reader, _writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let closed = watch_input(reader);
+                tokio::select! {
+                    _ = closed => panic!("an open pipe reported as closed"),
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                }
+            });
+            drop(runtime);
+            let _ = done.send(());
+        });
+        assert!(
+            finished.recv_timeout(Duration::from_secs(3)).is_ok(),
+            "dropping the runtime waited for the input watcher"
+        );
+    }
+
+    #[test]
+    fn watching_input_reports_end_of_file() {
+        let (reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let closed = watch_input(reader);
+            drop(writer);
+            tokio::time::timeout(Duration::from_secs(3), closed)
+                .await
+                .expect("end of file was not reported")
+                .unwrap();
+        });
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

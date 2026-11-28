@@ -28,6 +28,8 @@ const send = (path, init, to = endpoint) => {
   headers.set('Authorization', `Bearer ${to.token}`);
   headers.set('x-poki-mcp-session', session);
   headers.set('x-poki-mcp-heartbeat-ms', String(heartbeatMs));
+  // The daemon this shim found; another at the same address answers 421.
+  if (to.instance) headers.set('x-poki-mcp-instance', to.instance);
   return fetch(new URL(path, to.url), { ...init, headers });
 };
 const refused = error => error.cause?.code === 'ECONNREFUSED';
@@ -84,6 +86,9 @@ async function request(path, init) {
   const attempt = async () => {
     const to = endpoint;
     let body = init?.body;
+    // Checked at every send, against the daemon this send goes to: a call made again after a restart,
+    // a replacement for an outdated daemon or a refused connection may reach one with a weaker mode.
+    if (call && modeConflict?.stricter && !sessionTools.has(call.params?.name)) throw new Error(refusal(modeConflict));
     if (call) {
       const meta = call.params._meta ??= {};
       if (meta['poki/order']?.stream !== stream) meta['poki/order'] = nextOrder();
@@ -91,9 +96,9 @@ async function request(path, init) {
     }
     try {
       const response = await send(path, { ...init, body }, to);
-      if (response.status !== 401) return { response };
+      if (response.status !== 401 && response.status !== 421) return { response };
       await response.body?.cancel();
-      return { retry: to, status: 401 };
+      return { retry: to, status: response.status };
     } catch (error) {
       if (!refused(error)) throw lost(error);
       return { retry: to };
@@ -102,10 +107,9 @@ async function request(path, init) {
   const first = await attempt();
   if (first.response) return first.response;
   await reconnect(Boolean(call), first.retry);
-  // The daemon reached now may run a weaker approval mode than the one this call was checked against.
-  if (call && modeConflict?.stricter && !sessionTools.has(call.params?.name)) throw new Error(refusal(modeConflict));
   const second = await attempt();
   if (second.response) return second.response;
+  if (second.status === 421) throw new Error(`The Poki MCP service at ${endpoint.url} is not the one ${endpointFile} names. Retry the call.`);
   if (second.status === 401) throw new Error(`The running Poki MCP rejected the token in ${endpointFile}. Stop it; the next call starts it again.`);
   throw call ? new Error(`Poki MCP (pid ${endpoint.pid}) refused the connection. Retry the call.`) : unavailable();
 }
@@ -146,7 +150,6 @@ const server = createServer(async (name, args, extra) => {
   try {
     extra.signal.throwIfAborted();
     const client = await remoteClient(true);
-    if (modeConflict?.stricter && !sessionTools.has(name)) return { isError: true, content: [{ type: 'text', text: refusal(modeConflict) }] };
     const call = () => client.callTool({ name, arguments: args, _meta: { 'poki/request_id': id } }, { timeout: 3700000, signal: extra.signal });
     let result = await call();
     // A service this kind of shim started, refusing the call before it touched a device because its

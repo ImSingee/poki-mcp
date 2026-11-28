@@ -73,7 +73,9 @@ if (mode === '--remote-server') {
       const delay = request.op === 'install_ddi' ? Number(remote.installDelayMs ?? 0) : request.op === 'tap' ? Number(remote.tapDelayMs ?? 0) : 0;
       setTimeout(() => {
         socket.end(JSON.stringify(reply) + '\\n');
-        if (request.op === 'disconnect') server.close(() => process.exit(0));
+        // exitDelayMs: like the Rust helper, it answers first, then releases its session and removes
+        // its socket file before exiting.
+        if (request.op === 'disconnect') server.close(() => setTimeout(() => { try { rmSync(process.argv[4], { force: true }); } catch {} process.exit(0); }, Number(remote.exitDelayMs ?? 0)));
       }, delay);
     });
   });

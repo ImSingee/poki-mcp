@@ -170,24 +170,26 @@ test('DDI failures name their reason and only the tunnel install suggests USB', 
 // disposition.
 const native = join(root, 'build/poki-native');
 const realHelper = await stat(native).then(info => info.size > 1_000_000, () => false);
-async function realPairHost(t, dir, index = 0) {
+// onEvent runs inside the line handler, so a SIGTERM sent from it reaches the helper with no delay
+// after the line that triggered it.
+async function realPairHost(t, dir, index = 0, onEvent = () => {}) {
   const output = join(dir, `pairing-${index}.plist`);
   const child = spawn(native, ['--pair-host', join(dir, 'host'), output, `poki-stop-${process.pid}-${index}`, '0'], { stdio: ['pipe', 'pipe', 'pipe'] });
   t.after(() => child.kill('SIGKILL'));
   const events = [];
-  createInterface({ input: child.stdout }).on('line', line => events.push(JSON.parse(line)));
+  createInterface({ input: child.stdout }).on('line', line => { const event = JSON.parse(line); events.push(event); onEvent(event, child); });
   const exited = once(child, 'exit');
-  const ended = async () => (await Promise.race([exited, new Promise((_, reject) => setTimeout(() => reject(new Error('did not exit')), 10000))]))[0];
+  const ended = async () => (await Promise.race([exited, new Promise((_, reject) => setTimeout(() => reject(new Error('did not exit')), 10000))]));
   return { child, events, output, ended };
 }
-test('poki-native --pair-host ends with cancelled for a SIGTERM sent as soon as it starts', { skip: !realHelper && 'build/poki-native is not built', timeout: 120000 }, async t => {
+test('poki-native --pair-host ends with cancelled for a SIGTERM sent the moment it starts', { skip: !realHelper && 'build/poki-native is not built', timeout: 180000 }, async t => {
   const dir = await scratch(t);
-  for (let index = 0; index < 10; index++) {
-    const helper = await realPairHost(t, dir, index);
-    await waitFor(() => helper.events.some(e => e.event === 'starting'));
-    helper.child.kill('SIGTERM');
-    const code = await helper.ended();
-    assert.equal(code, 1, `run ${index} died by signal instead of stopping: ${JSON.stringify(helper.events)}`);
+  // A helper that registered its handler lazily dies by the signal in about two of three runs.
+  for (let index = 0; index < 40; index++) {
+    const helper = await realPairHost(t, dir, index, (event, child) => { if (event.event === 'starting') child.kill('SIGTERM'); });
+    const [code, signal] = await helper.ended();
+    assert.equal(signal, null, `run ${index} died by ${signal} instead of stopping: ${JSON.stringify(helper.events)}`);
+    assert.equal(code, 1, JSON.stringify(helper.events));
     assert.ok(helper.events.some(e => e.event === 'cancelled'), JSON.stringify(helper.events));
     await assert.rejects(stat(helper.output), { code: 'ENOENT' });
   }
@@ -198,7 +200,7 @@ test('poki-native --pair-host stops when its standard input closes (the daemon d
   const helper = await realPairHost(t, dir);
   await waitFor(() => helper.events.some(e => e.event === 'advertising'));
   helper.child.stdin.end();
-  assert.equal(await helper.ended(), 1);
+  assert.deepEqual(await helper.ended(), [1, null]);
   assert.ok(helper.events.some(e => e.event === 'cancelled' && e.reason === 'parent_gone'), JSON.stringify(helper.events));
 });
 
@@ -249,7 +251,161 @@ test('a zombie process counts as gone', { skip: process.platform === 'win32' }, 
   try {
     await new Promise(resolve => setTimeout(resolve, 200));
     assert.doesNotThrow(() => process.kill(zombie, 0), 'kill(0) still finds the zombie');
-    assert.equal(processGone(zombie), true);
-    assert.equal(processGone(process.pid), false);
+    assert.equal(await processGone(zombie), true);
+    assert.equal(await processGone(process.pid), false);
   } finally { parent.kill('SIGKILL'); }
+});
+
+test('jobs preparing two phones at once share one download of the image', async t => {
+  const dir = await scratch(t);
+  const bytes = { 'Image.dmg': 'image', 'BuildManifest.plist': 'manifest' };
+  const image = { build: 'shared', baseUrl: 'https://mirror.invalid/ddi', files: Object.entries(bytes).map(([name, body]) => ({ name, sha256: createHash('sha256').update(body).digest('hex') })) };
+  const requested = [];
+  const fetchImpl = async url => { const name = url.split('/').at(-1); requested.push(name); await new Promise(resolve => setTimeout(resolve, 50)); return new Response(bytes[name]); };
+  const env = { HOME: join(dir, 'home') };
+  // As on Linux: no Xcode image to fall back on.
+  const [first, second] = await Promise.all([1, 2].map(() => resolveImage({ env, stateDir: join(dir, 'state'), image, fetchImpl, platform: 'linux' })));
+  assert.equal(first.directory, second.directory);
+  assert.deepEqual(requested, ['Image.dmg', 'BuildManifest.plist'], 'each file was fetched once');
+  assert.equal(await readFile(join(first.directory, 'Image.dmg'), 'utf8'), 'image');
+  assert.deepEqual((await readdir(first.directory)).filter(name => name.endsWith('.tmp')), []);
+});
+
+test('two processes changing the registry at once lose no entry', { timeout: 60000 }, async t => {
+  const dir = await scratch(t);
+  const registry = new URL('../src/pairing/registry.mjs', import.meta.url).href;
+  const writer = prefix => spawn(process.execPath, ['--input-type=module', '-e', `
+    import { registerRemote } from ${JSON.stringify(registry)};
+    await Promise.all(Array.from({ length: 25 }, (_, i) => registerRemote('${prefix}-' + i, 'P', '192.0.2.1', 49152, '/tmp/p.plist', { stateDir: ${JSON.stringify(dir)} })));
+  `], { stdio: ['ignore', 'ignore', 'pipe'] });
+  // Their output stays out of this test's own report stream.
+  const writers = ['a', 'b'].map(prefix => { const child = writer(prefix); child.errors = ''; child.stderr.on('data', chunk => { child.errors += chunk; }); child.exited = once(child, 'exit'); return child; });
+  for (const child of writers) assert.equal((await child.exited)[0], 0, child.errors);
+  const ids = JSON.parse(await readFile(join(dir, 'remote-devices.json'), 'utf8')).map(d => d.id);
+  assert.equal(ids.length, 50, `entries lost: ${50 - ids.length}`);
+  await assert.rejects(stat(join(dir, 'remote-devices.json.lock')), { code: 'ENOENT' }, 'the lock is released');
+});
+
+test('a session preparing a phone it leases itself is not held up by its own lease', async t => {
+  const dir = await scratch(t);
+  const target = { id: 'leased-phone', name: 'Phone', remote: join(dir, 'config.json') };
+  const mine = {}, other = {};
+  const coordinator = { leases: new Map([['leased-phone', { owner: mine, expires_at: 'soon' }]]), inputLock: { acquire: async () => () => {} } };
+  const jobs = new PairingJobs({ stateDir: join(dir, 'state'), ensureImage: async () => ({ already: false }) });
+  jobs.coordinator = coordinator;
+  const own = jobs.start({ device: target, owner: mine }).job;
+  await jobs.jobs.get(own.job).done;
+  assert.equal(jobs.get(own.job).state, 'ready');
+  const theirs = jobs.start({ device: target, owner: other }).job;
+  await jobs.jobs.get(theirs.job).done;
+  assert.equal(jobs.get(theirs.job).reason, 'device_busy', 'another session\'s lease still holds it up');
+});
+
+test('a lease taken while a DDI job waits for the input lock still stops the job', async t => {
+  const dir = await scratch(t);
+  const target = { id: 'contested-phone', name: 'Phone', remote: join(dir, 'config.json') };
+  const leases = new Map(), released = [];
+  let installed = false;
+  // Another session's acquire_device was queued behind the same input: it gets its lease while the
+  // job waits, and the job's turn comes after.
+  const inputLock = { acquire: async () => { leases.set('contested-phone', { owner: {}, expires_at: 'later' }); return () => released.push('released'); } };
+  const jobs = new PairingJobs({ stateDir: join(dir, 'state'), ensureImage: async () => { installed = true; return { already: false }; } });
+  jobs.coordinator = { leases, inputLock };
+  const { job } = jobs.start({ device: target, owner: {} });
+  await jobs.jobs.get(job.job).done;
+  const failed = jobs.get(job.job);
+  assert.equal(failed.reason, 'device_busy');
+  assert.match(failed.error, /leased by another session/);
+  assert.equal(installed, false, 'nothing was installed under the other session\'s lease');
+  assert.deepEqual(released, ['released'], 'the input lock was given back');
+});
+
+test('a pairing record moves into place only inside the registry transaction', async t => {
+  const dir = await scratch(t);
+  const { completeWirelessPairing } = await import('../src/pairing/wireless.mjs');
+  const staging = join(dir, 'staging.plist');
+  await writeFile(staging, 'record');
+  await mkdir(join(dir, 'state'), { recursive: true });
+  // Another process is in the middle of a registry change.
+  await writeFile(join(dir, 'state/remote-devices.json.lock'), JSON.stringify({ pid: 1, nonce: 'other' }));
+  const saving = completeWirelessPairing({ device: { udid: 'locked-phone', name: 'Phone' }, peer: '192.0.2.5' }, { pairing: staging, stateDir: join(dir, 'state') });
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(await readFile(staging, 'utf8'), 'record', 'the record waits with the registration');
+  await assert.rejects(stat(join(dir, 'state/remote/locked-phone/pairing.plist')), { code: 'ENOENT' });
+  await rm(join(dir, 'state/remote-devices.json.lock'));
+  const saved = await saving;
+  assert.equal(await readFile(join(dir, 'state/remote/locked-phone/pairing.plist'), 'utf8'), 'record');
+  assert.equal(saved.id, 'locked-phone');
+});
+
+test('an accepted pairing is not failed by the pairing deadline while it is being saved', { timeout: 30000 }, async t => {
+  const dir = await scratch(t);
+  const { completeWirelessPairing } = await import('../src/pairing/wireless.mjs');
+  const native = join(dir, 'pair-host');
+  await writeFile(native, `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
+writeFileSync(process.argv[4], 'record');
+console.log(JSON.stringify({ event: 'paired', device: { udid: 'late-phone', name: 'Late' }, peer: '192.0.2.6' }));
+`, { mode: 0o755 });
+  // A zero limit: the fallback deadline fires 5 s after the start, while saving takes 5.5 s.
+  const jobs = new PairingJobs({ stateDir: join(dir, 'state'), native, limitMs: 0, complete: async (...args) => { await new Promise(resolve => setTimeout(resolve, 5500)); return completeWirelessPairing(...args); }, ensureImage: async () => ({ already: true }) });
+  const { job } = jobs.start();
+  await jobs.jobs.get(job.job).done;
+  const done = jobs.get(job.job);
+  assert.equal(done.state, 'ready', JSON.stringify({ state: done.state, reason: done.reason }));
+});
+
+test('the shared image download stops when every job waiting for it is cancelled', async t => {
+  const dir = await scratch(t);
+  const image = { build: 'cancel', baseUrl: 'https://mirror.invalid/ddi', files: [{ name: 'BuildManifest.plist', sha256: createHash('sha256').update('m').digest('hex') }] };
+  let fetchSignal, fetches = 0;
+  const fetchImpl = (url, { signal }) => { fetches++; fetchSignal = signal; return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true })); };
+  const options = { env: { HOME: join(dir, 'home') }, stateDir: join(dir, 'state'), image, fetchImpl, platform: 'linux' };
+  const [a, b] = [new AbortController(), new AbortController()];
+  const first = resolveImage({ ...options, signal: a.signal }).catch(error => error);
+  const second = resolveImage({ ...options, signal: b.signal }).catch(error => error);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(fetches, 1, 'one download for both');
+  a.abort(new Error('first job cancelled'));
+  assert.equal((await first).stage, 'image');
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(fetchSignal.aborted, false, 'still wanted by the second job');
+  b.abort(new Error('second job cancelled'));
+  assert.equal((await second).stage, 'image');
+  assert.equal(fetchSignal.aborted, true, 'nobody waits any more, so the download stopped');
+  // The next job starts a new download instead of joining the stopped one.
+  const c = new AbortController();
+  const third = resolveImage({ ...options, signal: c.signal }).catch(error => error);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(fetches, 2);
+  c.abort(new Error('done'));
+  await third;
+});
+
+test('two processes reclaiming the same stale registry lock never both hold it', async t => {
+  const dir = await scratch(t);
+  const { acquireFileLock, lockHooks } = await import('../src/pairing/registry.mjs');
+  const { utimes } = await import('node:fs/promises');
+  const lock = join(dir, 'remote-devices.json.lock');
+  await writeFile(lock, 'left by a process that died');
+  await utimes(lock, new Date(Date.now() - 60000), new Date(Date.now() - 60000));
+  // The first contender confirms the lock is stale, then pauses just before removing it.
+  let resume, paused;
+  const reached = new Promise(resolve => { paused = resolve; });
+  lockHooks.beforeUnlinkStale = () => { lockHooks.beforeUnlinkStale = undefined; paused(); return new Promise(resolve => { resume = resolve; }); };
+  t.after(() => { lockHooks.beforeUnlinkStale = undefined; });
+  const holders = new Set();
+  const contend = name => acquireFileLock(lock, { waitMs: 5000 }).then(release => { holders.add(name); return async () => { holders.delete(name); await release(); }; });
+  const first = contend('first');
+  await reached;
+  const second = contend('second');
+  await new Promise(resolve => setTimeout(resolve, 200));
+  resume();
+  const [winner, release] = await Promise.race([first.then(r => ['first', r]), second.then(r => ['second', r])]);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.deepEqual([...holders], [winner], 'only one contender holds the lock');
+  await release();
+  const other = await (winner === 'first' ? second : first);
+  assert.equal(holders.size, 1);
+  await other();
 });
