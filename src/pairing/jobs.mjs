@@ -19,6 +19,8 @@ const jobRequest = (target, request, options, signal) => work.run({ signal, timi
 
 export const pairingLimitMs = 10 * 60000;
 export const retentionMs = 15 * 60000;
+// How long a cancel waits to remove a new pairing again while another process holds the registry.
+const rollbackWaitMs = 3000;
 const terminal = new Set(['ready', 'failed', 'cancelled']);
 export const isTerminal = state => terminal.has(state);
 
@@ -176,7 +178,11 @@ export class PairingJobs {
         if (job.state === 'cancelled') {
           held?.();
           // A phone registered before this job keeps the pairing it now has; a new one is removed again.
-          if (!previous) { await unregisterRemote(device.id, { stateDir: this.stateDir }).catch(() => {}); job.saved_new = false; job.rolled_back = true; }
+          // The cancel waits for this, so a registry another process holds is waited on only briefly.
+          if (!previous) {
+            try { await unregisterRemote(device.id, { stateDir: this.stateDir, waitMs: rollbackWaitMs }); job.saved_new = false; job.rolled_back = true; }
+            catch (error) { job.rollback_error = error.message; }
+          }
           this.inventoryChanged(device.id);
           return;
         }
@@ -200,7 +206,9 @@ export class PairingJobs {
     const registered = (await registeredTargets({ stateDir: this.stateDir }).catch(() => [])).some(d => d.id === id);
     job.note = !registered
       ? `The iPhone had already accepted the pairing; ${job.rolled_back ? 'it was removed from this computer again' : 'nothing of it was saved on this computer'}.`
-      : `The iPhone had already accepted the pairing. ${id} stays registered on this computer with its ${job.saved_new ? 'new' : 'earlier'} pairing; use unpair_device to remove it.`;
+      : job.rollback_error
+        ? `The iPhone had already accepted the pairing, and removing it from this computer again failed: ${job.rollback_error} ${id} stays registered with the new pairing. Call unpair_device with device ${JSON.stringify(id)} to remove it, or, with the service stopped, delete its entry from remote-devices.json and its remote/${id} directory in the state directory.`
+        : `The iPhone had already accepted the pairing. ${id} stays registered on this computer with its ${job.saved_new ? 'new' : 'earlier'} pairing; use unpair_device to remove it.`;
   }
   async prepare(job, target) {
     job.controller = new AbortController();
