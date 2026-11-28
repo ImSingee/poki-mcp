@@ -118,7 +118,7 @@ export async function answer(viewer, sdp, { onInput, servers = iceServers() } = 
   const start = () => {
     if (media?.readyState !== 'open' || control?.readyState !== 'open' || viewer.rtc?.close === close && viewer.rtc.started) return;
     clearTimeout(expiry);
-    viewer.rtc = { close, pump, started: true };
+    viewer.rtc = { close, pump, notify: sendControl, started: true };
     sendControl({ type: 'ready', ...viewer.describe() });
     void pump();
   };
@@ -138,7 +138,9 @@ export async function answer(viewer, sdp, { onInput, servers = iceServers() } = 
         try { value = JSON.parse(message); } catch { return void close(); }
         viewer.renew();
         if (value?.type === 'ack') { viewer.flow.acknowledge(value.seq, performance.now()); void pump(); }
-        else if (value?.type === 'keyframe') { viewer.flow.resync(); viewer.hub.requestKeyframe(viewer.codec); }
+        // A resync can make an already sent picture eligible again (a still screen's latest JPEG):
+        // send it now rather than wait for a frame the phone may not send.
+        else if (value?.type === 'keyframe') { viewer.flow.resync(); viewer.hub.requestKeyframe(viewer.codec); void pump(); }
         else if (value?.type === 'input' && onInput) {
           const { type: _type, id, ...args } = value;
           onInput(args).then(result => sendControl({ type: 'input-result', id, ...result }), error => sendControl({ type: 'input-result', id, isError: true, error: error.message }));
@@ -153,7 +155,7 @@ export async function answer(viewer, sdp, { onInput, servers = iceServers() } = 
     await pc.setRemoteDescription({ type: 'offer', sdp });
     await pc.setLocalDescription(await pc.createAnswer());
     if (!pc.localDescription) throw new Error('No answer.');
-    viewer.rtc = { close, pump, started: false };
+    viewer.rtc = { close, pump, notify: sendControl, started: false };
     return { sdp: pc.localDescription.sdp, close };
   } catch (error) { await close(); throw error; }
 }

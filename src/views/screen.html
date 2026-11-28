@@ -283,7 +283,7 @@ function endedOnPurpose(reason, message, generation) {
   if (!['device_disconnected', 'device_unpaired'].includes(reason) || generation !== state.generation) return false;
   state.generation++;
   stop(false);
-  $('placeholder').textContent = message;
+  $('placeholder').textContent = reason === 'device_disconnected' ? 'Disconnected' : 'Unpaired';
   notice(message, reason === 'device_disconnected' ? { label: 'Reconnect', run: () => { notice(''); void openStream(); } } : undefined);
   return true;
 }
@@ -448,6 +448,7 @@ function receiveControl(message, generation) {
   if (message.type === 'ready' && message.codec_string) { state.codecString = message.codec_string; decoder?.reconfigure(message.codec_string); }
   else if (message.type === 'codec-failed') fallBack(generation);
   else if (message.type === 'input-result') inputReplies.get(message.id)?.(message);
+  else if (message.type === 'ended' && generation === state.generation && !endedOnPurpose(message.reason, message.error, generation)) void openStream();
 }
 const MAGIC = { 0x4c485643: 'hevc', 0x4c415643: 'h264', 0x4c4f4459: 'jpeg' };
 function receivePacket(packet, generation) {
@@ -463,7 +464,7 @@ function receivePacket(packet, generation) {
 
 function stop(closeStream = true) {
   const stream = state.stream;
-  state.stream = undefined; state.transport = undefined;
+  state.stream = undefined; state.transport = undefined; $('stats').hidden = true;
   // The old phone's picture goes with its stream: input waits for the new stream's first picture.
   canvas.hidden = true; $('placeholder').hidden = false; $('placeholder').textContent = 'Connecting…';
   rtc?.pc.close(); rtc = undefined;

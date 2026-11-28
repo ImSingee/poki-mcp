@@ -346,6 +346,21 @@ test('an iPhone disconnected on purpose is not reconnected by the panel until th
   await until(() => painted(h.frame()));
 });
 
+test('over WebRTC the panel learns of a disconnect at once, not when the peer times out', { skip, timeout: 60000 }, async t => {
+  const h = await open(t, { settings: { rtc: true } });
+  await h.mount(showResult);
+  await until(async () => (await h.screen()).transport === 'webrtc');
+  await until(() => painted(h.frame()));
+  const started = Date.now();
+  h.poki.screens.closeDevice('fixture-phone');
+  await until(async () => (await h.view.locator('#notice').textContent()).includes('disconnected'), 10000);
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 1500, `the disconnect was shown after ${elapsed} ms`);
+  assert.equal(await h.frame().evaluate(() => document.getElementById('stats').hidden), true, 'the badge still shows the ended stream');
+  await delay(1500);
+  assert.equal(h.poki.count('screen_open'), 1);
+});
+
 test('a JPEG picture that finishes decoding after a newer one is not shown over it', { skip, timeout: 60000 }, async t => {
   if (!(await ffmpegAvailable())) return t.skip('ffmpeg is not installed, so there is no JPEG track');
   const h = await open(t, { settings: { rtc: false, codecs: ['jpeg'] }, backendOptions: { noFrames: true } });

@@ -23,6 +23,8 @@ const ENCODER_RESTARTS = 3;
 
 export const CODECS = ['hevc', 'h264', 'jpeg'];
 export const MAX_VIEWERS = 8;
+// How long a WebRTC peer stays open after the view was told its stream ended, for that message to arrive.
+const RTC_ENDED_CLOSE_MS = 250;
 
 class ScreenHub {
   viewers = new Set(); tracks = new Map(); transcoders = new Map(); failed = new Map();
@@ -267,7 +269,13 @@ class Viewer {
     if (this.closed) return;
     this.closed = true; this.ended = ended;
     if (ended) this.screens.remember(this.id, ended);
-    void this.rtc?.close(); this.screens.detach(this);
+    const rtc = this.rtc;
+    if (ended && rtc?.notify) {
+      // Told on the control channel first: a closed peer is only noticed seconds later.
+      rtc.notify({ type: 'ended', reason: ended.reason, error: ended.message });
+      setTimeout(() => void rtc.close(), RTC_ENDED_CLOSE_MS).unref?.();
+    } else void rtc?.close();
+    this.screens.detach(this);
   }
 }
 

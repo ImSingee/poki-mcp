@@ -3,6 +3,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { RTCPeerConnection } from 'werift';
 import { Screens } from '../src/stream/hub.mjs';
 import { answer, MAGIC } from '../src/stream/rtc.mjs';
@@ -138,4 +140,39 @@ test('a second offer for a viewer replaces its peer, and the old peer closing le
   assert.equal(viewer.rtc, current, 'closing the replaced peer cleared the new one');
   await second.close();
   assert.equal(viewer.rtc, undefined);
+});
+
+test('a resync over WebRTC sends a still screen\'s latest JPEG again', { timeout: 60000 }, async t => {
+  const native = fakeNative();
+  // A stand-in encoder that turns the first input into one JPEG and then stays quiet: a still screen.
+  const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 4, 1, 2, 0xff, 0xd9]);
+  const spawn = () => {
+    const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough(), kill() {} });
+    child.stdin.once('data', () => child.stdout.write(jpeg));
+    child.stdin.resume();
+    return child;
+  };
+  const screens = new Screens({ ...native, spawn, ffmpeg: async () => true });
+  t.after(() => screens.closeAll());
+  const viewer = await screens.open(target, { codecs: ['jpeg'] });
+  native.subscriptions[0].send(sampleFrames()[0]);
+  await until(() => viewer.track.frames.length === 1);
+
+  const browser = new RTCPeerConnection({ iceServers: [] });
+  t.after(() => browser.close());
+  const media = browser.createDataChannel('media', { ordered: true });
+  const control = browser.createDataChannel('control', { ordered: true });
+  const packets = [];
+  media.onMessage.subscribe(chunk => packets.push(chunk.readUInt32BE(8 + 4)));
+  const messages = [];
+  control.onMessage.subscribe(message => messages.push(JSON.parse(message)));
+  await browser.setLocalDescription(await browser.createOffer());
+  await until(() => browser.iceGatheringState === 'complete');
+  const { sdp } = await answer(viewer, browser.localDescription.sdp, { servers: [] });
+  await browser.setRemoteDescription({ type: 'answer', sdp });
+  await until(() => packets.length === 1);
+  // The view could not decode it (a stalled decoder) and asks to start again; the phone sends nothing new.
+  control.send(JSON.stringify({ type: 'keyframe' }));
+  await until(() => packets.length === 2, 5000).catch(() => {});
+  assert.deepEqual(packets, [1, 1], 'the latest picture was not sent again after the resync');
 });
