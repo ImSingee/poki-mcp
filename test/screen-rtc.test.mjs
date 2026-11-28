@@ -229,3 +229,39 @@ test('gestures on the control channel are checked like screen_input and run one 
   assert.deepEqual(order, [0.3, 0.4, 0.5, 0.6].map(x => Math.round(x * 65535)));
   assert.ok(messages.some(m => m.type === 'pong' && m.t === 1234.5), 'the ping got no pong');
 });
+
+test('cancel_device also stops the gestures still queued on the control channel', { timeout: 60000 }, async t => {
+  const { runScreenTool } = await import('../src/stream/tools.mjs');
+  const { Coordination } = await import('../src/coordination.mjs');
+  const { Session } = await import('../src/device.mjs');
+  const native = fakeNative();
+  const screens = new Screens({ ...native, ffmpeg: async () => false });
+  t.after(() => screens.closeAll());
+  const session = new Session(new Coordination());
+  session.label = 'view';
+  const opened = (await runScreenTool(session, 'screen_open', { device: target.id, codecs: ['hevc'] }, { screens, resolve: async () => target })).structuredContent;
+  const browser = new RTCPeerConnection({ iceServers: [] });
+  t.after(() => browser.close());
+  browser.createDataChannel('media', { ordered: true });
+  const control = browser.createDataChannel('control', { ordered: true });
+  const messages = [];
+  control.onMessage.subscribe(message => messages.push(JSON.parse(message)));
+  await browser.setLocalDescription(await browser.createOffer());
+  await until(() => browser.iceGatheringState === 'complete');
+  process.env.POKI_STUN_URL = '';
+  t.after(() => { delete process.env.POKI_STUN_URL; });
+  const reached = [];
+  const { signal: workSignal } = await import('../src/work.mjs');
+  // A long gesture: it runs until the device's work is stopped.
+  const slow = (device, request) => { reached.push(request.x); return new Promise(resolve => { const s = workSignal(); s?.addEventListener('abort', () => resolve({ isError: true, error: 'cancelled' }), { once: true }); }); };
+  const answered = await runScreenTool(session, 'screen_rtc_offer', { stream: opened.stream, sdp: browser.localDescription.sdp }, { screens, native: slow });
+  await browser.setRemoteDescription({ type: 'answer', sdp: answered.structuredContent.sdp });
+  await until(() => messages.some(m => m.type === 'ready'));
+  for (let id = 1; id <= 3; id++) control.send(JSON.stringify({ type: 'input', id, kind: 'tap', x: id / 10, y: 0.5 }));
+  await until(() => reached.length === 1);
+  await session.coordinator.end(session, 'cancelled', [target.id]);
+  await until(() => messages.filter(m => m.type === 'input-result').length === 3, 10000);
+  assert.deepEqual(reached, [Math.round(0.1 * 65535)], 'a gesture queued before cancel_device reached the phone after it');
+  const results = messages.filter(m => m.type === 'input-result').sort((a, b) => a.id - b.id);
+  assert.deepEqual(results.slice(1).map(r => r.reason), ['stopped', 'stopped']);
+});

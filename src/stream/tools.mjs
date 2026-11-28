@@ -226,7 +226,13 @@ function rtcInput(session, viewer, input, native) {
   if (!parsed.success) return Promise.resolve({ isError: true, error: `Invalid input: ${parsed.error.issues.map(i => i.message).join('; ')}` });
   if ((viewer.inputQueued ?? 0) >= MAX_QUEUED_INPUT) return Promise.resolve({ isError: true, error: 'Too many gestures are waiting to be sent.', reason: 'busy' });
   viewer.inputQueued = (viewer.inputQueued ?? 0) + 1;
-  const run = () => screenInput(session, viewer, parsed.data, { native }).then(r => ({ ...r.structuredContent, ...(r.isError ? { isError: true } : {}) }));
+  // A gesture still queued when the device's work is stopped (cancel_device, a takeover, an unpair)
+  // is not sent afterwards: it counts as received work of the session, as an accepted call does.
+  const received = performance.now(), device = viewer.device;
+  const stopped = () => [session, viewer.owner].some(owner => [owner?.stoppedAt?.get(device), owner?.stoppedAt?.get('*')].some(stop => stop && stop.at >= received));
+  const run = () => stopped()
+    ? { isError: true, error: 'The gesture was stopped before it reached the iPhone.', reason: 'stopped' }
+    : screenInput(session, viewer, parsed.data, { native }).then(r => ({ ...r.structuredContent, ...(r.isError ? { isError: true } : {}) }));
   const next = (viewer.inputChain ?? Promise.resolve()).then(run, run);
   viewer.inputChain = next.catch(() => {}).finally(() => { viewer.inputQueued--; });
   return next;
