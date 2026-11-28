@@ -187,10 +187,20 @@ export class PairingJobs {
     const busy = error => {
       if (job.state !== 'cancelled') this.fail(job, stage, { reason: 'device_busy', error, action: `Another session is using ${id}. Call pair_device with device ${JSON.stringify(id)} again once it is done.`, paired: true });
     };
-    const lease = this.coordinator?.leases?.get(id);
-    if (lease && (!job.owner || lease.owner !== job.owner)) { busy(`${id} is leased by another session until ${lease.expires_at ?? 'it releases it'}.`); return; }
-    try { return (await this.coordinator?.inputLock.acquire([id], { session: `pairing job ${job.id}`, tool: 'pair_device' }, job.controller.signal)) ?? (() => {}); }
-    catch (error) { busy(error.message); }
+    const leasedByOther = () => {
+      const lease = this.coordinator?.leases?.get(id);
+      return lease && (!job.owner || lease.owner !== job.owner) ? `${id} is leased by another session until ${lease.expires_at ?? 'it releases it'}.` : undefined;
+    };
+    const before = leasedByOther();
+    if (before) { busy(before); return; }
+    let release;
+    try { release = (await this.coordinator?.inputLock.acquire([id], { session: `pairing job ${job.id}`, tool: 'pair_device' }, job.controller.signal)) ?? (() => {}); }
+    catch (error) { busy(error.message); return; }
+    // A session may have taken a lease while this job waited for the lock (its acquire_device was
+    // queued behind the same input): look again now that the lock is held.
+    const after = leasedByOther();
+    if (after) { release(); busy(after); return; }
+    return release;
   }
   // The last step: the developer disk image over the tunnel (ddi.mjs). The installation releases the
   // device's input session and holds its helper for minutes, so it holds the device's input lock

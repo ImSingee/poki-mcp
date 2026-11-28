@@ -298,3 +298,22 @@ test('a session preparing a phone it leases itself is not held up by its own lea
   await jobs.jobs.get(theirs.job).done;
   assert.equal(jobs.get(theirs.job).reason, 'device_busy', 'another session\'s lease still holds it up');
 });
+
+test('a lease taken while a DDI job waits for the input lock still stops the job', async t => {
+  const dir = await scratch(t);
+  const target = { id: 'contested-phone', name: 'Phone', remote: join(dir, 'config.json') };
+  const leases = new Map(), released = [];
+  let installed = false;
+  // Another session's acquire_device was queued behind the same input: it gets its lease while the
+  // job waits, and the job's turn comes after.
+  const inputLock = { acquire: async () => { leases.set('contested-phone', { owner: {}, expires_at: 'later' }); return () => released.push('released'); } };
+  const jobs = new PairingJobs({ stateDir: join(dir, 'state'), ensureImage: async () => { installed = true; return { already: false }; } });
+  jobs.coordinator = { leases, inputLock };
+  const { job } = jobs.start({ device: target, owner: {} });
+  await jobs.jobs.get(job.job).done;
+  const failed = jobs.get(job.job);
+  assert.equal(failed.reason, 'device_busy');
+  assert.match(failed.error, /leased by another session/);
+  assert.equal(installed, false, 'nothing was installed under the other session\'s lease');
+  assert.deepEqual(released, ['released'], 'the input lock was given back');
+});
