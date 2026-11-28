@@ -83,7 +83,7 @@ test('screen_input respects another session\'s lease, and a confirmed takeover e
   assert.equal(coordinator.leases.get(target.id).owner, viewer.owner);
   // The agent is kept off, even though the view's calls may come on the agent's own session, and
   // is told why.
-  assert.throws(() => coordinator.access(agent, target), /occupied: a person took over fixture-phone in the screen panel/);
+  assert.throws(() => coordinator.access(agent, target), /occupied: the screen panel took over fixture-phone/);
   assert.equal((await screenInput(agent, viewer, { kind: 'tap', x: 0.2, y: 0.2 }, { native })).structuredContent.sent, true);
   assert.equal(sent.length, 1);
   // Closing the view hands the device back.
@@ -294,7 +294,7 @@ test('disconnect_device ends the phone\'s screen panels, so their subscription d
   const session = new Session(new Coordination());
   session.inventory = async () => [phone];
   // As the daemon wires them.
-  screens.attach({ unavailable: id => session.coordinator.unavailable.get(id), activity: id => session.coordinator.activeAt.get(id) });
+  screens.attach({ unavailable: id => session.coordinator.unavailable.get(id), activity: id => session.coordinator.lastActive(id), started: id => session.coordinator.lastStarted(id) });
   const route = await session.route('disconnect_device', { device: phone.id });
   const reply = await route.run();
   assert.ok(!reply.isError, JSON.stringify(reply));
@@ -361,18 +361,25 @@ test('a takeover lasts while the panel keeps its stream, beyond the takeover lea
   assert.ok(coordinator.leases.get(target.id).until > until, 'the takeover was not renewed by the panel\'s reads');
 });
 
-test('a long tool call on a device counts as activity until it ends', async t => {
+test('a long tool call on a device counts as activity while it runs and until it ends', async t => {
   const coordinator = new Coordination();
   const session = new Session(coordinator);
   const phone = { id: 'fixture-phone', kind: 'physical', name: 'Lab iPhone' };
   session.inventory = async () => [phone];
   const route = await session.route('wait', { device: phone.id, seconds: 0.6 });
   const started = performance.now();
-  await route.run();
+  const running = route.run();
+  // Midway, the device is active now (not as of the call's start).
+  await delay(400);
+  assert.ok(performance.now() - coordinator.lastActive(phone.id) < 50, 'a running call did not count as activity now');
+  await running;
   const ended = performance.now();
-  const active = coordinator.activeAt.get(phone.id);
-  assert.ok(active >= ended - 100 && active - started >= 500, `activity stamped ${Math.round(active - started)} ms into a ${Math.round(ended - started)} ms call`);
+  await delay(200);
+  const active = coordinator.lastActive(phone.id);
+  assert.ok(active >= ended - 100 && active <= ended, `activity ${Math.round(active - started)} ms into a ${Math.round(ended - started)} ms call`);
+  assert.ok(coordinator.lastStarted(phone.id) - started < 100);
 });
+
 
 test('in ask mode a takeover through the MCP route asks on this computer, and a declined dialog takes nothing', async t => {
   const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
@@ -402,4 +409,59 @@ test('in ask mode a takeover through the MCP route asks on this computer, and a 
   const taken = await (await view.route('screen_takeover', { stream: opened.stream, token: busy.takeover_token })).run();
   assert.equal(taken.structuredContent?.reason, 'not_approved', JSON.stringify(taken));
   assert.equal(coordinator.leases.get(phone.id).owner, agent, 'a takeover nobody approved ended the agent\'s lease');
+});
+
+// The helper socket of a RemotePairing phone, answering disconnect (and nothing else).
+async function disconnectableHelper(t) {
+  const { createServer } = await import('node:net');
+  const { createHash, randomUUID } = await import('node:crypto');
+  const { mkdir, unlink } = await import('node:fs/promises');
+  const { join } = await import('node:path');
+  const { once } = await import('node:events');
+  const phone = { id: 'remote-phone', kind: 'physical', name: 'Remote iPhone', remote: `/nonexistent/${randomUUID()}/config.json`, connection: 'RemotePairing' };
+  const directory = `/tmp/poki-remote-${process.getuid()}`;
+  await mkdir(directory, { mode: 0o700, recursive: true });
+  const path = join(directory, createHash('sha256').update(phone.remote).digest('hex').slice(0, 24) + '.sock');
+  const server = createServer(socket => {
+    socket.write(JSON.stringify({ pid: process.pid }) + '\n');
+    let buffered = '';
+    socket.on('data', chunk => { buffered += chunk; if (!buffered.includes('\n')) return; const { op } = JSON.parse(buffered.slice(0, buffered.indexOf('\n'))); socket.end(JSON.stringify(op === 'disconnect' ? { disconnected: true } : { error: 'unexpected' }) + '\n'); });
+  });
+  server.listen(path); await once(server, 'listening');
+  t.after(async () => { server.close(); await unlink(path).catch(() => {}); });
+  return phone;
+}
+
+for (const [label, overlapping] of [
+  ['a call already running when the person disconnects', async (coordinator, agent, person, phone) => {
+    const waiting = coordinator.call(agent, 'wait', { device: phone.id, seconds: 1 });
+    await delay(300);
+    assert.ok(!(await coordinator.call(person, 'disconnect_device', { device: phone.id })).isError);
+    await waiting;
+  }],
+  ['the batch the disconnect is part of', async (coordinator, agent, person, phone) => {
+    const batch = await coordinator.call(agent, 'batch_commands', { device: phone.id, commands: [{ tool: 'wait', arguments: { seconds: 0.3 } }, { tool: 'disconnect_device', arguments: {} }] });
+    assert.ok(!batch.isError, JSON.stringify(batch).slice(0, 400));
+  }],
+]) test(`a disconnect is not undone by ${label}; a call started after it is`, async t => {
+  const { screens } = await import('../src/stream/hub.mjs');
+  const phone = await disconnectableHelper(t);
+  const native = fakeNative();
+  const deps = screens.deps;
+  screens.deps = { ...deps, ...native, ffmpeg: async () => false };
+  t.after(() => { screens.closeAll(); screens.deps = deps; });
+  const coordinator = new Coordination();
+  const agent = new Session(coordinator), person = new Session(coordinator);
+  for (const session of [agent, person]) session.inventory = async () => [phone];
+  screens.attach({ unavailable: id => coordinator.unavailable.get(id), activity: id => coordinator.lastActive(id), started: id => coordinator.lastStarted(id) });
+  // The daemon-wide screens may remember an earlier test's disconnect of this id.
+  screens.disconnected.delete(phone.id);
+  t.after(() => screens.disconnected.delete(phone.id));
+  const viewer = await screens.open(phone, { codecs: ['hevc'] });
+  await overlapping(coordinator, agent, person, phone);
+  assert.equal(viewer.closed, true);
+  await assert.rejects(screens.open(phone, { codecs: ['hevc'] }), error => error.reason === 'device_disconnected', 'a remounted panel reopened the phone without the person asking');
+  // The agent goes on using the phone: a panel may show it again.
+  await coordinator.call(agent, 'wait', { device: phone.id, seconds: 0 });
+  await screens.open(phone, { codecs: ['hevc'] });
 });

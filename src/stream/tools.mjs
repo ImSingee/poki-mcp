@@ -30,7 +30,7 @@ class ViewerOwner {
   constructor(viewer) {
     this.label = `screen view ${viewer.id.slice(0, 8)}`;
     // What another session is told when it tries the device (Coordination.access).
-    this.holdNotice = `Device is occupied: a person took over ${viewer.device} in the screen panel. Calls on it are refused until they close the panel (or it stays hidden); ask the user before trying again.`;
+    this.holdNotice = `Device is occupied: the screen panel took over ${viewer.device}. Calls on it are refused until the panel closes (or stays hidden); ask the user before trying again.`;
   }
   async cleanup() { return { recordings: [], locations: [] }; }
 }

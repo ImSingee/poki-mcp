@@ -9,7 +9,7 @@ import { randomBytes } from 'node:crypto';
 import { nativeSubscribe, nativeKeyframe } from '../remote.mjs';
 import { Track } from './track.mjs';
 import { Flow, readLimits } from './flow.mjs';
-import { Transcoder, ffmpegCodecs } from './transcode.mjs';
+import { Transcoder, ffmpegCodecs, ENCODER_BACKLOG_BYTES } from './transcode.mjs';
 
 export const VIEWER_TTL_MS = 10_000;
 export const KEYFRAME_INTERVAL_MS = 1000;
@@ -117,7 +117,7 @@ class ScreenHub {
     const frame = { seq, key: native.key, pts_us: native.pts_us, config: native.config, data: native.data, at: performance.now() };
     this.tracks.get('hevc').push(frame);
     // The key frame asked for came: no need to ask again.
-    if (frame.key) { clearTimeout(this.keyframeAnswer); this.keyframeAnswer = undefined; this.keyframeAsks = 0; }
+    if (frame.key) this.newKeyframeWait();
     this.pushed('hevc');
     for (const transcoder of this.transcoders.values()) transcoder.write(frame);
   }
@@ -168,6 +168,7 @@ class ScreenHub {
   // encoder starts at the phone's next key frame, which it is asked for; only a track with no
   // picture yet (placeholder) gets the older key frame's picture meanwhile.
   startEncoder(transcoder, { placeholder = false } = {}) {
+    this.newKeyframeWait();
     const hevc = this.tracks.get('hevc'), key = hevc.latestKey();
     if (key && hevc.latest === key.seq) { transcoder.write(key); return; }
     if (key && placeholder) { transcoder.write(key); transcoder.feeding = false; }
@@ -192,26 +193,36 @@ class ScreenHub {
     this.chainKeyframeTimer.unref?.();
   }
 
-  // An encoder waiting for the phone's next key frame (after a start, a restart or a stall) asks
-  // again when none came within KEYFRAME_ANSWER_MS, KEYFRAME_ASKS times in all. Past that (the
-  // helper restarts the media session for an overdue key frame itself, so this is a last resort),
-  // each waiting encoder is fed the cached chain once: an older picture catching up, rather than
-  // none at all.
+  // An encoder waiting for the phone's next key frame (after a start, a restart or a stall) is asked
+  // for at once and again each KEYFRAME_ANSWER_MS without one, KEYFRAME_ASKS requests in all (at 0,
+  // 2 and 4 s). Past that (the helper restarts the media session for an overdue key frame itself, so
+  // this is a last resort), each waiting encoder is fed the newest cached chain once, as far as its
+  // input buffer allows: an older picture catching up, rather than none at all.
   awaitKeyframe() {
-    if (this.keyframeAnswer) return;
+    if (this.keyframeAnswer || this.keyframeFellBack) return;
     this.keyframeAnswer = setTimeout(() => {
       this.keyframeAnswer = undefined;
       const waiting = [...this.transcoders.values()].filter(transcoder => !transcoder.closed && !transcoder.feeding);
       if (this.stopped || !waiting.length) { this.keyframeAsks = 0; return; }
       if (++this.keyframeAsks < KEYFRAME_ASKS) { this.askSourceKeyframe(); return; }
-      this.keyframeAsks = 0;
+      // Once per wait: a chain too long for the encoder's input would otherwise stall it, ask again
+      // and replay the same past pictures every few seconds.
+      this.keyframeFellBack = true;
       const hevc = this.tracks.get('hevc'), key = hevc.latestKey();
       const chain = key ? hevc.since(key.seq - 1) ?? [] : [];
-      if (!chain.length) { this.askSourceKeyframe(); return; }
-      for (const transcoder of waiting) for (const frame of chain) transcoder.write(frame);
+      let bytes = 0;
+      const fits = chain.filter(frame => (bytes += frame.data.length) <= ENCODER_BACKLOG_BYTES);
+      for (const transcoder of waiting) {
+        for (const frame of fits) transcoder.write(frame);
+        // The rest of the chain does not follow: the encoder waits for the phone's next key frame.
+        if (fits.length < chain.length) transcoder.feeding = false;
+      }
     }, KEYFRAME_ANSWER_MS);
     this.keyframeAnswer.unref?.();
   }
+
+  // A new wait for the phone's key frame: requests counted afresh, and one fallback allowed again.
+  newKeyframeWait() { clearTimeout(this.keyframeAnswer); this.keyframeAnswer = undefined; this.keyframeAsks = 0; this.keyframeFellBack = false; }
 
   // A backed-up encoder caught up: it resumes at the newest key frame if that is the screen now,
   // else at the phone's next key frame.
@@ -363,16 +374,18 @@ export class Screens {
     return CODECS.filter(codec => codec === 'hevc' || list.includes(codec));
   }
 
-  // The daemon's view of its devices: unavailable(id) says why a device cannot be used now (unpaired
-  // or being paired again), activity(id) when a tool last used it (performance.now() time).
-  attach({ unavailable, activity }) { Object.assign(this.deps, { unavailable, activity }); }
+  // The daemon's view of its devices (performance.now() times): unavailable(id) says why a device
+  // cannot be used now (unpaired or being paired again), activity(id) is now while a tool acts on it
+  // and else when the last one ended, started(id) when the latest such call started.
+  attach({ unavailable, activity, started }) { Object.assign(this.deps, { unavailable, activity, started }); }
 
   // A new viewer of target's screen in the first of `codecs` this host serves. A device whose panels
   // disconnect_device ended opens again only with reconnect (the person asked for it), or once a
-  // tool has used the device since.
+  // tool call that started after the disconnect has used the device (one already running, or the
+  // batch the disconnect was part of, does not count).
   async open(target, { codecs = CODECS, signal, reconnect = false } = {}) {
     const disconnected = this.disconnected.get(target.id);
-    if (disconnected && !reconnect && (this.deps.activity?.(target.id) ?? 0) <= disconnected.at) throw Object.assign(new Error(disconnected.message), { reason: disconnected.reason });
+    if (disconnected && !reconnect && (this.deps.started?.(target.id) ?? 0) <= disconnected.at) throw Object.assign(new Error(disconnected.message), { reason: disconnected.reason });
     this.disconnected.delete(target.id);
     const asked = performance.now();
     // HEVC is served as the phone sends it: a view that wants nothing else needs no ffmpeg.

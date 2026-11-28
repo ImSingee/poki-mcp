@@ -293,7 +293,9 @@ function drain(generation) {
   if (held.length) reorderTimer = setTimeout(() => { if (generation === state.generation && held.length) { held = []; resync(); } }, 2000);
 }
 let resyncWanted = false;
-function resync() { resyncWanted = true; if (state.transport === 'webrtc') rtc?.send({ type: 'keyframe' }); }
+// Over WebRTC a hidden panel asks for nothing (it would keep its stream alive); shown again, it
+// resynchronizes anyway.
+function resync() { resyncWanted = true; if (state.transport === 'webrtc' && !hidden()) rtc?.send({ type: 'keyframe' }); }
 function decoded(seq, broken) {
   // Starting again at a key frame supersedes everything received so far: acknowledge it, or the
   // credit those frames hold would never come back.

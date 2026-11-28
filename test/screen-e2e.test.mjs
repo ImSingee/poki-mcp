@@ -76,7 +76,7 @@ test("a confirmed takeover through the daemon stops the agent's batch and keeps 
   assert.match(JSON.stringify(stopped.content), /taken_over/, JSON.stringify(stopped));
   const refused = await host.call('tap', { device: 'lab-iphone', x: 10, y: 10 });
   assert.equal(refused.isError, true);
-  assert.match(refused.content[0].text, /occupied: a person took over lab-iphone in the screen panel/);
+  assert.match(refused.content[0].text, /occupied: the screen panel took over lab-iphone/);
   assert.equal((await host.call('screen_input', { stream: opened.stream, kind: 'tap', x: 0.1, y: 0.2 })).structuredContent.sent, true);
   const taps = (await host.commands()).filter(c => c.remote === 'tap');
   assert.deepEqual(taps.map(c => [c.request.x, c.request.y]), [[6554, 13107]], 'only the view\'s tap after the takeover reached the phone');

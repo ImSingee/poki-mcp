@@ -607,7 +607,7 @@ test('an idle stream is paused, unless a tool is using the device', async t => {
 test('a device disconnected on purpose opens again only with reconnect, or once a tool used it since', async t => {
   const screens = new Screens({ ...fakeNative(), ffmpeg: async () => false });
   let active = 0;
-  screens.attach({ unavailable: () => undefined, activity: () => active });
+  screens.attach({ unavailable: () => undefined, activity: () => active, started: () => active });
   t.after(() => screens.closeAll());
   await screens.open(target, { codecs: ['hevc'] });
   screens.closeDevice(target.id);
@@ -674,4 +674,39 @@ test('an encoder waiting for the phone\'s key frame asks again, and at last star
   // After the last unanswered request the cached chain goes in once.
   await until(() => writes.filter(n => n > 7).length >= 3, 4000);
   assert.deepEqual(writes.filter(n => n > 7).slice(1), [key.data.length, delta.data.length]);
+});
+
+test('the key frame fallback feeds what fits the encoder once per wait, and a restart allows it again', { timeout: 60000 }, async t => {
+  const { ENCODER_BACKLOG_BYTES } = await import('../src/stream/transcode.mjs');
+  const native = fakeNative();
+  let asks = 0;
+  const keyframe = async () => { asks++; };
+  const writes = [];
+  const spawnRecorder = () => { const stdin = new PassThrough().resume(); const write = stdin.write.bind(stdin); stdin.write = chunk => { writes.push(chunk.length); return write(chunk); }; return Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), stdin, kill() {} }); };
+  // A long lease: the viewers here read nothing for the length of the test.
+  const screens = new Screens({ ...native, keyframe, spawn: spawnRecorder, ffmpeg: async () => true, ttlMs: 120000 });
+  t.after(() => screens.closeAll());
+  await screens.open(target, { codecs: ['hevc'] });
+  const [key] = sampleFrames();
+  // A long chain since the phone's only key frame: more than the encoder's input buffer.
+  const big = 1.5 * 1024 * 1024;
+  native.subscriptions[0].send(key);
+  for (let seq = 2; seq <= 5; seq++) native.subscriptions[0].send({ ...key, seq, key: false, data: Buffer.alloc(big, seq) });
+  const viewer = await screens.open(target, { codecs: ['h264'] });
+  const bigWrites = () => writes.filter(n => n === big).length;
+  await until(() => bigWrites() > 0, 8000);
+  await delay(200);
+  const fed = bigWrites();
+  assert.ok(key.data.length + fed * big <= ENCODER_BACKLOG_BYTES, `${fed} frames of ${big} bytes went past the encoder's buffer`);
+  assert.ok(fed < 4, 'the whole chain went in');
+  // No second fallback while the phone still does not answer, though the key frame keeps being asked
+  // for (a viewer resynchronizing, an encoder that stalled).
+  const asking = setInterval(() => viewer.hub.requestKeyframe('h264'), 1100);
+  await delay(7000);
+  clearInterval(asking);
+  assert.equal(bigWrites(), fed, 'the fallback replayed the same past pictures again');
+  // A restart (a new bitrate) is a new wait: the fallback may run once more.
+  viewer.hub.restartEncoder('h264');
+  await until(() => bigWrites() > fed, 12000);
+  assert.ok(asks >= 6);
 });

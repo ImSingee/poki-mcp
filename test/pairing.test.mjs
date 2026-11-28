@@ -724,10 +724,7 @@ test('the service\'s pairing jobs wait for the device\'s input lock that a runni
 });
 
 test('an open screen panel keeps the daemon busy, and unpairing its iPhone ends the panel and releases the media session', { timeout: 60000 }, async t => {
-  const { sampleFrames } = await import('./stream-fixture.mjs');
-  const video = join(await mkdtemp(join(tmpdir(), 'poki-unpair-video-')), 'video.json');
-  await writeFile(video, JSON.stringify(sampleFrames().map(frame => ({ key: frame.key, config: frame.config?.toString('base64'), data: frame.data.toString('base64') }))));
-  const { f, data, call } = await pairingFixture(t, { registered: ['lab-phone'], remote: { displayService: true, video } });
+  const { f, data, call } = await pairingFixture(t, { registered: ['lab-phone'], remote: { displayService: true, video: await sampleVideo(t) } });
   const opened = data(await call('screen_open', { device: 'lab-phone', codecs: ['hevc'] }));
   const first = data(await call('screen_read', { stream: opened.stream, wait_ms: 1000 }));
   assert.ok(first.frames.length, 'no frames from the stand-in phone');
@@ -757,15 +754,18 @@ test('screen tools are refused inside batch_commands and run_code with the docum
   void f;
 });
 
-const sampleVideo = async () => {
+const sampleVideo = async t => {
   const { sampleFrames } = await import('./stream-fixture.mjs');
-  const path = join(await mkdtemp(join(tmpdir(), 'poki-video-')), 'video.json');
+  const { rm } = await import('node:fs/promises');
+  const directory = await mkdtemp(join(tmpdir(), 'poki-video-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, 'video.json');
   await writeFile(path, JSON.stringify(sampleFrames().map(frame => ({ key: frame.key, config: frame.config?.toString('base64'), data: frame.data.toString('base64') }))));
   return path;
 };
 
 test('pairing a phone again ends its screen panels first, so they do not reconnect it with the old configuration', { timeout: 60000 }, async t => {
-  const { data, call, until, release } = await pairingFixture(t, { remote: { displayService: true, video: await sampleVideo() } });
+  const { data, call, until, release } = await pairingFixture(t, { remote: { displayService: true, video: await sampleVideo(t) } });
   const first = data(await call('pair_device')).job.job;
   await release('accept');
   await until(first, j => j.terminal);
@@ -785,7 +785,7 @@ test('pairing a phone again ends its screen panels first, so they do not reconne
 
 test('the daemon pauses an idle screen stream, but not while tools act on the phone', { timeout: 60000 }, async t => {
   // A pause after 2.4 s without activity.
-  const { data, call } = await pairingFixture(t, { registered: ['lab-phone'], remote: { displayService: true, video: await sampleVideo() }, env: { POKI_SCREEN_IDLE_MINUTES: '0.04' } });
+  const { data, call } = await pairingFixture(t, { registered: ['lab-phone'], remote: { displayService: true, video: await sampleVideo(t) }, env: { POKI_SCREEN_IDLE_MINUTES: '0.04' } });
   const opened = data(await call('screen_open', { device: 'lab-phone', codecs: ['hevc'] }));
   let ack;
   // A paused stream's reply says so (closed with reason idle; a later call fails with that reason).
@@ -798,4 +798,21 @@ test('the daemon pauses an idle screen stream, but not while tools act on the ph
   const deadline = performance.now() + 8000;
   do { reply = await read(); await new Promise(r => setTimeout(r, 300)); } while (!reply.closed && performance.now() < deadline);
   assert.equal(reply.reason, 'idle', JSON.stringify(reply).slice(0, 300));
+});
+
+test('one tool call longer than the idle period keeps a watching panel; the pause comes after it ends', { timeout: 60000 }, async t => {
+  // A pause after 2.4 s without activity; the agent's single wait takes 6 s.
+  const { data, call } = await pairingFixture(t, { registered: ['lab-phone'], remote: { displayService: true, video: await sampleVideo(t) }, env: { POKI_SCREEN_IDLE_MINUTES: '0.04' } });
+  const opened = data(await call('screen_open', { device: 'lab-phone', codecs: ['hevc'] }));
+  let ack;
+  const paused = async () => { const reply = (await call('screen_read', { stream: opened.stream, ack, wait_ms: 200 })).structuredContent; ack = reply.frames?.at(-1)?.seq ?? ack; return reply.closed || reply.reason === 'idle'; };
+  const waiting = call('wait', { device: 'lab-phone', seconds: 6 });
+  const started = performance.now();
+  let pausedAt;
+  while (pausedAt === undefined && performance.now() - started < 5500) { if (await paused()) pausedAt = Math.round(performance.now() - started); await new Promise(r => setTimeout(r, 200)); }
+  await waiting;
+  assert.equal(pausedAt, undefined, `the panel was paused ${pausedAt} ms into a 6 s call`);
+  const ended = performance.now();
+  while (!(await paused())) { assert.ok(performance.now() - ended < 8000, 'the idle panel was never paused'); await new Promise(r => setTimeout(r, 200)); }
+  assert.ok(performance.now() - ended >= 2000, `paused ${Math.round(performance.now() - ended)} ms after the call ended, before the idle period`);
 });

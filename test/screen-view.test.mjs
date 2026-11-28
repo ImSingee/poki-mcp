@@ -627,6 +627,23 @@ test('a hidden panel on WebRTC stops acknowledging and pinging, so the daemon st
   assert.equal(viewer.flow.acked, acked, 'a hidden panel kept acknowledging frames');
 });
 
+test('a decoder that breaks while the panel is hidden on WebRTC acknowledges and asks for nothing', { skip, timeout: 90000 }, async t => {
+  if (!(await ffmpegAvailable())) return t.skip('ffmpeg is not installed, so no JPEG to stream');
+  const h = await open(t, { settings: { rtc: true, codecs: ['jpeg'], rtcTimeoutMs: 30000 } });
+  await h.mount(showResult);
+  await until(async () => (await h.screen()).transport === 'webrtc', 40000);
+  await until(() => painted(h.frame()));
+  const [viewer] = h.poki.screens.viewers.values();
+  await h.page.evaluate(() => { document.getElementById('slot').style.display = 'none'; });
+  await delay(1500);
+  const expires = viewer.expires, acked = viewer.flow.acked;
+  // The decoder restarts (a watchdog or a decode error) while nobody sees the panel.
+  await h.frame().evaluate(() => globalThis.pokiScreenInternals.decoder().onDecoded(undefined, true));
+  await delay(1000);
+  assert.equal(viewer.flow.acked, acked, 'a hidden panel acknowledged frames after its decoder broke');
+  assert.equal(viewer.expires, expires, 'a hidden panel renewed its stream after its decoder broke');
+});
+
 test('a page in the background counts as hidden', { skip, timeout: 60000 }, async t => {
   const h = await open(t, { settings: { rtc: false, codecs: (await ffmpegAvailable()) ? ['jpeg'] : undefined } });
   await h.mount(showResult);

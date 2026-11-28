@@ -40,8 +40,9 @@ if (auto) {
 await warnIfNativeStale();
 const sessions = new Map();
 const coordinator = new Coordination();
-// The screen streams see which devices are unavailable and when a tool last used one.
-screens.attach({ unavailable: id => coordinator.unavailable.get(id), activity: id => coordinator.activeAt.get(id) });
+// The screen streams see which devices are unavailable, whether a tool acts on one now or when it
+// last did, and when the latest such call started.
+screens.attach({ unavailable: id => coordinator.unavailable.get(id), activity: id => coordinator.lastActive(id), started: id => coordinator.lastStarted(id) });
 const token = process.env.POKI_MCP_TOKEN?.trim() || randomBytes(32).toString('hex');
 // This process, as opposed to another daemon at the same address with the same token (a fixed port and
 // POKI_MCP_TOKEN, restarted): in mcp.json and /version, and checked on every request a shim sends.

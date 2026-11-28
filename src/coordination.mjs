@@ -26,15 +26,31 @@ const failure = error => ({ isError: true, ...text(error.message), _meta: { stop
 //   read slot instead and runs beside another session's input (input-lock.mjs).
 // - A lease keeps every other session off its device. A session may hold leases on several devices.
 export class Coordination {
-  // activeAt: when a tool last acted on each device (performance.now()), not a lookup such as
-  // list_devices: the screen panel's idle pause and its reopening after a disconnect go by it.
-  leases = new Map(); operations = new Set(); revisions = new Map(); scenes = new Map(); activeAt = new Map();
+  // deviceCalls: per device, the tool calls acting on it (not a lookup such as list_devices): how
+  // many run now, and when the latest started and ended. The screen panel's idle pause and its
+  // reopening after a disconnect go by them.
+  leases = new Map(); operations = new Set(); revisions = new Map(); scenes = new Map(); deviceCalls = new Map();
   // Devices being unpaired: no session may resolve, lease or act on them until the removal ends.
   unavailable = new Map();
   inputLock = inputLockFromEnv();
   unqueued = unqueuedTools;
   revision(id) { return this.revisions.get(id) ?? 0; }
   changed(id) { this.revisions.set(id, this.revision(id) + 1); }
+  callStarted(id) {
+    const calls = this.deviceCalls.get(id) ?? { running: 0 };
+    calls.running++; calls.startedAt = performance.now();
+    this.deviceCalls.set(id, calls);
+  }
+  callEnded(id) {
+    const calls = this.deviceCalls.get(id);
+    if (!calls) return;
+    calls.running = Math.max(0, calls.running - 1); calls.endedAt = performance.now();
+  }
+  // When a tool last acted on the device: now while one runs, however long it takes, else when the
+  // last one ended (performance.now() time; undefined if none did).
+  lastActive(id) { const calls = this.deviceCalls.get(id); return calls?.running ? performance.now() : calls?.endedAt; }
+  // When the latest tool call on the device started.
+  lastStarted(id) { return this.deviceCalls.get(id)?.startedAt; }
   observeFrame(id, data) { const previous = this.scenes.get(id); if (previous && !previous.equals(data)) this.changed(id); this.scenes.set(id, data); }
   // The leases this session holds, one per device.
   owned(session) { return [...this.leases.values()].filter(lease => lease.owner === session); }

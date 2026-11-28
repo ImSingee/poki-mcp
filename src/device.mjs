@@ -463,7 +463,7 @@ export class DeviceContext {
     // list_devices, nor disconnect_device itself: it keeps a watching screen panel going and lets a
     // panel reopen after a disconnect.
     const acting = Boolean(schema) && this.id !== undefined && name !== 'disconnect_device';
-    if (acting) this.coordinator.activeAt.set(this.id, performance.now());
+    if (acting) this.coordinator.callStarted(this.id);
     if (!schema) throw new Error(`Unknown tool: ${name}`);
     const { device: _device, ...rest } = original;
     const args = schema.parse(name === 'start_simulator' && this.id !== undefined ? {} : rest);
@@ -647,8 +647,8 @@ export class DeviceContext {
       }
     } finally {
       if (!sharesTarget) this.resolved=previousResolved;
-      // A long call (a batch, a wait, a recording) is activity until it ends, not only when it starts.
-      if (acting) this.coordinator.activeAt.set(this.id, performance.now());
+      // A long call (a batch, a wait, a recording) is activity until it ends.
+      if (acting) this.coordinator.callEnded(this.id);
     }
   }
 }
