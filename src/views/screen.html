@@ -170,29 +170,33 @@ function layout() {
 const STUCK_MS = 3000, STUCK_LIMIT = 3;
 class Decoder {
   constructor(codec, codecString, onDecoded, onFailure) {
-    // decoding: each JPEG decode attempt under way, with the time it was submitted. An attempt is
-    // its own entry: the same picture sent again after a restart is a second attempt.
-    Object.assign(this, { codec, codecString, onDecoded, onFailure, pending: new Map(), decoding: new Map(), waitingKey: true, errors: 0, stuck: 0, submittedAt: 0, outputAt: 0 });
+    // pending: video chunks submitted and not output yet, by timestamp, with their sequence and
+    // submission time. decoding: each JPEG decode attempt under way, with the time it was
+    // submitted; an attempt is its own entry, so the same picture sent again is a second one.
+    Object.assign(this, { codec, codecString, onDecoded, onFailure, pending: new Map(), decoding: new Map(), waitingKey: true, errors: 0, stuck: 0 });
     if (codec !== 'jpeg') this.open();
     this.watchdog = setInterval(() => {
       const now = performance.now();
-      if (codec === 'jpeg') {
-        // Any one picture stuck counts, even after a later or earlier one was shown.
-        if (!this.decoding.size || now - Math.min(...this.decoding.values()) < STUCK_MS) return;
-        this.decoding.clear();
-      } else if (!this.submittedAt || this.outputAt >= this.submittedAt || now - this.submittedAt < STUCK_MS) return;
-      this.submittedAt = 0;
+      // Any one picture outstanding too long counts, whatever was shown before or after it.
+      const outstanding = codec === 'jpeg' ? [...this.decoding.values()] : [...this.pending.values()].map(entry => entry.at);
+      if (!outstanding.length || now - Math.min(...outstanding) < STUCK_MS) return;
+      this.decoding.clear();
       if (++this.stuck > STUCK_LIMIT) { this.onFailure('stuck'); return; }
       if (this.codec !== 'jpeg') { try { this.open(); } catch { this.onFailure('decode'); return; } }
       this.waitingKey = true; this.pending.clear();
       this.onDecoded(undefined, true);
     }, 500);
   }
-  shown() { this.outputAt = performance.now(); if (this.outputAt - (this.healthySince ??= this.outputAt) > 10000) { this.stuck = 0; this.healthySince = this.outputAt; } }
+  shown() { const now = performance.now(); if (now - (this.healthySince ??= now) > 10000) { this.stuck = 0; this.healthySince = now; } }
   open() {
     this.video?.close?.();
     this.video = new VideoDecoder({
-      output: frame => { const seq = this.pending.get(frame.timestamp); this.pending.delete(frame.timestamp); present(frame); this.shown(); stats.decoded++; if (seq !== undefined) this.onDecoded(seq); },
+      output: frame => {
+        const seq = this.pending.get(frame.timestamp)?.seq;
+        // Chunks before this one that produced no picture were dropped by the decoder: not stuck.
+        for (const timestamp of this.pending.keys()) if (timestamp <= frame.timestamp) this.pending.delete(timestamp);
+        present(frame); this.shown(); stats.decoded++; if (seq !== undefined) this.onDecoded(seq);
+      },
       error: () => { this.waitingKey = true; this.pending.clear(); if (++this.errors > 3) this.onFailure('decode'); else { try { this.open(); } catch { this.onFailure('decode'); } this.onDecoded(undefined, true); } },
     });
     this.video.configure({ codec: this.codecString, optimizeForLatency: true });
@@ -223,8 +227,7 @@ class Decoder {
     this.waitingKey = false;
     // The decoder reports frames by timestamp; seq is unique and increasing.
     const timestamp = frame.seq * 1000;
-    this.pending.set(timestamp, frame.seq);
-    if (!this.submittedAt || this.outputAt >= this.submittedAt) this.submittedAt = performance.now();
+    this.pending.set(timestamp, { seq: frame.seq, at: performance.now() });
     try { this.video.decode(new EncodedVideoChunk({ type: frame.key ? 'key' : 'delta', timestamp, data: frame.data })); }
     catch { this.waitingKey = true; this.onDecoded(undefined, true); }
   }

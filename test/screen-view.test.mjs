@@ -429,6 +429,26 @@ test('a stalled JPEG decode that fails after its picture was sent again does not
   assert.ok(await painted(h.frame()), 'the late failure of the first attempt discarded the second');
 });
 
+test('a video picture stuck decoding still trips the watchdog after an earlier one was output', { skip, timeout: 60000 }, async t => {
+  const h = await open(t, { settings: { rtc: false, codecs: ['hevc'] }, backendOptions: { noFrames: true } });
+  await h.mount(showResult);
+  await until(() => h.frame().evaluate(() => globalThis.pokiScreenInternals.decoder()?.codec === 'hevc'));
+  await h.frame().evaluate(() => {
+    // A decoder that outputs only what the test tells it to.
+    globalThis.VideoDecoder = class { constructor(init) { this.init = init; globalThis.fakeDecoder = this; } configure() {} decode() {} close() {} get decodeQueueSize() { return 0; } };
+    const decoder = globalThis.pokiScreenInternals.decoder();
+    decoder.open();
+    const data = new Uint8Array([0, 0, 0, 1, 0x26, 0x01]);
+    void decoder.decode({ seq: 1, key: true, data });
+    void decoder.decode({ seq: 2, key: false, data });
+    // Picture 1 comes out; picture 2 never does, and the phone sends nothing more.
+    const canvas = new OffscreenCanvas(90, 195); canvas.getContext('2d').fillRect(0, 0, 90, 195);
+    globalThis.fakeDecoder.init.output(new VideoFrame(canvas, { timestamp: 1000 }));
+  });
+  await until(() => h.frame().evaluate(() => globalThis.pokiScreenInternals.decoder()?.stuck >= 1), 6000).catch(() => {});
+  assert.ok(await h.frame().evaluate(() => globalThis.pokiScreenInternals.decoder()?.stuck >= 1), 'the stuck picture never triggered a recovery');
+});
+
 test('a picture still waiting to be drawn when the stream stops is not drawn', { skip, timeout: 60000 }, async t => {
   const h = await open(t, { settings: { rtc: false }, backendOptions: { noFrames: true } });
   await h.mount(showResult);
