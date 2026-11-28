@@ -8,7 +8,7 @@ import { createServer } from './tools.mjs';
 import { endpointFile } from './config.mjs';
 import { randomUUID } from 'node:crypto';
 import { version } from './build-info.mjs';
-import { ensureDaemon, runningDaemon, olderRelease } from './daemon-launch.mjs';
+import { ensureDaemon, runningDaemon, olderRelease, sameDaemon } from './daemon-launch.mjs';
 import { approvalMode, stricterApproval } from './human.mjs';
 
 let endpoint;
@@ -42,16 +42,21 @@ const unavailable = () => Object.assign(new Error(autostart
 // the shared daemon runs with: calls are then refused rather than run under the weaker mode.
 const requestedMode = (() => { if (!process.env.POKI_MCP_APPROVAL_MODE?.trim()) return undefined; try { return approvalMode(); } catch { return undefined; } })();
 let modeConflict;
+const sessionTools = new Set(['poki_mcp_status', 'list_devices']);
+const conflictText = conflict => `This client asks for approval mode ${conflict.requested} (POKI_MCP_APPROVAL_MODE), but the running Poki MCP service (pid ${conflict.pid}) uses ${conflict.running}, set by the client that started it.`;
+const refusal = conflict => `${conflictText(conflict)} Device tools are refused so they do not run under the weaker mode. Stop that service (kill ${conflict.pid}); the next call starts one with this client's mode.`;
 // Reaches the daemon named in mcp.json. With start (a tool call only), also starts or replaces it.
 async function connectDaemon({ start }) {
-  const previous = endpoint?.pid;
+  const previous = endpoint;
   if (start && autostart) endpoint = await ensureDaemon();
   else {
     const running = await runningDaemon().catch(() => null);
     if (!running?.info) throw unavailable();
     endpoint = { ...running.endpoint, info: running.info };
   }
-  if (endpoint.pid !== previous) { stream = randomUUID(); sequence = 0; }
+  // A new daemon (a new address or token: a restarted one may get its old pid back, in a container)
+  // starts a new stream.
+  if (!sameDaemon(endpoint, previous)) { stream = randomUUID(); sequence = 0; }
   const daemonMode = endpoint.info?.approval_mode;
   modeConflict = requestedMode && daemonMode && daemonMode !== requestedMode ? { requested: requestedMode, running: daemonMode, pid: endpoint.info.pid, stricter: stricterApproval(requestedMode, daemonMode) } : undefined;
 }
@@ -97,6 +102,8 @@ async function request(path, init) {
   const first = await attempt();
   if (first.response) return first.response;
   await reconnect(Boolean(call), first.retry);
+  // The daemon reached now may run a weaker approval mode than the one this call was checked against.
+  if (call && modeConflict?.stricter && !sessionTools.has(call.params?.name)) throw new Error(refusal(modeConflict));
   const second = await attempt();
   if (second.response) return second.response;
   if (second.status === 401) throw new Error(`The running Poki MCP rejected the token in ${endpointFile}. Stop it; the next call starts it again.`);
@@ -131,8 +138,7 @@ async function remoteClient(start) {
   try { return await (remote ??= connectClient(start)); }
   catch (error) { if (!start) throw error; return await (remote ??= connectClient(true)); }
 }
-const sessionTools = new Set(['poki_mcp_status', 'list_devices']);
-const conflictText = conflict => `This client asks for approval mode ${conflict.requested} (POKI_MCP_APPROVAL_MODE), but the running Poki MCP service (pid ${conflict.pid}) uses ${conflict.running}, set by the client that started it.`;
+
 const server = createServer(async (name, args, extra) => {
   const id = randomUUID();
   const cancel = () => { if (endpoint) void control('/request/cancel', { 'x-poki-request': id }).catch(() => {}); };
@@ -140,7 +146,7 @@ const server = createServer(async (name, args, extra) => {
   try {
     extra.signal.throwIfAborted();
     const client = await remoteClient(true);
-    if (modeConflict?.stricter && !sessionTools.has(name)) return { isError: true, content: [{ type: 'text', text: `${conflictText(modeConflict)} Device tools are refused so they do not run under the weaker mode. Stop that service (kill ${modeConflict.pid}); the next call starts one with this client's mode.` }] };
+    if (modeConflict?.stricter && !sessionTools.has(name)) return { isError: true, content: [{ type: 'text', text: refusal(modeConflict) }] };
     const call = () => client.callTool({ name, arguments: args, _meta: { 'poki/request_id': id } }, { timeout: 3700000, signal: extra.signal });
     let result = await call();
     // A service this kind of shim started, refusing the call before it touched a device because its

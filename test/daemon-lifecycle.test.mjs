@@ -384,12 +384,19 @@ test('a service a shim starts does not take the client\'s secrets', { timeout: 3
   assert.notEqual(entry.token, 'x'.repeat(40), 'the service made its own token');
 });
 
-test('every POKI_ setting the service reads reaches a service a shim starts', async () => {
+// The daemon's own code reads process.env.POKI_*; the native helpers it runs (build/ocr, poki-native,
+// the simulator helper) read the same environment, through helpers that take the name as a string.
+test('every POKI_ setting the service or its native helpers read reaches a service a shim starts', async () => {
   const { readdir } = await import('node:fs/promises');
   const { daemonSettings } = await import('../src/daemon-launch.mjs');
-  const source = join(import.meta.dirname, '../src');
+  const repo = join(import.meta.dirname, '..');
+  const files = async (dir, pattern) => (await readdir(join(repo, dir), { recursive: true })).filter(file => pattern.test(file) && !file.split('/').includes('target')).map(file => join(repo, dir, file));
   const read = new Set();
-  for (const file of await readdir(source)) if (file.endsWith('.mjs')) for (const [, name] of (await readFile(join(source, file), 'utf8')).matchAll(/env\.(POKI_[A-Z0-9_]+)/g)) read.add(name);
+  for (const file of await files('src', /\.mjs$/)) for (const [, name] of (await readFile(file, 'utf8')).matchAll(/env\.(POKI_[A-Z0-9_]+)/g)) read.add(name);
+  const native = await files('native', /\.(rs|swift|m|py)$/);
+  assert.ok(native.some(file => file.endsWith('ocr.rs')), 'the native sources were scanned');
+  for (const file of native) for (const [, name] of (await readFile(file, 'utf8')).matchAll(/"(POKI_[A-Z0-9_]+)"/g)) read.add(name);
+  assert.ok(read.has('POKI_OCR_LANGS') && read.has('POKI_TYPE_KEY_MS'));
   const shimOnly = new Set(['POKI_MCP_TOKEN', 'POKI_PARENT_PID', 'POKI_MCP_SESSION', 'POKI_MCP_HEARTBEAT_MS', 'POKI_MCP_AUTOSTART', 'POKI_DAEMON_ENV']);
   assert.deepEqual([...read].filter(name => !shimOnly.has(name) && !daemonSettings.has(name)), []);
 });
@@ -447,4 +454,91 @@ test('a client asking for a stricter approval mode than the running service gets
   t.after(() => loose.close());
   assert.notEqual((await loose.callTool({ name: 'tap', arguments: { device: 'fixture-phone', x: 10, y: 10 } })).isError, true);
   assert.match((await loose.callTool({ name: 'poki_mcp_status', arguments: {} })).content.at(-1).text, /The service's mode applies\./);
+});
+
+test('POKI_DAEMON_ENV cannot pass the client\'s secrets or the shim\'s own variables', async () => {
+  const { daemonEnvironment } = await import('../src/daemon-launch.mjs');
+  const warnings = [];
+  const env = daemonEnvironment({ PATH: '/bin', POKI_DAEMON_ENV: 'POKI_IPHONE_PASSCODE, OPENAI_API_KEY,POKI_PARENT_PID,POKI_MCP_TOKEN,POKI_MCP_SESSION,FIXTURE_STATE',
+    POKI_IPHONE_PASSCODE: '123456', OPENAI_API_KEY: 'sk-x', POKI_PARENT_PID: '1', POKI_MCP_TOKEN: 'x'.repeat(40), POKI_MCP_SESSION: 's', FIXTURE_STATE: '/f',
+    POKI_OCR_LANGS: 'eng', POKI_TYPE_KEY_MS: '20', TESSDATA_PREFIX: '/tess' }, message => warnings.push(message));
+  assert.deepEqual(Object.keys(env).sort(), ['FIXTURE_STATE', 'PATH', 'POKI_OCR_LANGS', 'POKI_TYPE_KEY_MS', 'TESSDATA_PREFIX']);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /POKI_IPHONE_PASSCODE, OPENAI_API_KEY, POKI_PARENT_PID, POKI_MCP_TOKEN, POKI_MCP_SESSION/);
+});
+
+// A session kept by heartbeats alone (no request open, as when a client's background stream is gone)
+// must not be dropped because the daemon itself was stopped for longer than the heartbeat window:
+// the daemon read no heartbeats meanwhile.
+test('a daemon that was stopped for a while keeps the sessions whose heartbeats it could not read', { timeout: 40000 }, async t => {
+  const f = await fixture(t);
+  const endpoint = await endpointOf(f);
+  const headers = session => ({ Authorization: `Bearer ${endpoint.token}`, 'x-poki-mcp-session': session, 'x-poki-mcp-heartbeat-ms': '300', 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' });
+  const call = async (session, name, args) => {
+    const response = await fetch(endpoint.url, { method: 'POST', headers: headers(session), body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }) });
+    return (await response.json()).result;
+  };
+  const lease = await call('beating', 'acquire_device', { device: 'fixture-phone', ttl_seconds: 60 });
+  assert.notEqual(lease.isError, true, lease.content?.[0]?.text);
+  let beating = true, paused = false;
+  const beats = (async () => { while (beating) { if (!paused) await fetch(new URL('/session/heartbeat', endpoint.url), { method: 'POST', headers: headers('beating') }).then(r => r.body?.cancel(), () => {}); await sleep(300); } })();
+  t.after(async () => { beating = false; await beats; });
+  await sleep(600);
+  // Longer than 3 heartbeats + 1 s. No heartbeat waits in the socket meanwhile (a shim's times out),
+  // so on waking the daemon checks its sessions before it reads the next one.
+  paused = true; await sleep(350);
+  process.kill(f.daemon.pid, 'SIGSTOP');
+  await sleep(3000);
+  process.kill(f.daemon.pid, 'SIGCONT');
+  await sleep(200); paused = false;
+  await sleep(1500);
+  const intruder = await call('intruder', 'acquire_device', { device: 'fixture-phone' });
+  assert.equal(intruder.isError, true, 'the beating session still holds the phone');
+  assert.match(intruder.content[0].text, /occupied/);
+  beating = false; await beats;
+});
+
+// The shim is what keeps its session: it sends a heartbeat while it lives, also with no call made.
+test('a connected shim sends heartbeats', { timeout: 30000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'poki-heartbeat-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const { createServer: mcpServer } = await import('../src/tools.mjs');
+  const { NodeStreamableHTTPServerTransport } = await import('@modelcontextprotocol/node');
+  const { version } = await import('../src/build-info.mjs');
+  const beats = [];
+  const server = createServer(async (req, res) => {
+    if (req.url === '/version') { res.end(JSON.stringify({ version, stale: false, auto: false, pid: process.pid, approval_mode: 'ask', busy: false, busy_reasons: [] })); return; }
+    if (req.url === '/session/heartbeat') { beats.push({ session: req.headers['x-poki-mcp-session'], every: req.headers['x-poki-mcp-heartbeat-ms'] }); res.end('{}'); return; }
+    if (req.url !== '/mcp') { res.end('{}'); return; }
+    const mcp = mcpServer(async () => ({ content: [{ type: 'text', text: '{}' }] }));
+    const transport = new NodeStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    res.once('close', () => void mcp.close());
+    await mcp.connect(transport); await transport.handleRequest(req, res);
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  await mkdir(join(dir, 'state'), { recursive: true });
+  await writeFile(join(dir, 'state/mcp.json'), JSON.stringify({ url: `http://127.0.0.1:${server.address().port}/mcp`, token: 'heartbeat-fixture', enabled: true, pid: process.pid }), { mode: 0o600 });
+  const client = new Client({ name: 'beats', version: '1' });
+  await client.connect(new StdioClientTransport({ command: process.execPath, args: [join(import.meta.dirname, '../src/stdio.mjs')], env: { ...process.env, POKI_MCP_STATE_DIR: join(dir, 'state'), POKI_MCP_SESSION: 'beats', POKI_MCP_HEARTBEAT_MS: '200', POKI_NO_UPDATE_CHECK: '1' } }));
+  t.after(() => client.close());
+  await client.callTool({ name: 'poki_mcp_status', arguments: {} });
+  await until(() => beats.length >= 3, 5000, 'three heartbeats');
+  assert.ok(beats.every(beat => beat.session === 'beats' && beat.every === '200'));
+});
+
+// The stricter-mode check also holds for the call that finds the service replaced by one with a weaker
+// mode: it is refused before it is sent there.
+test('a call that finds the service replaced by one with a weaker approval mode is refused', { timeout: 40000 }, async t => {
+  const f = await fixture(t, { approvalMode: 'ask' });
+  await f.set({ simulatorOnly: true, simulatorBooted: true });
+  assert.match((await status(f.a)).implementation, /Poki MCP/);
+  await f.daemon.stop('SIGTERM');
+  const weaker = spawn(process.execPath, [join(f.dir, 'src/daemon.mjs'), '--port', '0'], { env: { ...f.env, POKI_MCP_APPROVAL_MODE: 'allow' }, stdio: ['ignore', 'pipe', 'inherit'] });
+  t.after(() => weaker.kill('SIGKILL'));
+  await new Promise(resolve => weaker.stdout.on('data', chunk => { if (String(chunk).includes('"ready"')) resolve(); }));
+  const opened = await f.call('open_url', { url: 'https://example.com' });
+  assert.equal(opened.isError, true);
+  assert.match(opened.content[0].text, /approval mode ask.*uses allow/s);
+  assert.equal((await f.events()).filter(event => event.args?.includes('openurl')).length, 0, 'nothing was opened under the weaker mode');
 });

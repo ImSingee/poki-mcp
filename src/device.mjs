@@ -473,11 +473,13 @@ export class DeviceContext {
     try {
       checkWork();
       if (name !== 'poki_mcp_status' && name !== 'stop_recording') await requireCurrentCode();
-      if (approvedTools.has(name)) await this.target();
       // Says on the result who let it run, so an agent can tell a gated call from an ordinary one.
       const mode = approvedTools.has(name) ? approvalMode() : undefined;
+      // Refused before the device is even looked up. batch.mjs refuses these steps first; this is the
+      // layer that holds for any other caller that is not a direct call.
       const refused = direct ? null : hostGated(name, mode);
       if (refused) return { isError: true, ...text({ executed: false, error: refused }), _meta: { stop_reason: 'error' } };
+      if (approvedTools.has(name)) await this.target();
       const approval = mode === undefined ? undefined : { allow: { mode: 'operator-preapproved', approved_by: 'operator' }, host: { mode: 'host', approved_by: 'mcp-client' }, ask: { mode: 'ask-human', approved_by: 'human' } }[mode];
       if (approval?.mode === 'ask-human') {
         const detail = args.path ?? args.project_path ?? args.bundle_id ?? args.url ?? (name === 'set_clipboard' ? `${Buffer.byteLength(args.text)} 字节的文本` : '');
