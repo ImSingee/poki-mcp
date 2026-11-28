@@ -570,3 +570,34 @@ console.log(JSON.stringify(${JSON.stringify(paired)}));
   assert.equal(jobs.get(job.job).state, 'cancelled');
   assert.deepEqual(JSON.parse(await readFile(join(stateDir, 'remote-devices.json'), 'utf8')), [], 'the pairing was not registered again');
 });
+
+test('unpairing waits for a re-registration that pairing_cancel already marked cancelled', { timeout: 30000 }, async t => {
+  const { PairingJobs } = await import('../src/pairing/jobs.mjs');
+  const { completeWirelessPairing } = await import('../src/pairing/wireless.mjs');
+  const { registerRemote, unregisterRemote } = await import('../src/pairing/registry.mjs');
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const dir = await mkdtemp(join(tmpdir(), 'poki-cancel-then-unpair-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const stateDir = join(dir, 'state');
+  await registerRemote('wireless-27', 'Wireless iPhone', '192.0.2.27', 49152, join(dir, 'old.plist'), { stateDir });
+  const native = join(dir, 'pair-host');
+  await writeFile(native, `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
+writeFileSync(process.argv[4], 'record');
+console.log(JSON.stringify(${JSON.stringify(paired)}));
+`, { mode: 0o755 });
+  let registering, finishRegistration;
+  const gate = new Promise(resolve => { finishRegistration = resolve; });
+  const jobs = new PairingJobs({ stateDir, native, complete: async (...args) => { registering = true; await gate; return completeWirelessPairing(...args); }, ensureImage: async () => ({ already: true }) });
+  const { job } = jobs.start();
+  while (!registering) await new Promise(resolve => setTimeout(resolve, 10));
+  // The view's Cancel first: the job is cancelled, its registration still in flight.
+  const cancelling = jobs.cancel(job.job);
+  assert.equal(jobs.get(job.job).state, 'cancelled');
+  // Then unpair_device, before the registration finishes.
+  const unpairing = jobs.cancelForDevice('wireless-27').then(() => unregisterRemote('wireless-27', { stateDir }));
+  setTimeout(finishRegistration, 100);
+  await Promise.all([cancelling, unpairing]);
+  assert.deepEqual(JSON.parse(await readFile(join(stateDir, 'remote-devices.json'), 'utf8')), [], 'the pairing was not registered again');
+});

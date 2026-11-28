@@ -75,7 +75,7 @@ export class PairingJobs {
     Object.defineProperty(job, 'owner', { value: owner, enumerable: false });
     this.jobs.set(id, job);
     this.transition(job, 'starting');
-    job.done = (device ? this.prepare(job, device) : this.run(job)).catch(error => this.fail(job, 'internal', { reason: 'internal_error', error: error.message, action: 'Retry pair_device. If it fails again, check the Poki MCP log.' }));
+    job.done = (device ? this.prepare(job, device) : this.run(job)).catch(error => this.fail(job, 'internal', { reason: 'internal_error', error: error.message, action: 'Retry pair_device. If it fails again, check the Poki MCP log.' })).finally(() => { job.settled = true; });
     return { job: view(job), existing: false };
   }
   transition(job, state, fields = {}) {
@@ -113,8 +113,13 @@ export class PairingJobs {
   // Stops every job working on this device (unpair_device), and waits for a registration in flight
   // to settle, so nothing registers the device again after it is removed. A pairing knows its device
   // from the iPhone's answer (paired_device) before registration sets job.device.
+  // A job already cancelled can still be registering: its state is terminal before its work has
+  // settled, so it is waited for too.
   async cancelForDevice(device) {
-    for (const job of this.running()) if (deviceOf(job) === device) await this.cancel(job.id);
+    for (const job of [...this.jobs.values()].filter(job => deviceOf(job) === device && !job.settled)) {
+      if (!isTerminal(job.state)) await this.cancel(job.id);
+      await job.done;
+    }
   }
   preparing(device) { return this.running().find(job => deviceOf(job) === device); }
 
