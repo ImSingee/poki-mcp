@@ -635,6 +635,12 @@ export class DeviceContext {
 }
 
 const sessionLevel = sessionTools;
+// A device whose developer disk image a pairing job is installing: its helper serves that one request
+// for minutes, so any other call would only wait and time out.
+function refuseWhilePreparing(id) {
+  const job = pairingJobs.preparing(id);
+  if (job?.state === 'mounting_ddi') throw new Error(`${id} is getting its developer disk image from pairing job ${job.id}, which can take a few minutes. Call pairing_status with that job until it is ready, then retry.`);
+}
 const orderWaitMs = 500;
 const blockedAction = device => device.remote ? 'Keep the iPhone unlocked and check its configured address. For Bonjour, keep both devices on the same LAN; for Tailscale, keep both connected and return the iPhone to Wi-Fi to establish a new session.' : 'Keep the device connected and unlocked, trust this Mac, and enable Developer Mode / UI Automation.';
 
@@ -752,7 +758,7 @@ export class Session {
           const info = await nativeRequest(device, { op: 'device_info' });
           // An older helper refuses ddi_status (outcome not_sent); then nothing is reported.
           const ddi = await nativeRequest(device, { op: 'ddi_status', services_only: true }, { timeoutMs: 10000 }).catch(() => undefined);
-          const developer = typeof ddi?.display_service === 'boolean' ? { display_service: ddi.display_service, ddi: ddi.ddi ?? null,
+          const developer = typeof ddi?.display_service === 'boolean' ? { display_service: ddi.display_service,
             ...(ddi.display_service ? {} : { action: `Touch and text input need displayservice, which the developer disk image provides, and this iPhone offers none now. Call pair_device with device ${JSON.stringify(device.id)} to install it over Wi-Fi.` }) } : {};
           return { ...device, remote: undefined, name: info.properties.DeviceName ?? device.name, model: info.properties.ProductType, osVersion: info.properties.ProductVersion, ...occupancy, readiness: developer.display_service === false ? 'connected; developer services missing' : 'remote services connected', ...developer };
         }
@@ -802,6 +808,7 @@ export class Session {
       const named = args.devices;
       if (!Array.isArray(named) || !named.length) throw new Error('run_code needs devices: the ids from list_devices the script may use.');
       const ids = await Promise.all(named.map(query => this.resolveDevice(String(query))));
+      for (const id of ids) refuseWhilePreparing(id);
       // Checked before the sandbox starts, so an outdated service refuses the whole script the way it
       // refuses a direct call (with the stale_code marker the stdio shim acts on).
       return { keys: [...new Set(ids)], run: async () => { await requireCurrentCode(); return runCode(this.scriptContext(named, ids), args); } };
@@ -814,6 +821,7 @@ export class Session {
     const query = name === 'start_simulator' ? args.simulator ?? args.device : args.device;
     if (typeof query !== 'string' || !query) throw new Error(`${name} needs device: an id from list_devices.`);
     const id = await this.resolveDevice(query);
+    refuseWhilePreparing(id);
     return { keys: [id], run: () => this.context(id).dispatch(name, args, { direct: true }) };
   }
   // run_code's calls each name a device, which must be one of the devices it named (and holds).
@@ -887,13 +895,21 @@ export class Session {
     if (matches.length > 1) throw new Error(`Several paired devices match ${JSON.stringify(query)}: ${matches.map(d => `${d.name} (${d.id})`).join(', ')}. Pass the id.`);
     const [target] = matches;
     if (this.coordinator.unavailable.has(target.id)) throw new Error(this.coordinator.unavailable.get(target.id));
+    // An approved tool like uninstall_app: in ask mode a person on this computer confirms it; in host
+    // mode the MCP client did (its annotations mark it destructive); in allow mode nobody is asked.
+    const mode = approvalMode();
+    const approval = { allow: { mode: 'operator-preapproved', approved_by: 'operator' }, host: { mode: 'host', approved_by: 'mcp-client' }, ask: { mode: 'ask-human', approved_by: 'human' } }[mode];
+    if (mode === 'ask') {
+      const answer = await askHuman(`是否允许移除无线配对？\n设备：${target.name} (${target.id})\n这会停止所有会话在这台 iPhone 上的操作，并删除本机保存的配对。`, 120);
+      if (!answer.completed) return { isError: true, ...text({ ...answer, executed: false }), _meta: { stop_reason: answer.status === 'timeout' ? 'timeout' : 'cancelled' } };
+    }
     // From here until the pairing is deleted, no session can resolve, lease or act on the device, so
     // nothing can start on it after the cleanup below.
     this.coordinator.unavailable.set(target.id, `${target.name} (${target.id}) is being unpaired. Call list_devices once it finishes.`);
-    try { return await this.removePairing(target); }
+    try { return await this.removePairing(target, approval); }
     finally { this.coordinator.unavailable.delete(target.id); }
   }
-  async removePairing(target) {
+  async removePairing(target, approval) {
     await pairingJobs.cancelForDevice(target.id);
     // Every session's accepted work, recordings, locations and leases on it end, and their cached
     // state for it goes, so the id no longer resolves anywhere.
@@ -909,7 +925,7 @@ export class Session {
     await unregisterRemote(target.id);
     for (const session of sessions) session.contexts.delete(target.id);
     const phoneCleanup = 'The iPhone may still list this computer as paired. To remove it there too, look in Settings › Privacy & Security › Developer Mode, or in the Developer settings for Clear Trusted Computers (which removes every trusted computer), depending on what your iOS version offers.';
-    return structured({ unpaired: true, device: { id: target.id, name: target.name }, cancelled_operations: cancelled, helper, removed: ['remote-devices.json entry', `remote/${target.id}/ (configuration and pairing record)`], phone_cleanup: phoneCleanup },
+    return structured({ unpaired: true, device: { id: target.id, name: target.name }, approval, cancelled_operations: cancelled, helper, removed: ['remote-devices.json entry', `remote/${target.id}/ (configuration and pairing record)`], phone_cleanup: phoneCleanup },
       `Removed ${target.name} (${target.id}) from this computer. It no longer appears in list_devices. ${phoneCleanup}`);
   }
 }

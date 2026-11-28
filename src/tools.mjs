@@ -26,6 +26,8 @@ export const approvalHints = {
   download_app_container: { destructiveHint: false, openWorldHint: true },
   get_clipboard: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   set_clipboard: { destructiveHint: true, openWorldHint: true },
+  // Deletes a saved pairing and stops every session's work on that phone.
+  unpair_device: { destructiveHint: true, openWorldHint: false },
 };
 export const approvedTools = new Set(Object.keys(approvalHints));
 // In host mode only the client approves, and it sees only the tool it is asked about. A gated tool

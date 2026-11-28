@@ -72,3 +72,8 @@ export function unregisterRemote(id, { stateDir = defaultStateDir } = {}) {
     return removed;
   });
 }
+
+// The registered phones as RemotePairing targets (the shape src/remote.mjs uses).
+export async function registeredTargets({ stateDir = defaultStateDir } = {}) {
+  return (await readRegistry(stateDir)).map(entry => ({ id: entry.id, name: entry.name ?? entry.id, kind: 'physical', connection: 'RemotePairing', remote: entry.config_path }));
+}

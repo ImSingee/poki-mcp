@@ -11,7 +11,8 @@ import { stateDir as defaultStateDir, pokiNative } from '../config.mjs';
 import { startPairHost, stagePairing, completeWirelessPairing, discardStaging, defaultHostName, advertisingInstruction } from './wireless.mjs';
 import { ensureDeveloperImage } from './ddi.mjs';
 import { work } from '../work.mjs';
-import { nativeRequest as helperRequest } from '../remote.mjs';
+import { nativeRequest as helperRequest, disconnectRemote } from '../remote.mjs';
+import { unregisterRemote, registeredTargets } from './registry.mjs';
 
 // A helper request on behalf of a job, stopped by the job's own signal (no tool call owns it).
 const jobRequest = (target, request, options, signal) => work.run({ signal, timings: [] }, () => helperRequest(target, request, options));
@@ -35,11 +36,13 @@ const instructions = {
 export class PairingJobs {
   jobs = new Map();
   // now: the clock for start, end and retention times (tests pass their own).
-  constructor({ stateDir = defaultStateDir, native = pokiNative, limitMs = pairingLimitMs, retainMs = retentionMs, nativeRequest = jobRequest, inventoryChanged = () => {}, ensureImage = ensureDeveloperImage, now = Date.now } = {}) {
-    Object.assign(this, { stateDir, native, limitMs, retainMs, nativeRequest, inventoryChanged, ensureImage, now });
+  constructor({ stateDir = defaultStateDir, native = pokiNative, limitMs = pairingLimitMs, retainMs = retentionMs, nativeRequest = jobRequest, inventoryChanged = () => {}, ensureImage = ensureDeveloperImage, now = Date.now, complete = completeWirelessPairing } = {}) {
+    Object.assign(this, { stateDir, native, limitMs, retainMs, nativeRequest, inventoryChanged, ensureImage, now, complete });
   }
-  active() { return [...this.jobs.values()].find(job => !isTerminal(job.state)); }
-  busy() { return Boolean(this.active()); }
+  running() { return [...this.jobs.values()].filter(job => !isTerminal(job.state)); }
+  // The pairing that owns this host's Bonjour name and listener: one at a time.
+  pairing() { return this.running().find(job => job.kind !== 'prepare'); }
+  busy() { return this.running().length > 0; }
   prune(now = this.now()) {
     for (const [id, job] of this.jobs) if (isTerminal(job.state) && now - job.ended_ms >= this.retainMs) this.jobs.delete(id);
   }
@@ -51,15 +54,16 @@ export class PairingJobs {
   }
   list() { this.prune(); return [...this.jobs.values()].map(view); }
   host() {
-    const job = this.active();
+    const job = this.pairing();
     return { name: job?.host_name ?? defaultHostName(), advertising: Boolean(job && ['advertising', 'pin'].includes(job.state)) };
   }
-  // Starts a job, or returns the one already running on this host.
-  // With `device` (a registered RemotePairing target), only prepares that phone again: after a
-  // phone that no longer offers displayservice needs its developer disk image again, not a new pairing.
+  // Starts a pairing, or returns the one already running on this host (there is one Bonjour name).
+  // With `device` (a registered RemotePairing target), only prepares that phone again: a phone that
+  // no longer offers displayservice needs its developer disk image, not a new pairing. That runs
+  // beside a pairing of another phone, and returns the job already working on the same phone.
   start({ name, device } = {}) {
     this.prune();
-    const running = this.active();
+    const running = device ? this.preparing(device.id) : this.pairing();
     if (running) return { job: view(running), existing: true };
     const id = `pair-${randomBytes(6).toString('hex')}`;
     const job = { id, state: 'starting', host_name: name || defaultHostName(), started_at: new Date(this.now()).toISOString(), started_ms: this.now(), expires_ms: this.now() + this.limitMs, history: [] };
@@ -81,14 +85,20 @@ export class PairingJobs {
     return true;
   }
   fail(job, stage, failure) { return this.transition(job, 'failed', { stage, ...failure }); }
-  // Stops a running job: the helper withdraws its Bonjour service and nothing is registered.
+  // Stops a running job: the helper withdraws its Bonjour service. A pairing the iPhone already
+  // accepted (paired, registering) is removed again once its registration finishes, unless the phone
+  // was registered before this job; the reply says which.
   async cancel(id) {
     const job = this.get(id);
     if (isTerminal(job.state)) return view(job);
     const child = job.child;
-    // A phone already registered stays registered: cancelling only stops the remaining preparation.
-    this.transition(job, 'cancelled', job.device ? { note: 'The iPhone was already paired and stays paired; developer-service preparation stopped. Use unpair_device to remove it.' } : {});
+    const saving = ['paired', 'registering'].includes(job.state);
+    const note = job.device ? 'The iPhone was already paired and stays paired; developer-service preparation stopped. Use unpair_device to remove it.'
+      : saving ? 'The iPhone had already accepted the pairing; it is being removed from this computer again.' : undefined;
+    this.transition(job, 'cancelled', note ? { note } : {});
     if (child && child.exitCode === null && child.signalCode === null) await stopChild(child);
+    // The registration in flight finishes first, then run() undoes it (and corrects the note).
+    if (saving) await Promise.race([job.done, new Promise(resolve => setTimeout(resolve, 10000).unref?.())]);
     return view(job);
   }
   // Stops every job (daemon shutdown).
@@ -125,9 +135,20 @@ export class PairingJobs {
       if (isTerminal(job.state)) return;
       this.transition(job, 'paired', { pin: undefined, paired_device: result.device });
       this.transition(job, 'registering');
+      // A phone paired again (a new address, or its trust was cleared) may still have a helper
+      // running from before, holding the old address and record: stop it, so the next call starts
+      // one with the new configuration.
+      const previous = (await registeredTargets({ stateDir: this.stateDir }).catch(() => [])).find(d => d.id === result.device?.udid);
+      if (previous) await disconnectRemote(previous).catch(() => {});
       let device;
-      try { device = await completeWirelessPairing(result, { pairing: staging.pairing, stateDir: this.stateDir }); }
+      try { device = await this.complete(result, { pairing: staging.pairing, stateDir: this.stateDir }); }
       catch (error) { return this.fail(job, 'registering', { reason: 'registration_failed', error: error.message, action: 'Pass the iPhone\'s .local name or LAN address: run node bin/prepare-remote.mjs --wireless HOST on this computer.' }); }
+      if (job.state === 'cancelled') {
+        if (previous) job.note = 'The iPhone had already accepted the pairing. It was registered on this computer before this job, so it stays registered with the new pairing. Use unpair_device to remove it.';
+        else { await unregisterRemote(device.id, { stateDir: this.stateDir }).catch(() => {}); job.note = 'The iPhone had already accepted the pairing; it was removed from this computer again.'; }
+        this.inventoryChanged(device.id);
+        return;
+      }
       job.device = { id: device.id, name: device.name, host: device.host, model: device.model };
       this.inventoryChanged(device.id);
       if (isTerminal(job.state)) return;
@@ -155,7 +176,7 @@ export class PairingJobs {
     }
     try {
       const prepared = await this.ensureImage(target.id, (request, options) => this.nativeRequest(target, request, options, job.controller.signal), { signal: job.controller.signal });
-      this.transition(job, 'ready', { ddi: { ready: true, already_mounted: prepared.already, ...(prepared.source ? { source: prepared.source } : {}) } });
+      this.transition(job, 'ready', { ddi: { ready: true, already_mounted: prepared.already, ...(prepared.ddi?.version ? { version: prepared.ddi.version } : {}), ...(prepared.source ? { source: prepared.source } : {}) } });
     } catch (error) {
       if (job.state === 'cancelled') return;
       const failure = error.failure ?? { reason: 'ddi_tunnel_install_failed', error: error.message, action: `Keep the iPhone unlocked on the same network and call pair_device with device ${JSON.stringify(target.id)} to try again, or connect it by USB once and run node bin/prepare-device.mjs ${target.id}.` };

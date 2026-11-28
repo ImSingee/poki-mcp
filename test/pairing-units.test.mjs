@@ -216,5 +216,40 @@ test('an image listed as installed without displayservice is installed again onc
   };
   const prepared = await ensureDeveloperImage('p', request, { resolve: async () => ({ source: 'test', directory: '/x' }) });
   assert.equal(prepared.ready, true);
-  assert.deepEqual(requests.map(r => [r.op, Boolean(r.force)]), [['ddi_status', false], ['install_ddi', false], ['install_ddi', true]]);
+  assert.deepEqual(requests.map(r => [r.op, Boolean(r.force)]), [['ddi_status', false], ['reconnect', false], ['install_ddi', false], ['install_ddi', true]]);
+});
+
+test('a DDI installation holds the device\'s input lock, and fails as device_busy when it cannot get it', async t => {
+  const dir = await scratch(t);
+  const events = [];
+  const target = { id: 'phone-lock', name: 'Phone', remote: join(dir, 'config.json') };
+  const lock = { acquire: async (keys, holder) => { events.push(['acquire', keys, holder.tool]); return () => events.push(['release']); } };
+  const jobs = new PairingJobs({ stateDir: join(dir, 'state'), ensureImage: async () => { events.push(['install']); return { already: false }; } });
+  jobs.coordinator = { inputLock: lock };
+  const { job } = jobs.start({ device: target });
+  await jobs.jobs.get(job.job).done;
+  assert.equal(jobs.get(job.job).state, 'ready');
+  assert.deepEqual(events, [['acquire', ['phone-lock'], 'pair_device'], ['install'], ['release']]);
+
+  jobs.coordinator = { inputLock: { acquire: async () => { throw new Error('Device phone-lock is busy: tap by session other'); } } };
+  const busy = jobs.start({ device: { ...target, id: 'phone-busy' } }).job;
+  await jobs.jobs.get(busy.job).done;
+  const failed = jobs.get(busy.job);
+  assert.equal(failed.state, 'failed');
+  assert.equal(failed.reason, 'device_busy');
+  assert.match(failed.action, /Another session is using phone-busy/);
+});
+
+test('a zombie process counts as gone', { skip: process.platform === 'win32' }, async () => {
+  const { processGone } = await import('../src/remote.mjs');
+  // The python parent never waits for its child, so the child stays a zombie while the parent runs.
+  const parent = spawn('python3', ['-c', 'import os,sys,time\npid=os.fork()\nif pid==0: os._exit(0)\nprint(pid, flush=True)\ntime.sleep(30)'], { stdio: ['ignore', 'pipe', 'ignore'] });
+  const [line] = await once(createInterface({ input: parent.stdout }), 'line');
+  const zombie = Number(line);
+  try {
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.doesNotThrow(() => process.kill(zombie, 0), 'kill(0) still finds the zombie');
+    assert.equal(processGone(zombie), true);
+    assert.equal(processGone(process.pid), false);
+  } finally { parent.kill('SIGKILL'); }
 });
