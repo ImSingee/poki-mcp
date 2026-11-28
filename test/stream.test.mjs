@@ -198,14 +198,24 @@ test('the H.264 track is transcoded only while it has a viewer, and its encoder 
   const hevc = await screens.open(target, { codecs: ['hevc'] });
   for (const frame of frames.slice(0, 4)) native.subscriptions[0].send(frame);
   assert.equal(children.length, 0, 'an encoder ran with no H.264 viewer');
+  const asked = native.keyframes.length;
   const viewer = await screens.open(target, { codecs: ['h264'] });
   assert.equal(children.length, 1);
-  // The encoder starts on the cached HEVC chain, so the still screen still gets a picture.
+  // The encoder starts at the newest cached key frame alone, so the still screen gets a picture,
+  // and the frames cached after it are not replayed as new pictures: the phone is asked for a key
+  // frame to go on from.
   let received = [];
-  const end = performance.now() + 10000;
-  while (received.length < 4 && performance.now() < end) received.push(...(await viewer.read({ ack: received.at(-1)?.seq, wait_ms: 500 })).frames);
-  assert.ok(received.length >= 4, `only ${received.length} transcoded frames`);
-  assert.equal(received[0].key, true);
+  const read = async (count, ms) => { const end = performance.now() + ms; while (received.length < count && performance.now() < end) received.push(...(await viewer.read({ ack: received.at(-1)?.seq, wait_ms: 500 })).frames); };
+  await read(1, 10000);
+  assert.equal(received[0]?.key, true, 'no picture from the cached key frame');
+  await read(2, 1500);
+  assert.equal(received.length, 1, `the cached chain was replayed: ${received.length} pictures from one key frame and three deltas`);
+  assert.ok(native.keyframes.length > asked, 'the phone was not asked for a key frame to go on from');
+  // The phone's next key frame and the frames after it come through.
+  for (const frame of frames.slice(4)) native.subscriptions[0].send(frame);
+  await read(5, 10000);
+  assert.equal(received.length, 5, `${received.length} pictures after the phone's key frame`);
+  assert.equal(received[1].key, true);
   const info = describe('h264', Buffer.from(received[0].config, 'base64'));
   assert.match(info.codec, /^avc1\.42/);
   assert.deepEqual([info.width, info.height], [180, 390]);
@@ -218,22 +228,27 @@ test('the H.264 track is transcoded only while it has a viewer, and its encoder 
   assert.equal(native.subscriptions[0].open, false);
 });
 
-test('the JPEG track transcodes at most ten pictures a second and keeps only the latest', { skip: !(await ffmpegAvailable()) && 'ffmpeg with libx264 and mjpeg is not installed' }, async t => {
+test('the JPEG track keeps only the latest picture, and a still screen\'s picture comes out', { skip: !(await ffmpegAvailable()) && 'ffmpeg with libx264 and mjpeg is not installed' }, async t => {
   const native = fakeNative();
   const screens = new Screens(native);
   t.after(() => screens.closeAll());
   const viewer = await screens.open(target, { codecs: ['jpeg'] });
   assert.equal(viewer.codec, 'jpeg');
+  // A still screen: one key frame and nothing after it (the phone sends frames only on change).
+  // ffmpeg's fps filter held such a picture back for good.
   const frames = sampleFrames();
-  for (const [index, frame] of frames.entries()) { native.subscriptions[0].send(frame); if (index < frames.length - 1) await delay(40); }
-  let picture;
-  const end = performance.now() + 10000;
-  while (!picture && performance.now() < end) picture = (await viewer.read({ wait_ms: 500 })).frames[0];
-  assert.ok(picture, 'no JPEG came out');
-  const data = Buffer.from(picture.data, 'base64');
-  assert.deepEqual([...data.subarray(0, 2)], [0xff, 0xd8]);
+  native.subscriptions[0].send(frames[0]);
+  const read = async () => { const end = performance.now() + 10000; let picture; while (!picture && performance.now() < end) picture = (await viewer.read({ ack: viewer.flow.sent, wait_ms: 500 })).frames[0]; return picture; };
+  const still = await read();
+  assert.ok(still, 'a still screen\'s picture never came out');
+  assert.deepEqual([...Buffer.from(still.data, 'base64').subarray(0, 2)], [0xff, 0xd8]);
+  // A burst arriving at once (the cached frames, a busy machine): the last picture comes out too.
+  for (const frame of frames.slice(1)) native.subscriptions[0].send(frame);
+  await until(() => viewer.track.latest >= 8, 10000).catch(() => {});
+  assert.equal(viewer.track.latest, 8, `${viewer.track.latest} of 8 pictures came out of the encoder`);
   assert.ok(viewer.track.frames.length <= 1);
 });
+
 
 test('a device takes at most eight viewers', async t => {
   const native = fakeNative();
@@ -394,18 +409,20 @@ test('input dropped behind a backed-up encoder asks the phone for a key frame', 
   assert.equal(native.keyframes.length, before + 1, 'the encoder dropped input and nobody asked for a key frame to resume on');
 });
 
-test('an encoder that caught up resumes on the cached chain, even when the key frame asked for was dropped too', async t => {
-  const native = fakeNative();
-  // An encoder that reads nothing until the test drains it; every write is recorded.
-  let stdin;
-  const writes = [];
-  const spawnFake = () => {
-    stdin = new PassThrough({ highWaterMark: 1024 });
-    const write = stdin.write.bind(stdin);
-    stdin.write = chunk => { writes.push(chunk.length); return write(chunk); };
-    return Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), stdin, kill() {} });
+// An encoder that reads nothing until the test drains it; every write is recorded.
+function stalledEncoder() {
+  const encoder = { writes: [] };
+  encoder.spawn = () => {
+    encoder.stdin = new PassThrough({ highWaterMark: 1024 });
+    const write = encoder.stdin.write.bind(encoder.stdin);
+    encoder.stdin.write = chunk => { encoder.writes.push(chunk.length); return write(chunk); };
+    return Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), stdin: encoder.stdin, kill() {} });
   };
-  const screens = new Screens({ ...native, spawn: spawnFake, ffmpeg: async () => true });
+  return encoder;
+}
+async function backedUp(t, encoder) {
+  const native = fakeNative();
+  const screens = new Screens({ ...native, spawn: encoder.spawn, ffmpeg: async () => true });
   t.after(() => screens.closeAll());
   await screens.open(target, { codecs: ['hevc'] });
   const [key] = sampleFrames();
@@ -415,15 +432,35 @@ test('an encoder that caught up resumes on the cached chain, even when the key f
   assert.equal(native.keyframes.length, 1);
   // The key frame the phone sends in answer arrives while the encoder is still backed up.
   native.subscriptions[0].send({ ...key, seq: 5 });
-  native.subscriptions[0].send({ ...key, seq: 6, key: false, data: Buffer.alloc(100, 2) });
-  writes.length = 0;
+  return { native, key };
+}
+
+test('an encoder that caught up on a still screen resumes at the cached key frame the phone sent meanwhile', async t => {
+  const encoder = stalledEncoder();
+  const { key } = await backedUp(t, encoder);
+  encoder.writes.length = 0;
   // The encoder takes its input; nothing new comes from the (still) phone.
-  stdin.resume();
-  await until(() => writes.length > 0, 2000);
-  assert.ok(writes.includes(key.data.length), 'the encoder was not given the cached key frame');
-  native.subscriptions[0].send({ ...key, seq: 7, key: false, data: Buffer.alloc(100, 3) });
-  assert.ok(writes.includes(100), 'the frames after it were not fed');
+  encoder.stdin.resume();
+  await until(() => encoder.writes.length > 0, 2000);
+  assert.ok(encoder.writes.includes(key.data.length), 'the encoder was not given the cached key frame');
 });
+
+test('an encoder that caught up on a moving screen waits for a new key frame instead of replaying the cached chain', async t => {
+  const encoder = stalledEncoder();
+  const { native, key } = await backedUp(t, encoder);
+  native.subscriptions[0].send({ ...key, seq: 6, key: false, data: Buffer.alloc(100, 2) });
+  encoder.writes.length = 0;
+  encoder.stdin.resume();
+  // The phone is asked again (the earlier request's answer was dropped) ...
+  await until(() => native.keyframes.length >= 2, 2500);
+  assert.deepEqual(encoder.writes, [], 'the cached key frame and the frames after it were replayed');
+  // ... and its next key frame starts the encoder again.
+  native.subscriptions[0].send({ ...key, seq: 7 });
+  assert.ok(encoder.writes.includes(key.data.length), 'the new key frame was not fed');
+  native.subscriptions[0].send({ ...key, seq: 8, key: false, data: Buffer.alloc(100, 3) });
+  assert.ok(encoder.writes.includes(100), 'the frames after it were not fed');
+});
+
 
 test('a request for a key frame within a second of the last one is deferred, not dropped', async t => {
   const native = fakeNative();
@@ -504,4 +541,81 @@ test('a screen_open cancelled before its cold start begins starts nothing and le
   await delay(50);
   assert.equal(subscribed, 0, 'a cancelled open started the phone\'s stream');
   assert.deepEqual(unhandled, [], 'a rejected startup nobody awaited would end the daemon');
+});
+
+test('an encoder that keeps failing is closed, so the frames that keep coming start no more ffmpeg', async t => {
+  const native = fakeNative();
+  let spawned = 0;
+  // An ffmpeg that exits at once.
+  const spawnDead = () => { spawned++; const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), stdin: new PassThrough(), kill() {} }); setImmediate(() => child.emit('close', 1)); return child; };
+  const screens = new Screens({ ...native, spawn: spawnDead, ffmpeg: async () => true });
+  t.after(() => screens.closeAll());
+  const viewer = await screens.open(target, { codecs: ['jpeg'] });
+  const frames = sampleFrames();
+  let seq = 0;
+  // Each exit restarts it on the next key frame, until it is given up.
+  const end = performance.now() + 10000;
+  while (!viewer.hub.failed.has('jpeg') && performance.now() < end) { native.subscriptions[0].send({ ...frames[0], seq: ++seq }); await delay(100); }
+  assert.ok(viewer.hub.failed.has('jpeg'), 'the failing encoder was never given up');
+  const before = spawned;
+  for (let i = 0; i < 5; i++) { native.subscriptions[0].send({ ...frames[0], seq: ++seq }); await delay(20); }
+  assert.equal(spawned, before, `${spawned - before} more ffmpeg processes started for a failed encoder`);
+});
+
+test('an ffmpeg without libx264 still serves JPEG', async t => {
+  const screens = new Screens({ ...fakeNative(), ffmpeg: async () => ['jpeg'] });
+  t.after(() => screens.closeAll());
+  assert.deepEqual(await screens.codecs(), ['hevc', 'jpeg']);
+  const viewer = await screens.open(target, { codecs: ['h264', 'jpeg'] });
+  assert.equal(viewer.codec, 'jpeg');
+  await assert.rejects(screens.open(target, { codecs: ['h264'] }), /serves hevc and jpeg: H\.264 needs ffmpeg with libx264/);
+});
+
+test('a dropped subscription is not taken again while the device is unavailable', async t => {
+  const native = fakeNative();
+  const screens = new Screens({ ...native, ffmpeg: async () => false });
+  let unavailable = 'fixture-phone is being paired again.';
+  screens.attach({ unavailable: () => unavailable, activity: () => 0 });
+  t.after(() => screens.closeAll());
+  await screens.open(target, { codecs: ['hevc'] });
+  native.subscriptions[0].end();
+  await delay(2500);
+  assert.equal(native.subscriptions.length, 1, 'a subscription was taken while the phone was being paired again');
+  unavailable = undefined;
+  await until(() => native.subscriptions.length === 2, 8000);
+});
+
+test('an idle stream is paused, unless a tool is using the device', async t => {
+  process.env.POKI_SCREEN_IDLE_MINUTES = String(300 / 60000);
+  t.after(() => { delete process.env.POKI_SCREEN_IDLE_MINUTES; });
+  const native = fakeNative();
+  const screens = new Screens({ ...native, ffmpeg: async () => false, ttlMs: 60000 });
+  let active = 0;
+  screens.attach({ unavailable: () => undefined, activity: () => active });
+  t.after(() => screens.closeAll());
+  const watched = await screens.open(target, { codecs: ['hevc'] });
+  // The agent keeps working on the phone: the panel watching it stays.
+  const working = setInterval(() => { active = performance.now(); }, 50);
+  await delay(1200);
+  clearInterval(working);
+  assert.ok(!watched.closed, 'a panel watching the agent work was paused');
+  await until(() => watched.closed, 3000);
+  assert.equal(watched.ended?.reason, 'idle');
+  assert.equal(native.subscriptions[0].open, false, 'the paused stream kept the phone\'s camera and microphone');
+});
+
+test('a device disconnected on purpose opens again only with reconnect, or once a tool used it since', async t => {
+  const screens = new Screens({ ...fakeNative(), ffmpeg: async () => false });
+  let active = 0;
+  screens.attach({ unavailable: () => undefined, activity: () => active });
+  t.after(() => screens.closeAll());
+  await screens.open(target, { codecs: ['hevc'] });
+  screens.closeDevice(target.id);
+  await assert.rejects(screens.open(target, { codecs: ['hevc'] }), error => error.reason === 'device_disconnected');
+  const viewer = await screens.open(target, { codecs: ['hevc'], reconnect: true });
+  viewer.close();
+  screens.closeDevice(target.id);
+  await delay(5);
+  active = performance.now();
+  await screens.open(target, { codecs: ['hevc'] });
 });

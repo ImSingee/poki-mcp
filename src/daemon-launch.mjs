@@ -154,11 +154,11 @@ export const daemonSettings = new Set(['POKI_ALLOW_PLAINTEXT_BIND', 'POKI_BIND_H
   'POKI_TLS_CERT', 'POKI_TLS_KEY', 'POKI_TOOL_PROFILE', 'POKI_WDA_URL',
   // Read by build/ocr and poki-native.
   'POKI_OCR_LANGS', 'POKI_OCR_PSM', 'POKI_OCR_UPSCALE', 'POKI_TYPE_KEY_MS',
-  // The live screen (src/stream). POKI_TURN_SECRET and POKI_TURN_PASSWORD are the daemon's own: it
-  // derives (or passes) the TURN credentials it hands to a screen view, as a TURN server's shared
-  // secret is meant to be used. They are named here, never taken through POKI_DAEMON_ENV.
-  'POKI_SCREEN_READ_MAX_BYTES', 'POKI_SCREEN_READ_MAX_FRAMES', 'POKI_SCREEN_H264_BITRATE', 'POKI_SCREEN_RTC',
-  'POKI_STUN_URL', 'POKI_TURN_URL', 'POKI_TURN_SECRET', 'POKI_TURN_USERNAME', 'POKI_TURN_PASSWORD']);
+  // The live screen (src/stream). POKI_TURN_SECRET is the daemon's own: it derives the expiring TURN
+  // credentials it hands to a screen view, as a TURN server's shared secret is meant to be used. It
+  // is named here, never taken through POKI_DAEMON_ENV.
+  'POKI_SCREEN_READ_MAX_BYTES', 'POKI_SCREEN_READ_MAX_FRAMES', 'POKI_SCREEN_H264_BITRATE', 'POKI_SCREEN_RTC', 'POKI_SCREEN_IDLE_MINUTES',
+  'POKI_STUN_URL', 'POKI_RTC_ADDRESSES', 'POKI_TURN_URL', 'POKI_TURN_SECRET', 'POKI_TURN_TTL_SECONDS']);
 // Never passed, even when POKI_DAEMON_ENV names them: the client's secrets and the shim's own
 // variables (POKI_PARENT_PID would make the detached daemon stop on its parent check).
 const shimOnly = new Set(['POKI_IPHONE_PASSCODE', 'POKI_MCP_TOKEN', 'POKI_PARENT_PID', 'POKI_MCP_SESSION', 'POKI_DAEMON_ENV', 'POKI_MCP_AUTOSTART', 'POKI_MCP_HEARTBEAT_MS']);

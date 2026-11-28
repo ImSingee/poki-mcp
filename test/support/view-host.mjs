@@ -64,6 +64,8 @@ if (options.stub) {
   pokiRoot = stubDir;
   env = { ...env, HOME: stubDir, PATH: `${join(stubDir, 'bin')}:${process.env.PATH}`, POKI_MCP_STATE_DIR: join(stubDir, 'state'), POKI_NO_UPDATE_CHECK: '1',
     POKI_DDI_DIR: join(stubDir, 'ddi'), FIXTURE_STATE: join(stubDir, 'fixture.json'), FIXTURE_LOG: join(stubDir, 'commands.jsonl'), POKI_MCP_APPROVAL_MODE: 'host',
+    // No STUN server: WebRTC uses this computer's host candidates, with no public server involved.
+    POKI_STUN_URL: '',
     // The service the stdio server starts gets only the variables it needs; the stand-in needs these.
     POKI_DAEMON_ENV: 'FIXTURE_STATE,FIXTURE_LOG' };
 }

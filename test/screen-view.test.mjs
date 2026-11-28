@@ -17,6 +17,10 @@ import { runScreenTool } from '../src/stream/tools.mjs';
 import { ffmpegAvailable } from '../src/stream/transcode.mjs';
 import { sampleFrames, fakeNative } from './stream-fixture.mjs';
 
+// Hermetic WebRTC: no STUN server, so a peer gathers loopback host candidates only and no test
+// depends on reaching a public server (POKI_STUN_URL is read when each answer is made).
+process.env.POKI_STUN_URL = '';
+
 let chromium;
 try { ({ chromium } = await import('playwright')); } catch {}
 // POKI_VIEW_BROWSER=chromium runs in Playwright's Chromium even where Chrome is installed.
@@ -57,7 +61,9 @@ const hostPage = `<!doctype html><html><head><meta charset="utf-8"><style>body{m
 // Poki's stream tools over a stand-in phone that sends the sample stream in a loop, 10 frames a second.
 function backend({ rtcConfig, rtcConfigDelayMs = 0, noFrames = false, busy = false, garbleHevc = false, rtcOffer, openCodecString, inputDelayMs = 0, onlyFirstKey = false, delayFirstFramesMs = 0, firstPhoneOnly = false, garbleJpegAfterFirst = false, loseReads = 0, devices = [{ id: 'fixture-phone', name: 'Lab iPhone', kind: 'physical', connection: 'RemotePairing' }] } = {}) {
   const native = fakeNative();
-  const screens = new Screens({ subscribe: native.subscribe, keyframe: native.keyframe });
+  // sourceFailing: the phone cannot be reached (Wi-Fi lost), so subscribing again fails.
+  let sourceFailing = false;
+  const screens = new Screens({ subscribe: (...args) => sourceFailing ? Promise.reject(new Error('Wi-Fi lost')) : native.subscribe(...args), keyframe: native.keyframe });
   const session = { coordinator: new Coordination(), label: 'view session' };
   const calls = [], inputs = [];
   let inFlight = 0, maxInFlight = 0, seq = 0, firstFramesSent = false, jpegBatches = 0, lost = 0;
@@ -79,7 +85,8 @@ function backend({ rtcConfig, rtcConfigDelayMs = 0, noFrames = false, busy = fal
     if (name === 'screen_rtc_offer' && rtcOffer) return rtcOffer(args);
     if (name === 'screen_rtc_config' && rtcConfigDelayMs) await delay(rtcConfigDelayMs);
     if (name === 'screen_rtc_config' && rtcConfig) { calls.at(-1).args = args; return { content: [{ type: 'text', text: '{}' }], structuredContent: rtcConfig }; }
-    if (name === 'screen_input' && busy) { inputs.push(args); return { isError: true, content: [{ type: 'text', text: 'The agent is using this iPhone right now.' }], structuredContent: { reason: 'busy', error: 'The agent is using this iPhone right now.' } }; }
+    if (name === 'screen_input' && busy) { inputs.push(args); return { isError: true, content: [{ type: 'text', text: 'The agent is using this iPhone right now.' }], structuredContent: { reason: 'busy', error: 'The agent is using this iPhone right now.', takeover_token: `token-${inputs.length}-abcdefghijklmnop` } }; }
+    if (name === 'screen_takeover' && busy) return { content: [{ type: 'text', text: '{}' }], structuredContent: { taken_over: true } };
     inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
     let delayed = false;
     try {
@@ -102,7 +109,7 @@ function backend({ rtcConfig, rtcConfigDelayMs = 0, noFrames = false, busy = fal
       return JSON.parse(JSON.stringify(result));
     } finally { inFlight--; }
   };
-  return { handle, calls, inputs, native, screens, session, delivered, count: name => calls.filter(c => c.name === name).length, get maxInFlight() { return maxInFlight; }, stop: () => { clearInterval(feeder); screens.closeAll(); } };
+  return { handle, calls, inputs, native, screens, session, delivered, setSourceFailing: value => { sourceFailing = value; }, count: name => calls.filter(c => c.name === name).length, get maxInFlight() { return maxInFlight; }, stop: () => { clearInterval(feeder); screens.closeAll(); } };
 }
 
 let shared, server;
@@ -173,12 +180,15 @@ test('the view decodes the best codec this browser supports and streams over pip
 });
 
 test('transport A is used when ICE connects, and the view falls back to tool calls when it does not', { skip, timeout: 90000 }, async t => {
-  const direct = await open(t, { settings: { rtc: true, codecs: ['jpeg'] } });
+  // A generous ICE window: only a peer that really fails falls back, however slow the machine is.
+  const direct = await open(t, { settings: { rtc: true, codecs: ['jpeg'], rtcTimeoutMs: 30000 } });
   if (!(await ffmpegAvailable())) return t.skip('ffmpeg is not installed, so no JPEG to stream');
   await direct.mount(showResult);
-  await until(async () => (await direct.screen()).transport === 'webrtc');
+  await until(async () => (await direct.screen()).transport === 'webrtc', 40000);
   await until(() => painted(direct.frame()));
   assert.equal(direct.poki.count('screen_rtc_offer'), 1);
+  // The badge shows the control channel's round trip over WebRTC too.
+  await until(async () => /WebRTC · .* · \d+ fps · \d+ ms/.test(await direct.view.locator('#stats').textContent()));
   const reads = direct.poki.count('screen_read');
   await delay(1500);
   assert.equal(direct.poki.count('screen_read'), reads, 'frames still came over tool calls while WebRTC worked');
@@ -212,10 +222,14 @@ test('pointer gestures and keys become screen_input calls with normalized coordi
 
   const at = (x, y) => [box.x + box.width * x, box.y + box.height * y];
   const mouse = h.page.mouse;
-  await mouse.click(...at(0.5, 0.25));
-  await mouse.move(...at(0.5, 0.8)); await mouse.down(); await mouse.move(...at(0.5, 0.2), { steps: 3 }); await mouse.up();
-  await mouse.move(...at(0.2, 0.3)); await mouse.down(); await delay(700); await mouse.up();
-  await mouse.move(...at(0.1, 0.5)); await mouse.down(); await mouse.move(...at(0.3, 0.5), { steps: 2 }); await delay(450); await mouse.move(...at(0.9, 0.5), { steps: 8 }); await mouse.up();
+  // The gestures are timed on the test's clock, not the machine's: a slow run does not turn a swipe
+  // into a drag.
+  await h.frame().evaluate(() => { globalThis.testNow = 0; globalThis.pokiScreenInternals.setClock(() => globalThis.testNow); });
+  const now = ms => h.frame().evaluate(value => { globalThis.testNow = value; }, ms);
+  await now(0); await mouse.click(...at(0.5, 0.25));
+  await mouse.move(...at(0.5, 0.8)); await now(1000); await mouse.down(); await mouse.move(...at(0.5, 0.2), { steps: 3 }); await now(1100); await mouse.up();
+  await mouse.move(...at(0.2, 0.3)); await now(2000); await mouse.down(); await now(2700); await mouse.up();
+  await mouse.move(...at(0.1, 0.5)); await now(3000); await mouse.down(); await mouse.move(...at(0.3, 0.5), { steps: 2 }); await now(3450); await mouse.move(...at(0.9, 0.5), { steps: 8 }); await now(3500); await mouse.up();
   await canvas.focus();
   await h.page.keyboard.type('hi');
   await h.page.keyboard.press('Enter');
@@ -248,7 +262,8 @@ test('a busy device offers a takeover, which needs the person to confirm', { ski
   assert.equal(h.poki.count('screen_takeover'), 0, 'the takeover ran before the person confirmed');
   await h.view.locator('#confirm-yes').click();
   await until(() => h.poki.count('screen_takeover') === 1);
-  assert.equal(h.poki.calls.find(c => c.name === 'screen_takeover').args.confirm, true);
+  // It carries the token of the gesture the agent refused.
+  assert.equal(h.poki.calls.find(c => c.name === 'screen_takeover').args.token, 'token-1-abcdefghijklmnop');
 });
 
 test('a remounted view opens its stream again, and a narrow inline view stays within its width', { skip, timeout: 60000 }, async t => {
@@ -328,6 +343,9 @@ test('pictures whose read replies were lost return their credit, and the stream 
   await until(() => h.poki.delivered.length >= 2);
   await until(() => painted(h.frame()), 10000).catch(() => {});
   assert.ok(await painted(h.frame()), `no picture after two lost replies (${h.poki.delivered.length} sent)`);
+  // A relay that refused large replies: the view asks for smaller batches after each failure.
+  const sizes = h.poki.calls.filter(c => c.name === 'screen_read' && c.args.max_bytes).map(c => c.args.max_bytes);
+  assert.ok(sizes.length && Math.max(...sizes) < 256 * 1024, `max_bytes was not lowered after the failed reads: ${JSON.stringify([...new Set(sizes)])}`);
 });
 
 test('an iPhone disconnected on purpose is not reconnected by the panel until the person asks', { skip, timeout: 60000 }, async t => {
@@ -349,10 +367,10 @@ test('an iPhone disconnected on purpose is not reconnected by the panel until th
 
 test('over WebRTC the panel learns of a disconnect at once, not when the peer times out', { skip, timeout: 60000 }, async t => {
   if (!(await ffmpegAvailable())) return t.skip('ffmpeg is not installed, so no JPEG to stream');
-  // Any browser decodes JPEG; a loaded machine gets longer for ICE (what is measured is the notice).
-  const h = await open(t, { settings: { rtc: true, codecs: ['jpeg'], rtcTimeoutMs: 10000 } });
+  // Any browser decodes JPEG; ICE gets as long as it needs (what is measured is the notice).
+  const h = await open(t, { settings: { rtc: true, codecs: ['jpeg'], rtcTimeoutMs: 30000 } });
   await h.mount(showResult);
-  await until(async () => (await h.screen()).transport === 'webrtc');
+  await until(async () => (await h.screen()).transport === 'webrtc', 40000);
   await until(() => painted(h.frame()));
   const started = Date.now();
   h.poki.screens.closeDevice('fixture-phone');
@@ -487,6 +505,111 @@ test('a JPEG picture that finishes decoding after a newer one is not shown over 
     return { r, b };
   });
   assert.ok(centre.b > 200 && centre.r < 60, `the older picture is shown over the newer one: ${JSON.stringify(centre)}`);
+});
+
+test('a hidden panel stops reading at once, closes its stream after the grace period, and opens it again when shown', { skip, timeout: 90000 }, async t => {
+  const h = await open(t, { settings: { rtc: false, codecs: (await ffmpegAvailable()) ? ['jpeg'] : undefined } });
+  await h.mount(showResult);
+  await until(() => painted(h.frame()));
+  // LobeHub keeps a side panel mounted with display:none while another tab is shown.
+  await h.page.evaluate(() => { document.getElementById('slot').style.display = 'none'; });
+  await delay(1500);
+  const reads = h.poki.count('screen_read');
+  await delay(3000);
+  assert.ok(h.poki.count('screen_read') - reads <= 2, `a hidden panel kept reading: ${h.poki.count('screen_read') - reads} reads in 3 s`);
+  // Past the grace period the stream closes, which frees the camera and microphone.
+  await until(() => h.poki.count('screen_close') === 1, 15000);
+  assert.equal(h.poki.native.subscriptions.at(-1).open, false, 'the phone stayed subscribed for a hidden panel');
+  // Shown again, it opens a new stream.
+  await h.page.evaluate(() => { document.getElementById('slot').style.display = ''; });
+  await until(() => h.poki.count('screen_open') === 2, 15000);
+  await until(() => painted(h.frame()));
+});
+
+test('a remounted panel does not reconnect an iPhone disconnected on purpose until the person asks', { skip, timeout: 60000 }, async t => {
+  const h = await open(t, { settings: { rtc: false, codecs: (await ffmpegAvailable()) ? ['jpeg'] : undefined } });
+  await h.mount(showResult);
+  await until(() => painted(h.frame()));
+  h.poki.screens.closeDevice('fixture-phone');
+  // The panel is mounted again (a reload, the phone's inline view scrolled back): it stays disconnected.
+  await h.mount(showResult);
+  await until(async () => (await h.view.locator('#notice').textContent()).includes('disconnected'));
+  await delay(1000);
+  assert.equal(h.poki.native.subscriptions.length, 1, 'the remounted panel reconnected the phone');
+  await h.view.locator('#notice button', { hasText: 'Reconnect' }).click();
+  await until(() => h.poki.calls.some(c => c.name === 'screen_open' && c.args.reconnect === true));
+  await until(() => painted(h.frame()));
+});
+
+test('a stream paused for inactivity offers Resume', { skip, timeout: 60000 }, async t => {
+  const h = await open(t, { settings: { rtc: false, codecs: (await ffmpegAvailable()) ? ['jpeg'] : undefined } });
+  await h.mount(showResult);
+  await until(() => painted(h.frame()));
+  for (const viewer of h.poki.screens.viewers.values()) viewer.close({ reason: 'idle', message: 'The screen was paused after 20 minutes without activity.' });
+  await until(async () => (await h.view.locator('#notice').textContent()).includes('paused'));
+  await delay(1000);
+  assert.equal(h.poki.count('screen_open'), 1);
+  await h.view.locator('#notice button', { hasText: 'Resume' }).click();
+  await until(() => h.poki.count('screen_open') === 2);
+  await until(() => painted(h.frame()));
+});
+
+test('when the phone\'s stream drops, the panel says the picture is not live until it comes back', { skip, timeout: 60000 }, async t => {
+  const h = await open(t, { settings: { rtc: false, codecs: (await ffmpegAvailable()) ? ['jpeg'] : undefined } });
+  await h.mount(showResult);
+  await until(() => painted(h.frame()));
+  h.poki.setSourceFailing(true);
+  h.poki.native.subscriptions.at(-1).end();
+  await until(async () => (await h.view.locator('#notice').textContent()).includes('not live'), 10000);
+  h.poki.setSourceFailing(false);
+  await until(async () => !(await h.view.locator('#notice').isVisible()), 15000);
+});
+
+test('a gesture held while another iPhone replaces the picture is not sent to it', { skip, timeout: 60000 }, async t => {
+  const devices = [{ id: 'phone-a', name: 'Phone A', kind: 'physical', connection: 'RemotePairing' }, { id: 'phone-b', name: 'Phone B', kind: 'physical', connection: 'RemotePairing' }];
+  const h = await open(t, { settings: { rtc: false, codecs: (await ffmpegAvailable()) ? ['jpeg'] : undefined }, backendOptions: { devices } });
+  await h.mount({ content: [{ type: 'text', text: 'shown' }], structuredContent: { device: 'phone-a' } });
+  await until(() => painted(h.frame()));
+  const box = await h.view.locator('#screen').boundingBox();
+  await h.page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await h.page.mouse.down();
+  // Another show_screen result chooses Phone B while the finger is down; its picture comes first.
+  await h.frame().evaluate(() => { const select = document.getElementById('device'); select.value = 'phone-b'; select.dispatchEvent(new Event('change')); });
+  await until(() => h.poki.calls.some(c => c.name === 'screen_open' && c.args.device === 'phone-b'));
+  await until(() => painted(h.frame()));
+  await h.page.mouse.up();
+  await delay(1000);
+  assert.deepEqual(h.poki.inputs, [], `a gesture begun on Phone A reached ${JSON.stringify(h.poki.inputs.map(i => i.device))}`);
+});
+
+test('named keys keep their modifiers', { skip, timeout: 60000 }, async t => {
+  const h = await open(t, { settings: { rtc: false, codecs: (await ffmpegAvailable()) ? ['jpeg'] : undefined } });
+  await h.mount(showResult);
+  await until(() => painted(h.frame()));
+  await h.view.locator('#screen').focus();
+  await h.page.keyboard.press('Shift+ArrowLeft');
+  await h.page.keyboard.press('Shift+Tab');
+  await h.page.keyboard.press('Control+Backspace');
+  await until(() => h.poki.inputs.length >= 3);
+  assert.deepEqual(h.poki.inputs.map(i => [i.key, i.modifiers]), [['left', ['shift']], ['tab', ['shift']], ['backspace', ['control']]]);
+  assert.deepEqual(h.poki.inputs[0].request, { op: 'key', key: 'left', modifiers: ['shift'] });
+});
+
+test('a WebRTC peer lost after it worked hands the stream to tool calls without reopening it', { skip, timeout: 90000 }, async t => {
+  if (!(await ffmpegAvailable())) return t.skip('ffmpeg is not installed, so no JPEG to stream');
+  const h = await open(t, { settings: { rtc: true, codecs: ['jpeg'], rtcTimeoutMs: 30000 } });
+  await h.mount(showResult);
+  await until(async () => (await h.screen()).transport === 'webrtc', 40000);
+  await until(() => painted(h.frame()));
+  const stream = (await h.screen()).stream;
+  // The daemon's side of the peer goes (Wi-Fi changed, a NAT timeout).
+  for (const viewer of h.poki.screens.viewers.values()) await viewer.rtc?.close();
+  await until(async () => (await h.screen()).transport === 'tool-calls', 15000);
+  const reads = h.poki.count('screen_read');
+  await until(() => h.poki.count('screen_read') > reads + 3);
+  await until(() => painted(h.frame()));
+  assert.equal((await h.screen()).stream, stream, 'the stream was opened again instead of carried on');
+  assert.equal(h.poki.count('screen_open'), 1);
 });
 
 test('a decoder that fails while WebRTC is still connecting falls back to the next codec', { skip, timeout: 60000 }, async t => {

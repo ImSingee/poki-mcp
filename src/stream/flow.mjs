@@ -1,7 +1,9 @@
 // Per-viewer flow control for the screen stream.
 //
 // Adapted from lody's device preview (apps/cli/src/device-preview/h264-flow.ts and frame-flow.ts,
-// https://github.com/ImSingee/Lody, Apache License 2.0): credit is returned by decoded-frame
+// https://github.com/ImSingee/Lody at 7ae04272dd8cb19598929ca16553f387e3a3fe87, Apache License 2.0;
+// see THIRD_PARTY_NOTICES.md). Modified for Poki: HEVC and JPEG tracks, batches for screen_read
+// and read limits, resynchronization after a lost reply. Credit is returned by decoded-frame
 // acknowledgements, encoded deltas are never skipped inside a chain (a viewer that falls behind
 // drops the whole chain and resumes at a key frame), a keyframe is requested at most once a
 // second, and the transcoded track's bitrate follows how quickly acknowledgements come back.

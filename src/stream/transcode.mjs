@@ -1,34 +1,44 @@
 // Transcodes the phone's HEVC for viewers that cannot decode it, or that need fewer bytes:
-// H.264 (libx264 ultrafast, zerolatency, long edge at most 1280) or JPEG (at most 10 frames a
-// second, only the latest kept). An encoder runs only while a viewer needs its track, and starts
+// H.264 (libx264 ultrafast, zerolatency, long edge at most 1280) or JPEG (only the latest picture
+// kept). An encoder runs only while a viewer needs its track, and starts
 // on an HEVC key frame. Restarting it (a new bitrate, a keyframe request) starts a new chain with
 // a key frame.
 import { spawn as spawnProcess, execFile } from 'node:child_process';
 import { avcType } from './codec.mjs';
 
-let available;
-// Whether ffmpeg with libx264 and mjpeg is on PATH. Checked once.
-export function ffmpegAvailable() {
-  available ??= new Promise(resolve => {
+let encoders;
+// The tracks the ffmpeg on PATH can transcode to: h264 with libx264, jpeg with mjpeg. Checked once.
+// Each is offered on its own, so an ffmpeg without libx264 still serves JPEG.
+export function ffmpegCodecs() {
+  encoders ??= new Promise(resolve => {
     execFile('ffmpeg', ['-hide_banner', '-encoders'], { timeout: 5000 }, (error, stdout) => {
-      resolve(!error && /libx264/.test(stdout) && /mjpeg/.test(stdout));
+      resolve(error ? [] : [...(/libx264/.test(stdout) ? ['h264'] : []), ...(/mjpeg/.test(stdout) ? ['jpeg'] : [])]);
     });
   });
-  return available;
+  return encoders;
 }
+// Whether ffmpeg can transcode to both H.264 and JPEG.
+export const ffmpegAvailable = async () => (await ffmpegCodecs()).length === 2;
 
 const scale = edge => `scale='trunc(min(iw\\,${edge}*iw/max(iw\\,ih))/2)*2':'trunc(min(ih\\,${edge}*ih/max(iw\\,ih))/2)*2'`;
 
-export function ffmpegArgs(mode, { bitrate = 1_500_000, maxEdge = 1280, fps = 10, quality = 5 } = {}) {
+export function ffmpegArgs(mode, { bitrate = 1_500_000, maxEdge = 1280, quality = 5 } = {}) {
   // Measured with the sample stream: `-fflags nobuffer` loses the first key frame, and without the
   // small probe ffmpeg waits for megabytes before decoding anything.
   const input = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-flags', 'low_delay', '-probesize', '32', '-analyzeduration', '0', '-fpsprobesize', '0', '-use_wallclock_as_timestamps', '1', '-f', 'hevc', '-i', 'pipe:0', '-an'];
   if (mode === 'h264') {
     const kbps = Math.round(bitrate / 1000);
-    return [...input, '-vf', scale(maxEdge), '-fps_mode', 'passthrough', '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-profile:v', 'baseline', '-pix_fmt', 'yuv420p', '-bf', '0', '-g', '240',
+    // A key frame from the phone is a key frame out: asking the phone for one is enough to give a
+    // viewer a new chain, with no encoder restart.
+    return [...input, '-vf', scale(maxEdge), '-fps_mode', 'passthrough', '-force_key_frames', 'source', '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-profile:v', 'baseline', '-pix_fmt', 'yuv420p', '-bf', '0', '-g', '240',
       '-x264-params', 'scenecut=0', '-b:v', `${kbps}k`, '-maxrate', `${kbps}k`, '-bufsize', `${Math.max(100, Math.round(kbps / 2))}k`, '-flush_packets', '1', '-flvflags', 'no_duration_filesize', '-f', 'flv', 'pipe:1'];
   }
-  if (mode === 'jpeg') return [...input, '-vf', `fps=${fps},${scale(maxEdge)}`, '-c:v', 'mjpeg', '-q:v', String(quality), '-flush_packets', '1', '-f', 'image2pipe', 'pipe:1'];
+  // Every picture is encoded: ffmpeg's fps filter holds a picture until a later one arrives, so a
+  // still screen's latest picture would never come out. The track keeps only the latest, and the
+  // flow sends at most what the viewer has credit for.
+  // Pictures that arrive together can share a wall-clock time, which the encoder refuses, and each
+  // JPEG stands alone: they are numbered instead. One encoding thread holds back no picture.
+  if (mode === 'jpeg') return [...input, '-vf', `setpts=N/TB,${scale(maxEdge)}`, '-fps_mode', 'passthrough', '-c:v', 'mjpeg', '-threads', '1', '-q:v', String(quality), '-flush_packets', '1', '-f', 'mjpeg', 'pipe:1'];
   throw new Error(`Unknown transcode mode ${mode}`);
 }
 

@@ -176,3 +176,56 @@ test('a resync over WebRTC sends a still screen\'s latest JPEG again', { timeout
   await until(() => packets.length === 2, 5000).catch(() => {});
   assert.deepEqual(packets, [1, 1], 'the latest picture was not sent again after the resync');
 });
+
+test('with STUN turned off the answer carries no server-reflexive candidate (werift\'s own default STUN is off too)', { timeout: 30000 }, async t => {
+  const native = fakeNative();
+  const screens = new Screens({ ...native, ffmpeg: async () => false });
+  t.after(() => screens.closeAll());
+  const viewer = await screens.open(target, { codecs: ['hevc'] });
+  const browser = new RTCPeerConnection({ iceServers: [] });
+  t.after(() => browser.close());
+  browser.createDataChannel('media', { ordered: true }); browser.createDataChannel('control', { ordered: true });
+  await browser.setLocalDescription(await browser.createOffer());
+  await until(() => browser.iceGatheringState === 'complete');
+  const { sdp } = await answer(viewer, browser.localDescription.sdp, { servers: [] });
+  assert.doesNotMatch(sdp, /typ srflx/, 'the answer asked a STUN server for this computer\'s public address');
+  assert.match(sdp, /typ host/);
+});
+
+test('gestures on the control channel are checked like screen_input and run one at a time, in order; a ping is answered', { timeout: 60000 }, async t => {
+  const { runScreenTool } = await import('../src/stream/tools.mjs');
+  const { Coordination } = await import('../src/coordination.mjs');
+  const native = fakeNative();
+  const screens = new Screens({ ...native, ffmpeg: async () => false });
+  t.after(() => screens.closeAll());
+  const session = { coordinator: new Coordination(), label: 'view' };
+  const opened = (await runScreenTool(session, 'screen_open', { device: target.id, codecs: ['hevc'] }, { screens, resolve: async () => target })).structuredContent;
+  const browser = new RTCPeerConnection({ iceServers: [] });
+  t.after(() => browser.close());
+  browser.createDataChannel('media', { ordered: true });
+  const control = browser.createDataChannel('control', { ordered: true });
+  const messages = [];
+  control.onMessage.subscribe(message => messages.push(JSON.parse(message)));
+  await browser.setLocalDescription(await browser.createOffer());
+  await until(() => browser.iceGatheringState === 'complete');
+  process.env.POKI_STUN_URL = '';
+  t.after(() => { delete process.env.POKI_STUN_URL; });
+  let running = 0, overlapped = false;
+  const order = [];
+  const slow = async (device, request) => { running++; if (running > 1) overlapped = true; order.push(request.x); await delay(150); running--; return { sent: true }; };
+  const answered = await runScreenTool(session, 'screen_rtc_offer', { stream: opened.stream, sdp: browser.localDescription.sdp }, { screens, native: slow });
+  await browser.setRemoteDescription({ type: 'answer', sdp: answered.structuredContent.sdp });
+  await until(() => messages.some(m => m.type === 'ready'));
+  // Out of range, and an unknown kind: refused without reaching the phone.
+  control.send(JSON.stringify({ type: 'input', id: 1, kind: 'tap', x: 7, y: 0.5 }));
+  control.send(JSON.stringify({ type: 'input', id: 2, kind: 'explode' }));
+  for (let id = 3; id <= 6; id++) control.send(JSON.stringify({ type: 'input', id, kind: 'tap', x: id / 10, y: 0.5 }));
+  control.send(JSON.stringify({ type: 'ping', t: 1234.5 }));
+  await until(() => messages.filter(m => m.type === 'input-result').length === 6, 15000);
+  const results = Object.fromEntries(messages.filter(m => m.type === 'input-result').map(m => [m.id, m]));
+  assert.equal(results[1].isError, true); assert.match(results[1].error, /Invalid input/);
+  assert.equal(results[2].isError, true);
+  assert.equal(overlapped, false, 'two gestures ran on the phone at once');
+  assert.deepEqual(order, [0.3, 0.4, 0.5, 0.6].map(x => Math.round(x * 65535)));
+  assert.ok(messages.some(m => m.type === 'pong' && m.t === 1234.5), 'the ping got no pong');
+});

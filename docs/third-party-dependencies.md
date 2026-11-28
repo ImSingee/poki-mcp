@@ -67,21 +67,30 @@ The table shows each package's declared license. For the MCP SDK, see the retain
 | `@img/sharp-win32-arm64` | 0.35.5 | Apache-2.0 AND LGPL-3.0-or-later | [github.com/lovell/sharp](https://github.com/lovell/sharp) | optional; os: win32; cpu: arm64 |
 | `@img/sharp-win32-ia32` | 0.35.5 | Apache-2.0 AND LGPL-3.0-or-later | [github.com/lovell/sharp](https://github.com/lovell/sharp) | optional; os: win32; cpu: ia32 |
 | `@img/sharp-win32-x64` | 0.35.5 | Apache-2.0 AND LGPL-3.0-or-later | [github.com/lovell/sharp](https://github.com/lovell/sharp) | optional; os: win32; cpu: x64 |
+| `@leichtgewicht/ip-codec` | 2.0.5 | MIT | [github.com/martinheidegger/ip-codec](https://github.com/martinheidegger/ip-codec) | regular dependency |
 | `@modelcontextprotocol/client` | 2.4.0 | Apache-2.0 | [github.com/modelcontextprotocol/typescript-sdk](https://github.com/modelcontextprotocol/typescript-sdk) | regular dependency |
 | `@modelcontextprotocol/core` | 2.4.0 | Apache-2.0 | [github.com/modelcontextprotocol/typescript-sdk](https://github.com/modelcontextprotocol/typescript-sdk) | regular dependency |
 | `@modelcontextprotocol/ext-apps` | 2.1.0 | MIT | [github.com/modelcontextprotocol/ext-apps](https://github.com/modelcontextprotocol/ext-apps) | regular dependency |
 | `@modelcontextprotocol/node` | 2.1.2 | Apache-2.0 | [github.com/modelcontextprotocol/typescript-sdk](https://github.com/modelcontextprotocol/typescript-sdk) | regular dependency |
 | `@modelcontextprotocol/server` | 2.4.0 | Apache-2.0 | [github.com/modelcontextprotocol/typescript-sdk](https://github.com/modelcontextprotocol/typescript-sdk) | regular dependency |
 | `@standard-schema/spec` | 1.1.0 | MIT | [github.com/standard-schema/standard-schema](https://github.com/standard-schema/standard-schema) | regular dependency |
+| `@types/dom-mediacapture-transform` | 0.1.12 | MIT | [github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) | regular dependency |
+| `@types/dom-webcodecs` | 0.1.13 | MIT | [github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) | regular dependency |
 | `acorn` | 8.19.0 | MIT | [github.com/acornjs/acorn](https://github.com/acornjs/acorn) | regular dependency |
+| `base64-js` | 1.5.1 | MIT | [github.com/beatgammit/base64-js](https://github.com/beatgammit/base64-js) | regular dependency |
+| `buffer` | 6.0.3 | MIT | [github.com/feross/buffer](https://github.com/feross/buffer) | regular dependency |
 | `cross-spawn` | 7.0.6 | MIT | [github.com/moxystudio/node-cross-spawn](https://github.com/moxystudio/node-cross-spawn) | regular dependency |
 | `detect-libc` | 2.1.2 | Apache-2.0 | [github.com/lovell/detect-libc](https://github.com/lovell/detect-libc) | regular dependency |
+| `dns-packet` | 5.6.1 | MIT | [github.com/mafintosh/dns-packet](https://github.com/mafintosh/dns-packet) | regular dependency |
 | `esbuild` | 0.25.12 | MIT | [github.com/evanw/esbuild](https://github.com/evanw/esbuild) | dev dependency |
 | `eventsource` | 3.0.7 | MIT | [github.com/EventSource/eventsource](https://github.com/EventSource/eventsource) | regular dependency |
 | `eventsource-parser` | 3.1.1 | MIT | [github.com/rexxars/eventsource-parser](https://github.com/rexxars/eventsource-parser) | regular dependency |
 | `hono` | 4.13.16 | MIT | [github.com/honojs/hono](https://github.com/honojs/hono) | regular dependency |
+| `ieee754` | 1.2.1 | BSD-3-Clause | [github.com/feross/ieee754](https://github.com/feross/ieee754) | regular dependency |
 | `isexe` | 2.0.0 | ISC | [github.com/isaacs/isexe](https://github.com/isaacs/isexe) | regular dependency |
 | `jose` | 6.2.15 | MIT | [github.com/panva/jose](https://github.com/panva/jose) | regular dependency |
+| `mediabunny` | 1.66.5 | MPL-2.0 | [github.com/Vanilagy/mediabunny](https://github.com/Vanilagy/mediabunny) | regular dependency |
+| `multicast-dns` | 7.2.5 | MIT | [github.com/mafintosh/multicast-dns](https://github.com/mafintosh/multicast-dns) | regular dependency |
 | `path-key` | 3.1.1 | MIT | [github.com/sindresorhus/path-key](https://github.com/sindresorhus/path-key) | regular dependency |
 | `pkce-challenge` | 5.0.1 | MIT | [github.com/crouchcd/pkce-challenge](https://github.com/crouchcd/pkce-challenge) | regular dependency |
 | `playwright` | 1.65.1 | Apache-2.0 | [github.com/microsoft/playwright](https://github.com/microsoft/playwright) | dev dependency |
@@ -90,7 +99,9 @@ The table shows each package's declared license. For the MCP SDK, see the retain
 | `sharp` | 0.35.5 | Apache-2.0 | [github.com/lovell/sharp](https://github.com/lovell/sharp) | regular dependency |
 | `shebang-command` | 2.0.0 | MIT | [github.com/kevva/shebang-command](https://github.com/kevva/shebang-command) | regular dependency |
 | `shebang-regex` | 3.0.0 | MIT | [github.com/sindresorhus/shebang-regex](https://github.com/sindresorhus/shebang-regex) | regular dependency |
+| `thunky` | 1.1.0 | MIT | [github.com/mafintosh/thunky](https://github.com/mafintosh/thunky) | regular dependency |
 | `tslib` | 2.9.1 | 0BSD | [github.com/Microsoft/tslib](https://github.com/Microsoft/tslib) | optional |
+| `werift` | 0.27.0 | MIT | [github.com/shinyoshiaki/werift-webrtc](https://github.com/shinyoshiaki/werift-webrtc) | regular dependency |
 | `which` | 2.0.2 | ISC | [github.com/isaacs/node-which](https://github.com/isaacs/node-which) | regular dependency |
 | `zod` | 4.6.7 | MIT | [github.com/colinhacks/zod](https://github.com/colinhacks/zod) | regular dependency |
 

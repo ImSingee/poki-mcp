@@ -15,8 +15,10 @@ The daemon reads its settings from its own environment. A daemon started automat
 | `POKI_SCREEN_READ_MAX_BYTES`, `POKI_SCREEN_READ_MAX_FRAMES` | Most bytes (default 262144, 16 KiB to 4 MiB) and frames (default 16) one `screen_read` reply carries. See [the live screen](tools.md#live-screen). |
 | `POKI_SCREEN_H264_BITRATE` | Starting bitrate of the H.264 transcoding for the screen view, in bit/s (default 1500000, 300000 to 4000000). |
 | `POKI_SCREEN_RTC=0` | Never use WebRTC for the screen view; it streams over tool calls only. |
-| `POKI_STUN_URL` | STUN server(s) for the screen view's WebRTC, comma-separated. Default `stun:stun.l.google.com:19302`; empty for host candidates only. |
-| `POKI_TURN_URL`, `POKI_TURN_SECRET` | A TURN server for the screen view's WebRTC (comma-separated `turn:`/`turns:` URLs), with time-limited credentials from coturn's shared secret. `POKI_TURN_USERNAME` and `POKI_TURN_PASSWORD` give static credentials instead. |
+| `POKI_SCREEN_IDLE_MINUTES` | Minutes with no input in the screen panel and no tool call on its iPhone before its stream is paused (the panel offers Resume). Default 20; 0 never pauses. |
+| `POKI_STUN_URL` | STUN server(s) for the screen view's WebRTC, comma-separated. Default Google's `stun:stun.l.google.com:19302`, which then learns this computer's public address; empty for host candidates only, with no STUN server contacted. |
+| `POKI_RTC_ADDRESSES` | One IPv4 and/or one IPv6 address (comma-separated) the screen view's WebRTC binds to and lists; by default every interface's address is listed. |
+| `POKI_TURN_URL`, `POKI_TURN_SECRET`, `POKI_TURN_TTL_SECONDS` | A TURN server for the screen view's WebRTC (comma-separated `turn:`/`turns:` URLs) and its shared secret (coturn's `use-auth-secret`, required with a TURN URL). A view gets credentials derived from it that expire after `POKI_TURN_TTL_SECONDS` (default 3600). |
 | `POKI_MCP_TASK_APPROVAL_TIMEOUT_MINUTES` | How long `begin_task` waits for an answer. Defaults to 9. |
 | `POKI_MCP_TASK_APPROVAL_CLIENT` | Name shown at the start of the approval prompt. Defaults to `An MCP client`. |
 | `POKI_MCP_NATIVE_TRACE` | Enable native diagnostic timing output on `stderr`. |

@@ -286,42 +286,57 @@ function resync() { resyncWanted = true; if (state.transport === 'webrtc') rtc?.
 function decoded(seq, broken) {
   // Starting again at a key frame supersedes everything received so far: acknowledge it, or the
   // credit those frames hold would never come back.
-  if (broken) { replaySeq = lastSeq || undefined; decodedSeq = Math.max(decodedSeq, lastSeq); if (state.transport === 'webrtc') rtc?.send({ type: 'ack', seq: decodedSeq }); resync(); return; }
+  // A hidden panel acknowledges nothing over WebRTC, so the daemon stops sending once the credit is
+  // used; shown again, it acknowledges what it decoded and resynchronizes.
+  if (broken) { replaySeq = lastSeq || undefined; decodedSeq = Math.max(decodedSeq, lastSeq); if (state.transport === 'webrtc' && !hidden()) rtc?.send({ type: 'ack', seq: decodedSeq }); resync(); return; }
   if (seq > decodedSeq) decodedSeq = seq;
-  if (state.transport === 'webrtc') rtc?.send({ type: 'ack', seq: decodedSeq });
+  if (state.transport === 'webrtc' && !hidden()) rtc?.send({ type: 'ack', seq: decodedSeq });
 }
 
 // One stream per device: a second request while one opens for the same device waits for it.
 let opening;
-// The iPhone was disconnected or unpaired on purpose: the panel stops and waits for the person,
-// since opening the stream again would reconnect the phone (and its camera and microphone).
+// The stream ended on purpose: the iPhone was disconnected, unpaired or is being paired again, or
+// the daemon paused an idle stream. The panel stops and waits for the person, since opening the
+// stream again would reconnect the phone (and its camera and microphone).
+const ENDED = {
+  device_disconnected: { placeholder: 'Disconnected', action: 'Reconnect', reconnect: true },
+  device_repairing: { placeholder: 'Pairing again', action: 'Reconnect', reconnect: true },
+  device_unpaired: { placeholder: 'Unpaired' },
+  idle: { placeholder: 'Paused', action: 'Resume' },
+};
 function endedOnPurpose(reason, message, generation) {
-  if (!['device_disconnected', 'device_unpaired'].includes(reason) || generation !== state.generation) return false;
+  const ended = ENDED[reason];
+  if (!ended || generation !== state.generation) return false;
   state.generation++;
   stop(false);
-  $('placeholder').textContent = reason === 'device_disconnected' ? 'Disconnected' : 'Unpaired';
-  notice(message, reason === 'device_disconnected' ? { label: 'Reconnect', run: () => { notice(''); void openStream(); } } : undefined);
+  $('placeholder').textContent = ended.placeholder;
+  notice(message, ended.action ? { label: ended.action, run: () => { notice(''); void openStream({ reconnect: ended.reconnect }); } } : undefined);
   return true;
 }
-function openStream() {
+function openStream(options = {}) {
   if (opening?.device === state.device && opening.generation === state.generation) return opening.promise;
-  const promise = startStream();
+  const promise = startStream(options);
   opening = { device: state.device, generation: state.generation, promise };
   promise.finally(() => { if (opening?.promise === promise) opening = undefined; });
   return promise;
 }
-async function startStream() {
+async function startStream({ reconnect = false } = {}) {
   const generation = ++state.generation;
   // The stream being replaced (another iPhone, another codec) is closed, not left to its lease:
   // it holds that phone's camera and microphone, and any takeover.
   stop();
   if (!state.device) return;
-  showError(); notice('');
+  showError(); notice(''); sourceDown = false;
   const codecs = (await supportedCodecs()).filter(codec => !state.unavailable.has(codec));
   if (!codecs.length) { notice('This browser cannot show the screen.'); return; }
   let opened;
-  try { opened = await call('screen_open', { device: state.device, codecs }); }
-  catch (error) { if (generation === state.generation) { $('placeholder').hidden = false; $('placeholder').textContent = error.message; } return; }
+  try { opened = await call('screen_open', { device: state.device, codecs, ...(reconnect ? { reconnect: true } : {}) }); }
+  catch (error) {
+    // A phone disconnected on purpose stays so after a remount or a reload, until the person asks.
+    if (endedOnPurpose(error.data?.reason, error.message, generation)) return;
+    if (generation === state.generation) { $('placeholder').hidden = false; $('placeholder').textContent = error.message; }
+    return;
+  }
   if (generation !== state.generation) { call('screen_close', { stream: opened.stream }).catch(() => {}); return; }
   Object.assign(state, { stream: opened.stream, codec: opened.codec, codecString: opened.codec_string, width: opened.width, height: opened.height, failures: 0 });
   decodedSeq = 0; resetChain();
@@ -347,6 +362,8 @@ function startPolling(generation) {
 }
 async function poll(generation, lane) {
   while (generation === state.generation && state.stream && !state.closed) {
+    // A hidden panel reads nothing: no frames cross the host's relay for a panel nobody sees.
+    if (hidden()) { await shown(); continue; }
     const started = performance.now();
     try {
       const args = { stream: state.stream, ack: decodedSeq, credit: Math.max(1, settings.credit - (decoder?.backlog ?? 0)), wait_ms: settings.waitMs };
@@ -358,6 +375,7 @@ async function poll(generation, lane) {
       if (reply.closed) { if (endedOnPurpose(reply.reason, reply.error, generation)) return; void openStream(); return; }
       if (reply.codec_failed) { fallBack(generation); return; }
       if (reply.codec_string && reply.codec_string !== state.codecString) { state.codecString = reply.codec_string; decoder?.reconfigure(reply.codec_string); }
+      sourceState(reply.source_error);
       if (reply.frames?.length) { stats.latency = Math.round(performance.now() - started); accept(reply, generation); }
       if (reply.width && !state.width) Object.assign(state, { width: reply.width, height: reply.height });
     } catch (error) {
@@ -440,11 +458,15 @@ async function attemptRtc(generation, attempt) {
     if (attempt.cancelled) { pc.close(); return false; }
     if (generation !== state.generation) { pc.close(); return true; }
     installPeer({ pc, send: value => { if (control.readyState === 'open') control.send(JSON.stringify(value)); } });
-    const heartbeat = setInterval(() => { if (generation !== state.generation) { clearInterval(heartbeat); return; } rtc?.send({ type: 'ping' }); }, 3000);
-    pc.addEventListener('connectionstatechange', () => {
-      // A peer lost after it worked: carry on over tool calls with the same stream.
-      if (['failed', 'disconnected', 'closed'].includes(pc.connectionState) && generation === state.generation && state.transport === 'webrtc') { rtc = undefined; resetChain(); resync(); startPolling(generation); }
-    });
+    // Keeps the stream (and a takeover) while the panel is shown, and measures the round trip for
+    // the badge. A hidden panel sends nothing, so its stream ends with its lease.
+    const heartbeat = setInterval(() => { if (generation !== state.generation) { clearInterval(heartbeat); return; } if (!hidden()) rtc?.send({ type: 'ping', t: performance.now() }); }, 1000);
+    // A peer lost after it worked (its connection failed, or the daemon closed its channels): carry
+    // on over tool calls with the same stream. The peer is closed, so a connection that comes back
+    // cannot feed the stream a second time.
+    const lost = () => { if (generation === state.generation && state.transport === 'webrtc' && rtc?.pc === pc) { pc.close(); rtc = undefined; resetChain(); resync(); startPolling(generation); } };
+    pc.addEventListener('connectionstatechange', () => { if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) lost(); });
+    control.addEventListener('close', lost);
     return true;
   } catch {
     pc?.close();
@@ -464,6 +486,8 @@ function receiveControl(message, generation) {
   if (message.type === 'ready' && message.codec_string) { state.codecString = message.codec_string; decoder?.reconfigure(message.codec_string); }
   else if (message.type === 'codec-failed') fallBack(generation);
   else if (message.type === 'input-result') inputReplies.get(message.id)?.(message);
+  else if (message.type === 'pong' && Number.isFinite(message.t)) stats.latency = Math.round(performance.now() - message.t);
+  else if (message.type === 'source' && generation === state.generation) sourceState(message.error);
   else if (message.type === 'ended' && generation === state.generation && !endedOnPurpose(message.reason, message.error, generation)) void openStream();
 }
 const MAGIC = { 0x4c485643: 'hevc', 0x4c415643: 'h264', 0x4c4f4459: 'jpeg' };
@@ -515,7 +539,12 @@ function sendInput(args) {
       } else {
         reply = await call('screen_input', { stream: made.stream, ...args }).catch(error => ({ isError: true, ...(error.data ?? {}), error: error.message }));
       }
-      if (reply?.reason === 'busy') { $('takeover').hidden = false; notice(reply.error ?? 'The agent is using this iPhone.', { label: 'Take over', run: askTakeover }); }
+      // A refused gesture's reply carries the token a takeover needs: only a person who tried to
+      // use the panel can take the iPhone over.
+      if (reply?.reason === 'busy') {
+        if (reply.takeover_token) takeoverToken = { stream: made.stream, token: reply.takeover_token };
+        $('takeover').hidden = false; notice(reply.error ?? 'The agent is using this iPhone.', { label: 'Take over', run: askTakeover });
+      }
       else if (reply?.isError) notice(reply.error);
       else notice('');
     } catch (error) { notice(error.message); }
@@ -523,7 +552,10 @@ function sendInput(args) {
 }
 globalThis.pokiScreenInput = sendInput;
 // For tests: the WebRTC receive path, without a peer.
-globalThis.pokiScreenInternals = { installPeer, present, stop: () => stop(false), decoder: () => decoder, decodedSeq: () => decodedSeq, receivePacket: packet => receivePacket(packet, state.generation), receiveControl: message => receiveControl(message, state.generation), lastSeq: () => lastSeq, held: () => held.length, waitingKey: () => decoder?.waitingKey };
+// The clock gestures are timed with; tests set their own, so a slow machine does not turn a swipe
+// into a drag.
+let clock = () => performance.now();
+globalThis.pokiScreenInternals = { installPeer, present, stop: () => stop(false), setClock: fn => { clock = fn; }, decoder: () => decoder, decodedSeq: () => decodedSeq, receivePacket: packet => receivePacket(packet, state.generation), receiveControl: message => receiveControl(message, state.generation), lastSeq: () => lastSeq, held: () => held.length, waitingKey: () => decoder?.waitingKey };
 
 // Normalized position (0..1) of a pointer on the phone's screen.
 function position(event) {
@@ -545,20 +577,23 @@ globalThis.pokiGesture = function gesture(points, second) {
   if (moved < 8) return duration >= 500 ? { kind: 'long_press', x: first.x, y: first.y, t_ms: duration } : { kind: 'tap', x: first.x, y: first.y, t_ms: duration };
   return { kind: duration <= 300 ? 'swipe' : 'drag', x: first.x, y: first.y, x2: last.x, y2: last.y, t_ms: duration };
 };
+// A gesture belongs to the stream shown when it began: one still held when another iPhone's
+// picture replaces it is dropped at release, never sent to that iPhone.
 const pointers = new Map();
 canvas.addEventListener('pointerdown', event => {
-  pointers.set(event.pointerId, [{ ...position(event), t: performance.now() }]);
+  pointers.set(event.pointerId, Object.assign([{ ...position(event), t: clock() }], { stream: state.stream, generation: state.generation }));
   event.preventDefault();
   canvas.focus({ preventScroll: true });
   // Keeps the gesture when it leaves the canvas; not every host's frame allows it.
   try { canvas.setPointerCapture(event.pointerId); } catch {}
 });
-canvas.addEventListener('pointermove', event => { pointers.get(event.pointerId)?.push({ ...position(event), t: performance.now() }); });
+canvas.addEventListener('pointermove', event => { pointers.get(event.pointerId)?.push({ ...position(event), t: clock() }); });
 const finish = event => {
   const points = pointers.get(event.pointerId);
   if (!points) return;
-  points.push({ ...position(event), t: performance.now() });
+  points.push({ ...position(event), t: clock() });
   pointers.delete(event.pointerId);
+  if (points.stream !== state.stream || points.generation !== state.generation) { pointers.clear(); return; }
   // The first finger to lift ends a two-finger gesture; the other's path makes it a pinch.
   const [other] = pointers.values();
   if (other) { pointers.clear(); sendInput(globalThis.pokiGesture(points, other)); return; }
@@ -570,13 +605,16 @@ canvas.addEventListener('contextmenu', event => event.preventDefault());
 // Keys typed while the screen has focus: printable text in one call per burst, special keys alone.
 let typed = '', typedTimer, typedFor;
 const special = { Enter: 'return', Backspace: 'backspace', Tab: 'tab', Escape: 'escape', ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down', Delete: 'forward_delete' };
+// Shortcuts and named keys keep their modifiers (Shift+Arrow selects, Shift+Tab goes back,
+// Ctrl+Backspace deletes a word); printable characters typed alone are buffered as text.
 canvas.addEventListener('keydown', event => {
+  const modifiers = [event.metaKey && 'command', event.ctrlKey && 'control', event.altKey && 'option', event.shiftKey && 'shift'].filter(Boolean);
+  if (special[event.key]) { flushTyped(); sendInput({ kind: 'key', key: special[event.key], ...(modifiers.length ? { modifiers } : {}) }); event.preventDefault(); return; }
   if (event.metaKey || event.ctrlKey || event.altKey) {
-    if (event.key.length === 1) { sendInput({ kind: 'key', key: event.key.toLowerCase(), modifiers: [event.metaKey && 'command', event.ctrlKey && 'control', event.altKey && 'option', event.shiftKey && 'shift'].filter(Boolean) }); event.preventDefault(); }
+    if (event.key.length === 1) { flushTyped(); sendInput({ kind: 'key', key: event.key.toLowerCase(), modifiers }); event.preventDefault(); }
     return;
   }
-  if (event.key.length === 1) { if (!typed) typedFor = state.stream; typed += event.key; clearTimeout(typedTimer); typedTimer = setTimeout(flushTyped, 250); event.preventDefault(); return; }
-  if (special[event.key]) { flushTyped(); sendInput({ kind: 'key', key: special[event.key] }); event.preventDefault(); }
+  if (event.key.length === 1) { if (!typed) typedFor = state.stream; typed += event.key; clearTimeout(typedTimer); typedTimer = setTimeout(flushTyped, 250); event.preventDefault(); }
 });
 // Characters typed on one iPhone never go to another: typing still buffered when the stream was
 // replaced is dropped.
@@ -588,13 +626,18 @@ function flushTyped() {
 $('home').onclick = () => sendInput({ kind: 'button', button: 'home' });
 $('lock').onclick = () => sendInput({ kind: 'button', button: 'lock' });
 
-// Taking over interrupts the agent: only after the person confirms.
+// Taking over interrupts the agent: only after the person confirms, with the token of the gesture
+// the agent refused (used once). In ask approval mode the Poki computer asks too.
+let takeoverToken;
 function askTakeover() { $('confirm').showModal(); }
 $('takeover').onclick = askTakeover;
 $('confirm-no').onclick = () => $('confirm').close();
 $('confirm-yes').onclick = async () => {
   $('confirm').close();
-  try { await call('screen_takeover', { stream: state.stream, confirm: true }); $('takeover').hidden = true; notice(''); }
+  const held = takeoverToken; takeoverToken = undefined;
+  if (!held || held.stream !== state.stream) { notice('Try a tap on the screen first: the takeover follows a gesture the agent refused.'); return; }
+  notice('Taking over…');
+  try { await call('screen_takeover', { stream: state.stream, token: held.token }); $('takeover').hidden = true; notice(''); }
   catch (error) { notice(error.message); }
 };
 
@@ -618,7 +661,8 @@ setInterval(() => {
   stats.fps = Math.round(stats.fpsFrames * 1000 / Math.max(1, now - stats.fpsAt)); stats.fpsFrames = 0; stats.fpsAt = now;
   const box = $('stats');
   box.hidden = !state.transport;
-  box.textContent = `${state.transport === 'webrtc' ? 'WebRTC' : 'tool calls'} · ${state.codec?.toUpperCase() ?? ''} · ${stats.fps} fps${state.transport === 'webrtc' ? '' : ` · ${stats.latency} ms`}`;
+  // Latency: the last read's round trip over tool calls, the control channel's ping over WebRTC.
+  box.textContent = `${state.transport === 'webrtc' ? 'WebRTC' : 'tool calls'} · ${state.codec?.toUpperCase() ?? ''} · ${stats.fps} fps · ${stats.latency} ms`;
   state.stats = { fps: stats.fps, latency: stats.latency, decoded: stats.decoded, stuck: decoder?.stuck ?? 0, errors: decoder?.errors ?? 0, held: held.length, last: lastSeq };
 }, 1000);
 
@@ -627,7 +671,48 @@ app.ontoolresult = params => {
   const device = value?.device;
   if (device && device !== state.device) { state.device = device; $('device').value = device; void openStream(); }
 };
-app.onhostcontextchanged = context => { applyContext(context); layout(); };
+// ---- Visibility: a panel nobody can see does not stream. ---------------------------------------
+// Hidden: the page is hidden, the panel does not intersect the viewport (LobeHub keeps a side panel
+// mounted with display:none while another tab is shown; a phone's inline view scrolls away), or the
+// host gives it no room. A hidden panel reads and acknowledges nothing. Hidden for HIDDEN_CLOSE_MS,
+// its stream closes, which frees the iPhone's camera and microphone and ends a takeover; shown
+// again, the stream opens again. The grace is the stream's own lease: a longer one would need the
+// hidden panel to keep calling, the relay traffic hiding is meant to stop.
+const HIDDEN_CLOSE_MS = 10000;
+let intersecting = true, hiddenTimer, pausedHidden = false;
+const shownWaiters = new Set();
+function hidden() {
+  const container = app.getHostContext?.()?.containerDimensions;
+  return document.visibilityState === 'hidden' || !intersecting || container?.width === 0 || container?.height === 0;
+}
+function shown() { return new Promise(resolve => shownWaiters.add(resolve)); }
+function visibilityChanged() {
+  if (hidden()) {
+    hiddenTimer ??= setTimeout(() => {
+      hiddenTimer = undefined;
+      if (!hidden() || !state.stream) return;
+      pausedHidden = true; state.generation++; stop();
+      $('placeholder').textContent = 'Paused while hidden';
+    }, HIDDEN_CLOSE_MS);
+    return;
+  }
+  clearTimeout(hiddenTimer); hiddenTimer = undefined;
+  for (const resolve of [...shownWaiters]) { shownWaiters.delete(resolve); resolve(); }
+  if (pausedHidden) { pausedHidden = false; void openStream(); return; }
+  if (state.transport === 'webrtc') { rtc?.send({ type: 'ack', seq: decodedSeq }); resync(); }
+}
+document.addEventListener('visibilitychange', visibilityChanged);
+if (typeof IntersectionObserver !== 'undefined') new IntersectionObserver(entries => { intersecting = entries.at(-1).isIntersecting; visibilityChanged(); }).observe(document.documentElement);
+
+// The phone's stream dropped (Wi-Fi lost, the helper restarting): the picture shown is the last
+// one, not live, until frames come again.
+let sourceDown = false;
+function sourceState(error) {
+  if (error && !sourceDown) { sourceDown = true; notice(`Reconnecting to the iPhone… The picture is not live. (${error})`); }
+  else if (!error && sourceDown) { sourceDown = false; notice(''); }
+}
+
+app.onhostcontextchanged = context => { applyContext(context); layout(); visibilityChanged(); };
 app.onteardown = async () => { state.closed = true; state.generation++; stop(); return {}; };
 window.addEventListener('pagehide', () => stop());
 

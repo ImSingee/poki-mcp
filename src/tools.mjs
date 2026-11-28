@@ -25,6 +25,8 @@ export const approvalHints = {
   build_and_run: { destructiveHint: true, openWorldHint: false },
   open_url: { destructiveHint: true, openWorldHint: true },
   download_app_container: { destructiveHint: false, openWorldHint: true },
+  // Stops other sessions' work on the device and holds it for the screen panel.
+  screen_takeover: { destructiveHint: true, openWorldHint: false },
   get_clipboard: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
   set_clipboard: { destructiveHint: true, openWorldHint: true },
   // Deletes a saved pairing and stops every session's work on that phone.

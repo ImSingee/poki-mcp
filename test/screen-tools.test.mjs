@@ -13,6 +13,9 @@ import { fakeNative } from './stream-fixture.mjs';
 const target = { id: 'fixture-phone', kind: 'physical' };
 const until = async (predicate, ms = 5000) => { const end = Date.now() + ms; while (!predicate()) { if (Date.now() > end) throw new Error('Timed out'); await delay(5); } };
 
+// A takeover token as a refused gesture's reply carries it.
+const grant = viewer => { viewer.takeoverTokens ??= new Map(); const token = `test-token-${Math.random().toString(36).slice(2)}`; viewer.takeoverTokens.set(token, performance.now() + 60000); return token; };
+
 async function setup(t) {
   const coordinator = new Coordination();
   const agent = new Session(coordinator), view = new Session(coordinator);
@@ -73,13 +76,14 @@ test('screen_input respects another session\'s lease, and a confirmed takeover e
   let aborted;
   const work = coordinator.call(agent, 'poki_mcp_status', {}, undefined, 'r1');
   for (const op of coordinator.operations) if (op.owner === agent) { op.devices.add(target.id); op.controller.signal.addEventListener('abort', () => { aborted = op.controller.signal.reason; }); }
-  const taken = await takeOver(view, viewer);
+  const taken = await takeOver(view, viewer, { token: refused.structuredContent.takeover_token });
   await work.catch(() => {});
   assert.equal(taken.structuredContent.taken_over, true);
   assert.equal(aborted?.stopReason, 'taken_over');
   assert.equal(coordinator.leases.get(target.id).owner, viewer.owner);
-  // The agent is kept off, even though the view's calls may come on the agent's own session.
-  assert.throws(() => coordinator.access(agent, target), /occupied/);
+  // The agent is kept off, even though the view's calls may come on the agent's own session, and
+  // is told why.
+  assert.throws(() => coordinator.access(agent, target), /occupied: a person took over fixture-phone in the screen panel/);
   assert.equal((await screenInput(agent, viewer, { kind: 'tap', x: 0.2, y: 0.2 }, { native })).structuredContent.sent, true);
   assert.equal(sent.length, 1);
   // Closing the view hands the device back.
@@ -98,7 +102,11 @@ test('ICE servers: public STUN by default, none when turned off, and TURN creden
   assert.deepEqual(turn.urls, ['turns:turn.example:443', 'turn:turn.example:3478']);
   assert.equal(turn.username, `${now / 1000 + 3600}:poki`);
   assert.equal(turn.credential, createHmac('sha1', 'secret').update(turn.username).digest('base64'));
-  assert.throws(() => iceServers({ POKI_TURN_URL: 'http://x' }), /must start with/);
+  assert.throws(() => iceServers({ POKI_TURN_URL: 'http://x', POKI_TURN_SECRET: 'secret' }), /must start with/);
+  // A view is only given credentials that expire: no TURN without the shared secret.
+  assert.throws(() => iceServers({ POKI_TURN_URL: 'turn:turn.example:3478', POKI_TURN_USERNAME: 'u', POKI_TURN_PASSWORD: 'p' }), /POKI_TURN_SECRET/);
+  const [, short] = iceServers({ POKI_STUN_URL: 'stun:a', POKI_TURN_URL: 'turn:t', POKI_TURN_SECRET: 's', POKI_TURN_TTL_SECONDS: '600' }, now, { label: 'poki-abc' });
+  assert.equal(short.username, `${now / 1000 + 600}:poki-abc`);
 });
 
 test('RTC packets carry the codec, sequence, key flag and config, in chunks the view reassembles', () => {
@@ -125,7 +133,7 @@ test('screen_takeover called as a tool takes the device, and the agent is then r
   const { coordinator, agent, view, viewer, sent, native } = await setup(t);
   const op = { owner: view, controller: new AbortController(), devices: new Set(), timings: [] };
   coordinator.operations.add(op);
-  const taken = await work.run({ operation: op, signal: op.controller.signal, timings: op.timings }, () => takeOver(view, viewer));
+  const taken = await work.run({ operation: op, signal: op.controller.signal, timings: op.timings }, () => takeOver(view, viewer, { token: grant(viewer) }));
   coordinator.operations.delete(op);
   assert.equal(taken.structuredContent?.taken_over, true, JSON.stringify(taken));
   assert.equal(coordinator.leases.get(target.id).owner, viewer.owner);
@@ -180,7 +188,7 @@ test('a takeover also stops another session\'s recording or simulated location o
   let cleaned;
   agent.cleanup = async devices => { cleaned = [...devices]; agent.backgroundDevices.delete(target.id); return { recordings: [], locations: [] }; };
   view.peers = () => [agent, view];
-  const taken = await takeOver(view, viewer);
+  const taken = await takeOver(view, viewer, { token: grant(viewer) });
   assert.equal(taken.structuredContent?.taken_over, true, JSON.stringify(taken));
   assert.deepEqual(cleaned, [target.id], 'the recording kept running under the takeover');
 });
@@ -200,7 +208,7 @@ test('a takeover whose panel closes while the agent\'s work stops takes no lease
   let finish;
   const op = { owner: agent, devices: new Set([target.id]), controller: new AbortController(), timings: [], done: new Promise(resolve => { finish = resolve; }) };
   coordinator.operations.add(op);
-  const taking = takeOver(view, viewer);
+  const taking = takeOver(view, viewer, { token: grant(viewer) });
   await delay(20);
   viewer.close();
   coordinator.operations.delete(op); finish();
@@ -300,10 +308,49 @@ test('disconnect_device ends the phone\'s screen panels, so their subscription d
 test('a disconnect still reaches a panel that has taken over the iPhone', async t => {
   const { coordinator, view, viewer } = await setup(t);
   void coordinator;
-  const taken = await takeOver(view, viewer);
+  const taken = await takeOver(view, viewer, { token: grant(viewer) });
   assert.equal(taken.structuredContent?.taken_over, true, JSON.stringify(taken));
   viewer.screens.closeDevice(target.id);
   assert.equal(viewer.ended?.reason, 'device_disconnected', 'the takeover dropped the disconnect\'s reason');
   assert.throws(() => viewer.screens.get(viewer.id), { code: 'device_disconnected' });
   assert.equal(viewer.takeover, undefined);
+});
+
+test('a takeover needs the token of a gesture the agent refused, used once, and the approval', async t => {
+  const { coordinator, agent, view, viewer, native } = await setup(t);
+  await coordinator.acquire(agent, target, 120);
+  // No token (a model calling screen_takeover on its own) and a made-up one are refused.
+  assert.equal((await takeOver(view, viewer, {})).structuredContent.reason, 'no_token');
+  assert.equal((await takeOver(view, viewer, { token: 'x'.repeat(32) })).structuredContent.reason, 'no_token');
+  assert.equal(coordinator.leases.get(target.id).owner, agent);
+  // A refused gesture carries one; a declined approval takes nothing, and the token is spent.
+  const { takeover_token: token } = (await screenInput(view, viewer, { kind: 'tap', x: 0.5, y: 0.5 }, { native })).structuredContent;
+  assert.ok(token);
+  const declined = await takeOver(view, viewer, { token, approve: async () => ({ refused: true, message: 'declined' }) });
+  assert.equal(declined.structuredContent.reason, 'not_approved');
+  assert.equal(coordinator.leases.get(target.id).owner, agent, 'a declined takeover ended the agent\'s lease');
+  assert.equal((await takeOver(view, viewer, { token })).structuredContent.reason, 'no_token', 'a token was used twice');
+  // An expired token is refused.
+  const late = (await screenInput(view, viewer, { kind: 'tap', x: 0.5, y: 0.5 }, { native })).structuredContent.takeover_token;
+  viewer.takeoverTokens.set(late, performance.now() - 1);
+  assert.equal((await takeOver(view, viewer, { token: late })).structuredContent.reason, 'no_token');
+  // An approved one takes over.
+  const approved = (await screenInput(view, viewer, { kind: 'tap', x: 0.5, y: 0.5 }, { native })).structuredContent.takeover_token;
+  let asked = 0;
+  const taken = await takeOver(view, viewer, { token: approved, approve: async () => { asked++; } });
+  assert.equal(taken.structuredContent.taken_over, true, JSON.stringify(taken));
+  assert.equal(asked, 1);
+});
+
+test('a takeover lasts while the panel keeps its stream, beyond the takeover lease', async t => {
+  const { coordinator, view, viewer } = await setup(t);
+  const taken = await takeOver(view, viewer, { token: grant(viewer) });
+  assert.equal(taken.structuredContent.taken_over, true);
+  const lease = coordinator.leases.get(target.id);
+  const until = lease.until;
+  // The view reads (renewing its stream) later on: the takeover is renewed with it.
+  viewer.renew(performance.now() + 6000);
+  await delay(10);
+  viewer.onRenew(performance.now() + 6000);
+  assert.ok(coordinator.leases.get(target.id).until > until, 'the takeover was not renewed by the panel\'s reads');
 });

@@ -39,12 +39,17 @@ test('show_screen, a stream, a tap and its end reach the phone through the daemo
   let ack;
   while (frames.length < 5) {
     const reply = (await host.call('screen_read', { stream: opened.stream, ack, wait_ms: 1000 })).structuredContent;
+    if (!reply.frames.length) continue;
+    assert.equal(reply.codec_string, 'hvc1.1.6.L60.90');
+    // Frames follow on without a gap, except where the daemon starts again at a key frame (a slow
+    // read missed a chain the phone replaced meanwhile): the reply then says so.
+    const previous = frames.at(-1)?.seq;
+    if (previous !== undefined && reply.frames[0].seq !== previous + 1) assert.ok(reply.discontinuity && reply.frames[0].key, `a gap after ${previous} without a discontinuity at a key frame: ${JSON.stringify(reply.frames.map(f => [f.seq, f.key]))}`);
+    for (const [index, frame] of reply.frames.entries()) if (index) assert.equal(frame.seq, reply.frames[index - 1].seq + 1, 'a gap inside one batch');
     frames.push(...reply.frames);
-    ack = frames.at(-1)?.seq ?? ack;
-    if (reply.frames.length) assert.equal(reply.codec_string, 'hvc1.1.6.L60.90');
+    ack = frames.at(-1).seq;
   }
   assert.equal(frames[0].key, true, 'the stream did not start at a key frame');
-  assert.deepEqual(frames.map(f => f.seq), frames.map((_, i) => frames[0].seq + i));
   assert.equal((await host.call('screen_input', { stream: opened.stream, kind: 'tap', x: 0.25, y: 0.75 })).structuredContent.sent, true);
   await until(async () => (await host.commands()).some(c => c.remote === 'tap' && c.request.x === 16384 && c.request.y === 49151));
   await host.call('screen_close', { stream: opened.stream });
@@ -61,14 +66,17 @@ test("a confirmed takeover through the daemon stops the agent's batch and keeps 
   // The agent holds the input lock: the view's gesture comes back busy, and nothing reaches the phone.
   const busy = await host.call('screen_input', { stream: opened.stream, kind: 'tap', x: 0.5, y: 0.5 });
   assert.equal(busy.structuredContent.reason, 'busy', JSON.stringify(busy));
-  const taken = await host.call('screen_takeover', { stream: opened.stream, confirm: true });
+  // A model cannot take over on its own: the token comes from the gesture the agent refused.
+  assert.equal((await host.call('screen_takeover', { stream: opened.stream, token: 'x'.repeat(32) })).structuredContent.reason, 'no_token');
+  assert.ok(busy.structuredContent.takeover_token);
+  const taken = await host.call('screen_takeover', { stream: opened.stream, token: busy.structuredContent.takeover_token });
   assert.equal(taken.structuredContent?.taken_over, true, JSON.stringify(taken));
   const stopped = await batch;
   assert.ok(Date.now() - started < 10000, 'the batch ran on after the takeover');
   assert.match(JSON.stringify(stopped.content), /taken_over/, JSON.stringify(stopped));
   const refused = await host.call('tap', { device: 'lab-iphone', x: 10, y: 10 });
   assert.equal(refused.isError, true);
-  assert.match(refused.content[0].text, /occupied/);
+  assert.match(refused.content[0].text, /occupied: a person took over lab-iphone in the screen panel/);
   assert.equal((await host.call('screen_input', { stream: opened.stream, kind: 'tap', x: 0.1, y: 0.2 })).structuredContent.sent, true);
   const taps = (await host.commands()).filter(c => c.remote === 'tap');
   assert.deepEqual(taps.map(c => [c.request.x, c.request.y]), [[6554, 13107]], 'only the view\'s tap after the takeover reached the phone');

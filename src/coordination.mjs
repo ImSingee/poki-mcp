@@ -26,7 +26,8 @@ const failure = error => ({ isError: true, ...text(error.message), _meta: { stop
 //   read slot instead and runs beside another session's input (input-lock.mjs).
 // - A lease keeps every other session off its device. A session may hold leases on several devices.
 export class Coordination {
-  leases = new Map(); operations = new Set(); revisions = new Map(); scenes = new Map();
+  // activeAt: when a call last used each device (performance.now()), for the screen panel's idle pause.
+  leases = new Map(); operations = new Set(); revisions = new Map(); scenes = new Map(); activeAt = new Map();
   // Devices being unpaired: no session may resolve, lease or act on them until the removal ends.
   unavailable = new Map();
   inputLock = inputLockFromEnv();
@@ -44,9 +45,10 @@ export class Coordination {
     checkWork();
     if (this.unavailable.has(target.id)) throw new Error(this.unavailable.get(target.id));
     const lease = this.leases.get(target.id);
-    if (lease && (lease.owner !== session || lease.state !== 'active' || performance.now() >= lease.until)) throw new Error('Device is occupied or being released.');
+    if (lease && (lease.owner !== session || lease.state !== 'active' || performance.now() >= lease.until)) throw new Error(lease.owner.holdNotice ?? 'Device is occupied or being released.');
     const operation = work.getStore()?.operation;
     if (operation) operation.devices.add(target.id);
+    this.activeAt.set(target.id, performance.now());
   }
   async acquire(session, target, ttl) {
     this.access(session, target);

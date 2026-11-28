@@ -9,7 +9,7 @@ import { randomBytes } from 'node:crypto';
 import { nativeSubscribe, nativeKeyframe } from '../remote.mjs';
 import { Track } from './track.mjs';
 import { Flow, readLimits } from './flow.mjs';
-import { Transcoder, ffmpegAvailable, ENCODER_BACKLOG_BYTES } from './transcode.mjs';
+import { Transcoder, ffmpegCodecs } from './transcode.mjs';
 
 export const VIEWER_TTL_MS = 10_000;
 export const KEYFRAME_INTERVAL_MS = 1000;
@@ -23,6 +23,9 @@ const ENCODER_RESTARTS = 3;
 
 export const CODECS = ['hevc', 'h264', 'jpeg'];
 export const MAX_VIEWERS = 8;
+// Minutes without input in the panel or a tool call on the device before a stream is paused
+// (POKI_SCREEN_IDLE_MINUTES, 0 to never pause).
+export const idleMinutes = (env = process.env) => { const value = Number(env.POKI_SCREEN_IDLE_MINUTES ?? 20); return Number.isFinite(value) && value >= 0 ? value : 20; };
 // How long a WebRTC peer stays open after the view was told its stream ended, for that message to arrive.
 const RTC_ENDED_CLOSE_MS = 250;
 
@@ -71,16 +74,32 @@ class ScreenHub {
     this.nativeBase = undefined;
     const subscription = await this.deps.subscribe(this.target, frame => this.receive(frame), { signal });
     if (this.stopped) { subscription.close(); return; }
+    const recovered = this.error !== undefined;
     this.subscription = subscription; this.retry = 0; this.error = undefined;
     this.reply = subscription.reply;
-    subscription.closed.then(() => { if (this.subscription === subscription) { this.subscription = undefined; this.reconnect(); } });
+    if (recovered) this.sourceChanged();
+    subscription.closed.then(() => { if (this.subscription === subscription) { this.subscription = undefined; this.error ??= 'The iPhone\'s screen stream stopped; reconnecting.'; this.sourceChanged(); this.reconnect(); } });
   }
 
+  // The phone's stream dropped (Wi-Fi lost, the helper died): subscribe again with backoff while
+  // anyone watches. Not while the device is unavailable (unpaired or being paired again): a new
+  // subscription would start a helper from a configuration being replaced.
   reconnect() {
     if (this.stopped || !this.viewers.size) return;
     clearTimeout(this.retryTimer);
-    this.retryTimer = setTimeout(() => this.start().catch(error => { this.error = error.message; this.reconnect(); }), RETRY_MS[Math.min(this.retry++, RETRY_MS.length - 1)]);
+    this.retryTimer = setTimeout(() => {
+      const unavailable = this.deps.unavailable?.(this.target.id);
+      const attempt = unavailable ? Promise.reject(new Error(unavailable)) : this.start();
+      attempt.catch(error => { this.error = error.message; this.sourceChanged(); this.reconnect(); });
+    }, RETRY_MS[Math.min(this.retry++, RETRY_MS.length - 1)]);
     this.retryTimer.unref?.();
+  }
+
+  // Viewers on WebRTC are told when the phone's stream drops and comes back (screen_read replies
+  // carry source_error).
+  sourceChanged() {
+    const error = this.subscription ? null : this.error ?? null;
+    for (const viewer of this.viewers) viewer.rtc?.notify?.({ type: 'source', error });
   }
 
   receive(native) {
@@ -120,23 +139,31 @@ class ScreenHub {
           const now = performance.now();
           transcoder.exits = (transcoder.exits ?? []).filter(at => now - at < 60000);
           transcoder.exits.push(now);
-          if (transcoder.exits.length > ENCODER_RESTARTS) { this.failed.set(codec, `The ${codec} encoder keeps stopping (${transcoder.lastExit ?? 'no reason given'}).`); this.pushed(codec); track.wake(); return; }
-          const timer = setTimeout(() => { if (this.transcoders.get(codec) === transcoder && !transcoder.closed) this.feedChain(transcoder); }, 500);
+          if (transcoder.exits.length > ENCODER_RESTARTS) {
+            this.failed.set(codec, `The ${codec} encoder keeps stopping (${transcoder.lastExit ?? 'no reason given'}).`);
+            // Closed, so the frames that keep coming start no new ffmpeg.
+            transcoder.close();
+            this.pushed(codec); track.wake(); return;
+          }
+          const timer = setTimeout(() => { if (this.transcoders.get(codec) === transcoder && !transcoder.closed) this.startEncoder(transcoder, { placeholder: true }); }, 500);
           timer.unref?.();
         },
       });
       this.tracks.set(codec, track); this.transcoders.set(codec, transcoder);
-      this.feedChain(transcoder);
+      this.startEncoder(transcoder, { placeholder: true });
     }
     return this.tracks.get(codec);
   }
 
-  // Starts an encoder on the cached HEVC chain, so it has a key frame however still the screen is.
-  // With no cached chain (it outgrew its limit), the phone is asked for a key frame instead.
-  feedChain(transcoder) {
-    const hevc = this.tracks.get('hevc');
-    const key = hevc.latestKey();
-    if (key) { for (const frame of hevc.since(key.seq - 1)) transcoder.write(frame); return; }
+  // Starts (or restarts) an encoder without replaying the cached chain: the frames after its key
+  // frame would come out again as new pictures, showing the past and, on a slow viewer, asking for
+  // the next restart. When the newest key frame is the screen now, it alone is fed. Otherwise the
+  // encoder starts at the phone's next key frame, which it is asked for; only a track with no
+  // picture yet (placeholder) gets the older key frame's picture meanwhile.
+  startEncoder(transcoder, { placeholder = false } = {}) {
+    const hevc = this.tracks.get('hevc'), key = hevc.latestKey();
+    if (key && hevc.latest === key.seq) { transcoder.write(key); return; }
+    if (key && placeholder) { transcoder.write(key); transcoder.feeding = false; }
     this.askSourceKeyframe();
   }
 
@@ -151,14 +178,11 @@ class ScreenHub {
     this.chainKeyframeTimer.unref?.();
   }
 
-  // A backed-up encoder caught up: it resumes on the cached chain when that fits its input
-  // buffer, else at the phone's next key frame.
+  // A backed-up encoder caught up: it resumes at the newest key frame if that is the screen now,
+  // else at the phone's next key frame.
   resumeEncoder(transcoder) {
     if (transcoder.closed || transcoder.feeding || this.transcoders.get(transcoder.mode) !== transcoder) return;
-    const hevc = this.tracks.get('hevc'), key = hevc.latestKey();
-    const chain = key ? hevc.since(key.seq - 1) : [];
-    if (key && chain.reduce((sum, frame) => sum + frame.data.length, 0) <= ENCODER_BACKLOG_BYTES) { for (const frame of chain) transcoder.write(frame); return; }
-    this.askSourceKeyframe();
+    this.startEncoder(transcoder);
   }
 
   bitrate(codec) {
@@ -175,24 +199,22 @@ class ScreenHub {
     this.restartEncoder(codec, { bitrate: wanted });
   }
 
+  // A new encoder for a new bitrate, from the phone's next key frame.
   restartEncoder(codec, options) {
     const transcoder = this.transcoders.get(codec);
     if (!transcoder) return;
     transcoder.restart(options);
-    this.feedChain(transcoder);
+    this.startEncoder(transcoder);
   }
 
-  // A viewer needs a key frame: the phone is asked (PLI/FIR, then a media restart in the helper),
-  // and a transcoded track's encoder restarts on the cached chain. At most once a second.
+  // A viewer needs a key frame: the phone is asked (PLI/FIR, then a media restart in the helper).
+  // The H.264 encoder makes a key frame of each of the phone's (-force_key_frames source), and each
+  // JPEG picture stands alone, so no encoder restarts. At most once a second.
   requestKeyframe(codec, now = performance.now()) {
     if (now - this.lastKeyframe < KEYFRAME_INTERVAL_MS) return false;
     this.lastKeyframe = now;
     if (codec === 'hevc') this.deps.keyframe(this.target).catch(() => {});
-    else if (codec === 'h264') {
-      // An encoder that has not produced anything yet will begin with a key frame anyway.
-      const transcoder = this.transcoders.get(codec), track = this.tracks.get(codec);
-      if (transcoder?.running && track?.latest > 0 && now - transcoder.startedAt >= KEYFRAME_INTERVAL_MS) this.restartEncoder(codec);
-    }
+    else if (codec === 'h264') this.askSourceKeyframe();
     return true;
   }
 
@@ -221,7 +243,9 @@ class Viewer {
     this.flow = new Flow({ latestOnly: codec === 'jpeg' });
     this.renew();
   }
-  renew() { this.expires = performance.now() + this.screens.ttlMs; }
+  // Every sign of the view (a read, a WebRTC control message) keeps the stream, and through
+  // onRenew a takeover, alive.
+  renew() { const now = performance.now(); this.expires = now + this.screens.ttlMs; this.onRenew?.(now); }
   get track() { return this.hub.track(this.codec); }
 
   describe() {
@@ -285,24 +309,42 @@ class Viewer {
 
 // Every device's live screen in this daemon.
 export class Screens {
-  hubs = new Map(); viewers = new Map(); ended = new Map(); sweeper;
-  constructor({ ttlMs = VIEWER_TTL_MS, ...deps } = {}) { this.ttlMs = ttlMs; this.deps = { subscribe: nativeSubscribe, keyframe: nativeKeyframe, ffmpeg: ffmpegAvailable, ...deps }; }
+  // disconnected: devices whose panels disconnect_device ended, so that a panel mounted again does
+  // not reconnect the phone by itself.
+  hubs = new Map(); viewers = new Map(); ended = new Map(); disconnected = new Map(); sweeper;
+  // deps.ffmpeg: the codecs ffmpeg can transcode to (an array), or true/false for both or none.
+  constructor({ ttlMs = VIEWER_TTL_MS, ...deps } = {}) { this.ttlMs = ttlMs; this.deps = { subscribe: nativeSubscribe, keyframe: nativeKeyframe, ffmpeg: ffmpegCodecs, ...deps }; }
 
   // The codecs this host can serve, in the order a view tries them.
-  async codecs() { return (await this.deps.ffmpeg()) ? CODECS : ['hevc']; }
+  async codecs() {
+    const transcoded = await this.deps.ffmpeg();
+    const list = transcoded === true ? CODECS : Array.isArray(transcoded) ? transcoded : [];
+    return CODECS.filter(codec => codec === 'hevc' || list.includes(codec));
+  }
 
-  // A new viewer of target's screen in the first of `codecs` this host serves.
-  async open(target, { codecs = CODECS, signal } = {}) {
-    const served = await this.codecs();
+  // The daemon's view of its devices: unavailable(id) says why a device cannot be used now (unpaired
+  // or being paired again), activity(id) when a tool last used it (performance.now() time).
+  attach({ unavailable, activity }) { Object.assign(this.deps, { unavailable, activity }); }
+
+  // A new viewer of target's screen in the first of `codecs` this host serves. A device whose panels
+  // disconnect_device ended opens again only with reconnect (the person asked for it), or once a
+  // tool has used the device since.
+  async open(target, { codecs = CODECS, signal, reconnect = false } = {}) {
+    const disconnected = this.disconnected.get(target.id);
+    if (disconnected && !reconnect && (this.deps.activity?.(target.id) ?? 0) <= disconnected.at) throw Object.assign(new Error(disconnected.message), { reason: disconnected.reason });
+    this.disconnected.delete(target.id);
+    // HEVC is served as the phone sends it: a view that wants nothing else needs no ffmpeg.
+    const served = codecs.every(codec => codec === 'hevc') ? ['hevc'] : await this.codecs();
     // A codec whose encoder kept failing for this device is not offered again while its hub lives.
     const failed = this.hubs.get(target.id)?.failed ?? new Map();
     const codec = codecs.find(c => served.includes(c) && !failed.has(c));
-    if (!codec) throw new Error(`None of the codecs ${codecs.join(', ')} can be served here${served.length === 1 ? ' (ffmpeg with libx264 is not installed, so only HEVC is available)' : ''}.`);
+    if (!codec) throw new Error(`None of the codecs ${codecs.join(', ')} can be served here${served.length < CODECS.length ? ` (this computer's ffmpeg serves ${served.join(' and ')}: H.264 needs ffmpeg with libx264, JPEG ffmpeg with mjpeg)` : ''}.`);
     let hub = this.hubs.get(target.id);
     // Each viewer holds reads, credit and possibly a WebRTC peer; an unrenewed one goes in 10 s.
     if (hub && hub.viewers.size >= MAX_VIEWERS) throw new Error(`${target.id} already has ${MAX_VIEWERS} screen viewers. Close a screen panel first.`);
     if (!hub) { hub = new ScreenHub(target, this.deps); this.hubs.set(target.id, hub); }
     const viewer = new Viewer(this, hub, codec);
+    viewer.openedAt = performance.now();
     hub.viewers.add(viewer); this.viewers.set(viewer.id, viewer);
     this.sweep();
     // A cold start can take longer than the lease (the helper may open a tunnel and the media
@@ -343,18 +385,32 @@ export class Screens {
 
   // Closes viewers whose lease ran out: an abandoned panel must not keep the phone's camera and
   // microphone busy.
+  // Closes viewers whose lease ran out, and viewers idle for idleMinutes(): nobody gave input in the
+  // panel and no tool used the device. A panel left open on a screen nobody looks at must not keep
+  // the iPhone's camera and microphone busy; the person resumes it with one click. While an agent
+  // works on the device, its calls keep the panel going.
   sweep() {
     if (this.sweeper) return;
     this.sweeper = setInterval(() => {
-      const now = performance.now();
-      for (const viewer of [...this.viewers.values()]) if (!viewer.opening && now >= viewer.expires) viewer.close();
+      const now = performance.now(), idleMs = idleMinutes() * 60000;
+      for (const viewer of [...this.viewers.values()]) {
+        if (viewer.opening) continue;
+        if (now >= viewer.expires) { viewer.close(); continue; }
+        const active = Math.max(viewer.openedAt, viewer.inputAt ?? 0, this.deps.activity?.(viewer.device) ?? 0);
+        if (idleMs && now - active >= idleMs) viewer.close({ reason: 'idle', message: `The screen was paused after ${idleMinutes()} minutes without activity, which frees the iPhone's camera and microphone. Resume to show it again.` });
+      }
     }, Math.min(500, this.ttlMs / 4));
     this.sweeper.unref?.();
   }
 
-  // Every viewer of a device ends: it was unpaired or disconnected.
+  // Every viewer of a device ends: it was disconnected, unpaired or is being paired again. After a
+  // disconnect or a new pairing, a panel opens the stream again only when the person asks.
   closeDevice(id, reason = 'device_disconnected') {
-    const message = reason === 'device_unpaired' ? 'This iPhone was unpaired, so its screen is no longer shown.' : 'This iPhone was disconnected. Reconnect to show its screen again.';
+    const message = {
+      device_unpaired: 'This iPhone was unpaired, so its screen is no longer shown.',
+      device_repairing: 'This iPhone is being paired again. Reconnect to show its screen once pairing is done.',
+    }[reason] ?? 'This iPhone was disconnected. Reconnect to show its screen again.';
+    if (reason !== 'device_unpaired') this.disconnected.set(id, { reason, message, at: performance.now() });
     for (const viewer of [...this.viewers.values()]) if (viewer.device === id) viewer.close({ reason, message });
   }
   closeAll() { for (const viewer of [...this.viewers.values()]) viewer.close(); }

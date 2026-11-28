@@ -5,12 +5,14 @@
 //
 // The view opens two ordered, reliable DataChannels: `media` (frames from here) and `control`
 // (acknowledgements, keyframe requests and gestures from the view). Frames use lody's private
-// packets (https://github.com/ImSingee/Lody, apps/cli/src/device-preview, Apache License 2.0),
+// packets (https://github.com/ImSingee/Lody at 7ae04272dd8cb19598929ca16553f387e3a3fe87,
+// apps/cli/src/device-preview, Apache License 2.0; see THIRD_PARTY_NOTICES.md), modified for Poki
 // with Annex-B payloads and an HEVC variant:
 //   LHVC / LAVC: u32 magic | u32 seq | u8 2=key 3=delta | u16 config length | config | Annex-B
 //   LODY:        u32 magic | u32 seq | JPEG
 // Each packet is split into chunks of at most RTC_CHUNK_BYTES: u32 total length | u32 offset | bytes.
 import { createHmac } from 'node:crypto';
+import { isIP } from 'node:net';
 
 export const MAGIC = { hevc: 0x4c485643, h264: 0x4c415643, jpeg: 0x4c4f4459 };
 export const RTC_CHUNK_BYTES = 16 * 1024;
@@ -42,38 +44,57 @@ export function* chunks(frame) {
   }
 }
 
-// The ICE servers both peers use. STUN defaults to a public server (POKI_STUN_URL, empty to turn it
-// off); TURN is used only when POKI_TURN_URL is set, with time-limited credentials derived from
-// POKI_TURN_SECRET (coturn's use-auth-secret) or the static POKI_TURN_USERNAME/POKI_TURN_PASSWORD.
-export function iceServers(env = process.env, now = Date.now()) {
+// The ICE servers both peers use. STUN defaults to Google's public server (POKI_STUN_URL; set it
+// empty for host candidates only): each answer then asks it for this computer's public address,
+// which also tells Google that address. TURN is used only when POKI_TURN_URL is set, with
+// credentials derived from POKI_TURN_SECRET (coturn's use-auth-secret) that expire after
+// POKI_TURN_TTL_SECONDS (default an hour): a view gets those, never a long-lived password.
+export function iceServers(env = process.env, now = Date.now(), { label = 'poki' } = {}) {
   const servers = [];
   const stun = env.POKI_STUN_URL ?? 'stun:stun.l.google.com:19302';
   if (stun.trim()) servers.push({ urls: stun.split(',').map(url => url.trim()).filter(Boolean) });
   const turn = env.POKI_TURN_URL?.trim();
   if (turn) {
+    if (!env.POKI_TURN_SECRET) throw new Error('POKI_TURN_URL needs POKI_TURN_SECRET (the TURN server\'s static-auth-secret): a view is only given credentials that expire.');
     // werift uses only the first TURN URL, so the most widely reachable one (TLS on 443) goes first.
     const urls = turn.split(',').map(url => url.trim()).filter(Boolean)
       .sort((a, b) => Number(/^turns:.*:443(\?|$)/.test(b)) - Number(/^turns:.*:443(\?|$)/.test(a)));
-    let username = env.POKI_TURN_USERNAME, credential = env.POKI_TURN_PASSWORD;
-    if (env.POKI_TURN_SECRET) {
-      username = `${Math.floor(now / 1000) + 3600}:poki`;
-      credential = createHmac('sha1', env.POKI_TURN_SECRET).update(username).digest('base64');
-    }
-    servers.push({ urls, ...(username ? { username, credential } : {}) });
+    const ttl = Math.max(60, Math.min(86400, Number(env.POKI_TURN_TTL_SECONDS) || 3600));
+    const username = `${Math.floor(now / 1000) + ttl}:${label}`;
+    const credential = createHmac('sha1', env.POKI_TURN_SECRET).update(username).digest('base64');
+    servers.push({ urls, username, credential });
   }
   for (const server of servers) for (const url of server.urls) if (!/^(stun|turn|turns):/.test(url)) throw new Error(`Invalid ICE server URL ${url}: it must start with stun:, turn: or turns:.`);
   return servers;
 }
 
+// This computer's side of a peer. werift's own default STUN server is off, so an empty
+// POKI_STUN_URL means no STUN at all. POKI_RTC_ADDRESSES (one IPv4 and/or one IPv6 address) binds
+// the peer to those interfaces alone, so the answer does not list every address of this computer
+// (VPN, VM bridges, a router's WAN side, global IPv6).
+export function peerOptions(servers, env = process.env) {
+  const options = { iceServers: servers, iceUseDefaultStunServer: false };
+  const addresses = (env.POKI_RTC_ADDRESSES ?? '').split(',').map(a => a.trim()).filter(Boolean);
+  if (addresses.length) {
+    const udp4 = addresses.find(a => isIP(a) === 4), udp6 = addresses.find(a => isIP(a) === 6);
+    const invalid = addresses.find(a => !isIP(a));
+    if (invalid) throw new Error(`POKI_RTC_ADDRESSES: ${invalid} is not an IP address.`);
+    Object.assign(options, { iceInterfaceAddresses: { ...(udp4 ? { udp4 } : {}), ...(udp6 ? { udp6 } : {}) }, iceUseIpv4: Boolean(udp4), iceUseIpv6: Boolean(udp6) });
+  }
+  return options;
+}
+
 // Answers a view's offer for `viewer`. Resolves with the answer SDP once ICE gathering is done (no
 // trickle). Frames then flow on the media channel as fast as the viewer's credit allows; control
-// messages are { type: 'ack', seq } | { type: 'keyframe' } | { type: 'input', ...screen_input args }.
-export async function answer(viewer, sdp, { onInput, servers = iceServers() } = {}) {
+// messages are { type: 'ack', seq } | { type: 'keyframe' } | { type: 'input', id, ...screen_input
+// args } | { type: 'ping', t } (answered with pong).
+// onInput(args) runs one gesture; onActivity() is called for every message from the view.
+export async function answer(viewer, sdp, { onInput, onActivity, servers = iceServers() } = {}) {
   if (typeof sdp !== 'string' || !sdp.length || sdp.length > 64 * 1024) throw new Error('Invalid offer.');
   const { RTCPeerConnection } = await import('werift');
   // One peer per viewer: a new offer replaces the previous peer.
   await viewer.rtc?.close();
-  const pc = new RTCPeerConnection({ iceServers: servers });
+  const pc = new RTCPeerConnection(peerOptions(servers));
   let media, control, closing, sending = false;
   const subscriptions = [];
   const close = () => {
@@ -137,6 +158,7 @@ export async function answer(viewer, sdp, { onInput, servers = iceServers() } = 
         let value;
         try { value = JSON.parse(message); } catch { return void close(); }
         viewer.renew();
+        onActivity?.();
         if (value?.type === 'ack') { viewer.flow.acknowledge(value.seq, performance.now()); void pump(); }
         // A resync can make an already sent picture eligible again (a still screen's latest JPEG):
         // send it now rather than wait for a frame the phone may not send.
@@ -144,7 +166,10 @@ export async function answer(viewer, sdp, { onInput, servers = iceServers() } = 
         else if (value?.type === 'input' && onInput) {
           const { type: _type, id, ...args } = value;
           onInput(args).then(result => sendControl({ type: 'input-result', id, ...result }), error => sendControl({ type: 'input-result', id, isError: true, error: error.message }));
-        } else if (value?.type !== 'ping') return void close();
+        }
+        // The view's round-trip measurement for its latency badge.
+        else if (value?.type === 'ping') { if (Number.isFinite(value.t)) sendControl({ type: 'pong', t: value.t }); }
+        else return void close();
       }).unSubscribe);
     }
     subscriptions.push(channel.stateChanged.subscribe(state => { if (state === 'open') start(); if (state === 'closed') void close(); }).unSubscribe);

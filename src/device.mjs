@@ -506,6 +506,8 @@ export class DeviceContext {
           // A disconnect is meant to stay: its screen panels end first, or their subscription would
           // start a new helper and reconnect the phone (and its camera and microphone) at once.
           if (name === 'disconnect_device') screens.closeDevice(target.id);
+          // Reconnecting on purpose lets a panel open the phone again without asking.
+          else screens.disconnected.delete(target.id);
           return text(await nativeRequest(target, { op: name === 'disconnect_device' ? 'disconnect' : 'reconnect' }));
         }
         case 'get_device_info': {
@@ -803,6 +805,13 @@ export class Session {
     if (this.coordinator.unavailable.has(matches[0].id)) throw new Error(this.coordinator.unavailable.get(matches[0].id));
     return matches[0].id;
   }
+  // A takeover stops other sessions' work on the device, so it is a gated tool: in ask mode a person
+  // on this computer confirms it as well as in the panel; in host mode the MCP client asked.
+  async approveTakeover(target) {
+    if (approvalMode() !== 'ask') return undefined;
+    const answer = await askHuman(`是否允许在屏幕面板中接管这台 iPhone？\n设备：${target.name ?? target.id}\n这会停止其他会话在这台 iPhone 上正在进行的操作、录屏和模拟位置，并在面板打开期间让其他会话无法使用它。`, 120);
+    return answer.completed ? undefined : { refused: true, message: answer.status === 'timeout' ? 'Nobody confirmed the takeover on the Poki computer in time.' : 'The takeover was declined on the Poki computer.', detail: { approval: answer.status } };
+  }
   // The device a screen panel shows. Watching needs no lease, so a person can see what the agent does
   // with a device it holds and take over from there; screen_input checks the lease for each gesture.
   async screenTarget(query) {
@@ -823,7 +832,7 @@ export class Session {
     if (pairingTools.has(name)) return { keys: [], run: () => this.dispatchPairing(name, args) };
     // No device keys either: a view's reads must not keep other sessions from taking a lease, and
     // screen_input takes the device's lease and input lock itself.
-    if (screenTools.has(name)) return { keys: [], run: () => runScreenTool(this, name, args, { signal: signal(), resolve: query => this.screenTarget(query) }) };
+    if (screenTools.has(name)) return { keys: [], run: () => runScreenTool(this, name, args, { signal: signal(), resolve: query => this.screenTarget(query), approve: target => this.approveTakeover(target) }) };
     if (name === 'run_code') {
       const named = args.devices;
       if (!Array.isArray(named) || !named.length) throw new Error('run_code needs devices: the ids from list_devices the script may use.');

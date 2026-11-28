@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, writeFile, readFile, stat, access } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, stat, access, mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fixture } from './fixture.mjs';
@@ -720,4 +721,38 @@ test('the service\'s pairing jobs wait for the device\'s input lock that a runni
   assert.equal((await f.events()).filter(e => e.remote === 'install_ddi').length, 0, 'nothing was installed under the script');
   const finished = await script;
   assert.ok(!finished.isError, JSON.stringify(finished));
+});
+
+test('an open screen panel keeps the daemon busy, and unpairing its iPhone ends the panel and releases the media session', { timeout: 60000 }, async t => {
+  const { sampleFrames } = await import('./stream-fixture.mjs');
+  const video = join(await mkdtemp(join(tmpdir(), 'poki-unpair-video-')), 'video.json');
+  await writeFile(video, JSON.stringify(sampleFrames().map(frame => ({ key: frame.key, config: frame.config?.toString('base64'), data: frame.data.toString('base64') }))));
+  const { f, data, call } = await pairingFixture(t, { registered: ['lab-phone'], remote: { displayService: true, video } });
+  const opened = data(await call('screen_open', { device: 'lab-phone', codecs: ['hevc'] }));
+  const first = data(await call('screen_read', { stream: opened.stream, wait_ms: 1000 }));
+  assert.ok(first.frames.length, 'no frames from the stand-in phone');
+  // The daemon reports the stream as work it must not drop (an automatic daemon does not idle-exit).
+  const endpoint = JSON.parse(await readFile(join(f.dir, 'state/mcp.json'), 'utf8'));
+  const version = await (await fetch(endpoint.url.replace(/\/mcp$/, '/version'), { headers: { authorization: `Bearer ${endpoint.token}` } })).json();
+  assert.ok(version.busy_reasons.some(reason => /screen stream/.test(reason)), JSON.stringify(version.busy_reasons));
+  data(await call('unpair_device', { device: 'lab-phone' }));
+  const after = await call('screen_read', { stream: opened.stream, wait_ms: 0 });
+  assert.equal(after.structuredContent?.reason, 'device_unpaired', JSON.stringify(after));
+  const events = await f.events();
+  assert.ok(events.some(e => e.remote === 'media_unsubscribed'), 'the helper kept the media session for an unpaired phone');
+});
+
+test('screen tools are refused inside batch_commands and run_code with the documented message, and the takeover is gated', { timeout: 60000 }, async t => {
+  const { f, call } = await pairingFixture(t);
+  // A later step that is a screen tool: refused up front, not an internal error.
+  const batch = await call('batch_commands', { device: 'fixture-phone', commands: [{ tool: 'wait', arguments: { seconds: 0 } }, { tool: 'show_screen', arguments: {} }] });
+  assert.equal(batch.isError, true);
+  assert.match(JSON.stringify(batch), /screen tools are for the screen view, not for a batch or run_code/);
+  assert.doesNotMatch(JSON.stringify(batch), /TypeError|is not a function/);
+  const script = await call('run_code', { devices: ['fixture-phone'], code: "return await tools.screen_takeover({ stream: 'x', token: 'y'.repeat(20) });" });
+  assert.equal(script.isError, true);
+  assert.match(JSON.stringify(script), /screen tools are for the screen view/);
+  const status = JSON.parse((await call('poki_mcp_status')).content[0].text);
+  assert.ok(status.approval_covers.includes('screen_takeover'), JSON.stringify(status.approval_covers));
+  void f;
 });
