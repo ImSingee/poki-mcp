@@ -55,7 +55,7 @@ const hostPage = `<!doctype html><html><head><meta charset="utf-8"><style>body{m
 </script></body></html>`;
 
 // Poki's stream tools over a stand-in phone that sends the sample stream in a loop, 10 frames a second.
-function backend({ noFrames = false, busy = false, garbleHevc = false, rtcOffer, openCodecString, inputDelayMs = 0, onlyFirstKey = false, delayFirstFramesMs = 0, devices = [{ id: 'fixture-phone', name: 'Lab iPhone', kind: 'physical', connection: 'RemotePairing' }] } = {}) {
+function backend({ rtcConfig, rtcConfigDelayMs = 0, noFrames = false, busy = false, garbleHevc = false, rtcOffer, openCodecString, inputDelayMs = 0, onlyFirstKey = false, delayFirstFramesMs = 0, devices = [{ id: 'fixture-phone', name: 'Lab iPhone', kind: 'physical', connection: 'RemotePairing' }] } = {}) {
   const native = fakeNative();
   const screens = new Screens({ subscribe: native.subscribe, keyframe: native.keyframe });
   const session = { coordinator: new Coordination(), label: 'view session' };
@@ -74,6 +74,8 @@ function backend({ noFrames = false, busy = false, garbleHevc = false, rtcOffer,
     calls.push({ name, args, at: Date.now() });
     if (name === 'list_devices') return { content: [{ type: 'text', text: '{}' }], structuredContent: { devices } };
     if (name === 'screen_rtc_offer' && rtcOffer) return rtcOffer(args);
+    if (name === 'screen_rtc_config' && rtcConfigDelayMs) await delay(rtcConfigDelayMs);
+    if (name === 'screen_rtc_config' && rtcConfig) { calls.at(-1).args = args; return { content: [{ type: 'text', text: '{}' }], structuredContent: rtcConfig }; }
     if (name === 'screen_input' && busy) { inputs.push(args); return { isError: true, content: [{ type: 'text', text: 'The agent is using this iPhone right now.' }], structuredContent: { reason: 'busy', error: 'The agent is using this iPhone right now.' } }; }
     inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
     let delayed = false;
@@ -404,4 +406,22 @@ test('frames decoded before the WebRTC peer is ready are acknowledged once it is
   assert.ok(result.seq > 0);
   assert.deepEqual(result.sent, [{ type: 'ack', seq: result.seq }], 'the credit of frames decoded before readiness never came back');
   assert.ok(result.after < result.seq + 100000, 'a closed decoder\'s late picture moved the acknowledgement past the new stream');
+});
+
+test('a WebRTC attempt still setting up when the person chooses another iPhone does not offer for the new stream', { skip, timeout: 60000 }, async t => {
+  const devices = [{ id: 'phone-a', name: 'Phone A', kind: 'physical', connection: 'RemotePairing' }, { id: 'phone-b', name: 'Phone B', kind: 'physical', connection: 'RemotePairing' }];
+  // An unreachable STUN server keeps ICE gathering busy for its 1.5 s: the person switches then.
+  const h = await open(t, { settings: { rtc: true, codecs: (await ffmpegAvailable()) ? ['jpeg'] : undefined }, backendOptions: { devices, rtcConfig: { enabled: true, ice_servers: [{ urls: ['stun:192.0.2.1:3478'] }] } } });
+  await h.mount({ content: [{ type: 'text', text: 'shown' }], structuredContent: { device: 'phone-a' } });
+  await until(() => h.poki.calls.some(c => c.name === 'screen_rtc_config'));
+  const streamA = h.poki.calls.find(c => c.name === 'screen_rtc_config').args.stream;
+  await delay(200);
+  await h.view.locator('#device').selectOption('phone-b');
+  await until(() => h.poki.calls.some(c => c.name === 'screen_open' && c.args.device === 'phone-b'));
+  await delay(6000);
+  const offers = h.poki.calls.filter(c => c.name === 'screen_rtc_offer').map(c => c.args.stream);
+  const configs = h.poki.calls.filter(c => c.name === 'screen_rtc_config').map(c => c.args.stream);
+  const streamB = h.poki.calls.find(c => c.name === 'screen_open' && c.args.device === 'phone-b') && configs.at(-1);
+  assert.deepEqual(offers.filter(s => s === streamA), [], 'an offer was sent for the closed stream');
+  assert.ok(offers.filter(s => s === streamB).length <= 1, `phone A's attempt offered for phone B's stream: offers ${JSON.stringify(offers)}, configs ${JSON.stringify(configs)}`);
 });

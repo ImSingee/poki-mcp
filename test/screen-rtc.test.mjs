@@ -116,3 +116,26 @@ test('a gesture the phone refuses stays an error over WebRTC', { timeout: 30000 
   assert.equal(reply.isError, true, JSON.stringify(reply));
   assert.match(reply.error, /Nothing reached/);
 });
+
+test('a second offer for a viewer replaces its peer, and the old peer closing leaves the new one in place', { timeout: 60000 }, async t => {
+  const native = fakeNative();
+  const screens = new Screens({ ...native, ffmpeg: async () => false });
+  t.after(() => screens.closeAll());
+  const viewer = await screens.open(target, { codecs: ['hevc'] });
+  const offer = async () => {
+    const browser = new RTCPeerConnection({ iceServers: [] });
+    t.after(() => browser.close());
+    browser.createDataChannel('media', { ordered: true }); browser.createDataChannel('control', { ordered: true });
+    await browser.setLocalDescription(await browser.createOffer());
+    await until(() => browser.iceGatheringState === 'complete');
+    return browser.localDescription.sdp;
+  };
+  const first = await answer(viewer, await offer(), { servers: [] });
+  const second = await answer(viewer, await offer(), { servers: [] });
+  const current = viewer.rtc;
+  assert.ok(current, 'the second peer is not the viewer\'s');
+  await first.close();
+  assert.equal(viewer.rtc, current, 'closing the replaced peer cleared the new one');
+  await second.close();
+  assert.equal(viewer.rtc, undefined);
+});

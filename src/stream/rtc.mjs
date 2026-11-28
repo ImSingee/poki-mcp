@@ -71,6 +71,8 @@ export function iceServers(env = process.env, now = Date.now()) {
 export async function answer(viewer, sdp, { onInput, servers = iceServers() } = {}) {
   if (typeof sdp !== 'string' || !sdp.length || sdp.length > 64 * 1024) throw new Error('Invalid offer.');
   const { RTCPeerConnection } = await import('werift');
+  // One peer per viewer: a new offer replaces the previous peer.
+  await viewer.rtc?.close();
   const pc = new RTCPeerConnection({ iceServers: servers });
   let media, control, closing, sending = false;
   const subscriptions = [];
@@ -79,8 +81,10 @@ export async function answer(viewer, sdp, { onInput, servers = iceServers() } = 
     clearTimeout(expiry);
     for (const unsubscribe of subscriptions) unsubscribe();
     // Frames still on the closed channel never arrive: the view goes on over tool calls from a key frame.
-    if (viewer.rtc?.close === close && viewer.rtc.started) viewer.flow.resync();
-    viewer.rtc = undefined;
+    if (viewer.rtc?.close === close) {
+      if (viewer.rtc.started) viewer.flow.resync();
+      viewer.rtc = undefined;
+    }
     closing = pc.close().catch(() => {});
     return closing;
   };

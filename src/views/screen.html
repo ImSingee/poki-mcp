@@ -356,7 +356,11 @@ async function tryRtc(generation) {
 async function attemptRtc(generation, attempt) {
   let pc;
   try {
-    const config = await call('screen_rtc_config', { stream: state.stream });
+    // The attempt belongs to the stream it started for; another iPhone chosen meanwhile ends it.
+    const stream = state.stream;
+    const current = () => !attempt.cancelled && generation === state.generation && stream === state.stream;
+    const config = await call('screen_rtc_config', { stream });
+    if (!current()) return false;
     if (!config?.enabled) return false;
     pc = new RTCPeerConnection({ iceServers: config.ice_servers ?? [] });
     attempt.track(pc);
@@ -392,7 +396,8 @@ async function attemptRtc(generation, attempt) {
       pc.addEventListener('icegatheringstatechange', done);
       setTimeout(resolve, 1500);
     });
-    const answer = await call('screen_rtc_offer', { stream: state.stream, sdp: pc.localDescription.sdp });
+    if (!current()) { pc.close(); return false; }
+    const answer = await call('screen_rtc_offer', { stream, sdp: pc.localDescription.sdp });
     if (attempt.cancelled) return false;
     await pc.setRemoteDescription({ type: 'answer', sdp: answer.sdp });
     await opened;

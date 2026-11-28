@@ -90,6 +90,9 @@ struct Streaming {
     backoff: Duration,
     panels_checked_at: Option<tokio::time::Instant>,
     restarted_at: Option<tokio::time::Instant>,
+    /// When maintenance runs next. Kept across requests: a client polling more often than
+    /// STREAM_MAINTENANCE must not postpone it for ever.
+    maintain_at: Option<tokio::time::Instant>,
     /// Whether a viewer was subscribed when last looked (`notice_viewers`).
     watched: bool,
 }
@@ -270,14 +273,19 @@ impl Session {
     }
 
     /// When the subscribed stream next needs looking after.
-    fn maintenance_due(&self) -> Option<tokio::time::Instant> {
+    fn maintenance_due(&mut self) -> Option<tokio::time::Instant> {
         if self.stream.hub.subscribers() == 0 {
+            self.stream.maintain_at = None;
             return None;
         }
         let now = tokio::time::Instant::now();
+        let at = *self
+            .stream
+            .maintain_at
+            .get_or_insert(now + STREAM_MAINTENANCE);
         Some(match self.stream.retry_at {
-            Some(at) if at > now => at,
-            _ => now + STREAM_MAINTENANCE,
+            Some(retry) if retry > at => retry,
+            _ => at,
         })
     }
 
@@ -289,6 +297,7 @@ impl Session {
             return;
         }
         let now = tokio::time::Instant::now();
+        self.stream.maintain_at = Some(now + STREAM_MAINTENANCE);
         let mut restart = self.stream.hub.keyframe_overdue(now)
             && self
                 .stream
@@ -1512,6 +1521,9 @@ mod tests {
             ready_at: now,
             last_input: now,
             last_activity: now,
+            display_id: 1,
+            hub: Default::default(),
+            alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         };
         let (mut connection, _phone) = tunnel();
         connection.media = Some(media);
@@ -2439,6 +2451,51 @@ mod tests {
         // session itself still fails).
         let _ = Box::pin(session.ensure_media()).await;
         assert!(phones.try_recv().is_ok(), "no new tunnel was built");
+        PHONE.with(|slot| slot.borrow_mut().take());
+    }
+
+    // A client polling the helper more often than the maintenance interval does not postpone
+    // maintenance for ever: an unanswered keyframe request still restarts the media session.
+    #[tokio::test(start_paused = true)]
+    async fn frequent_requests_do_not_postpone_stream_maintenance() {
+        let (sender, _phones) = mpsc::unbounded_channel();
+        PHONE.with(|slot| *slot.borrow_mut() = Some(sender));
+        let hub: Arc<VideoHub> = Default::default();
+        let (media, mut media_closed, _video, _rtcp) =
+            watched_media(&hub, tokio::time::Instant::now()).await;
+        let (mut connection, _phone) = tunnel();
+        connection.media = Some(media);
+        let mut session = Session {
+            transport: Transport::Local("fixture-phone".into()),
+            control: None,
+            connection: Some(connection),
+            stream: Streaming {
+                hub: hub.clone(),
+                ..Default::default()
+            },
+        };
+        let _viewer = hub.subscribe();
+        hub.want_keyframe();
+        // Requests every 100 ms for 5 s, as an agent polling the screen would make.
+        let mut restarted = false;
+        for _ in 0..50 {
+            Box::pin(with_media_deadline(
+                &mut session,
+                tokio::time::sleep(Duration::from_millis(100)),
+            ))
+            .await;
+            if matches!(
+                media_closed.try_recv(),
+                Err(mpsc::error::TryRecvError::Disconnected)
+            ) {
+                restarted = true;
+                break;
+            }
+        }
+        assert!(
+            restarted,
+            "the overdue keyframe request never restarted the media session"
+        );
         PHONE.with(|slot| slot.borrow_mut().take());
     }
 
