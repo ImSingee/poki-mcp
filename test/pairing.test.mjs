@@ -533,3 +533,12 @@ test('unpair_device returns only after the helper has finished shutting down', {
   // Only the reaping by its parent may still be pending, not the helper's own cleanup.
   await waitGone(helperPid, 'unpair_device returned while the helper was still shutting down', 300);
 });
+
+test('the session that leases a phone can reinstall its developer image', { timeout: 60000 }, async t => {
+  const { data, call, until } = await pairingFixture(t, { registered: ['my-phone'] });
+  const lease = JSON.parse((await call('acquire_device', { device: 'my-phone', ttl_seconds: 120 })).content[0].text);
+  assert.ok(lease.lease_id, JSON.stringify(lease));
+  const { job } = data(await call('pair_device', { device: 'my-phone' })).job;
+  const done = await until(job, j => j.terminal);
+  assert.equal(done.state, 'ready', JSON.stringify(done));
+});

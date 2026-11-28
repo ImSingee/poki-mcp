@@ -283,3 +283,18 @@ test('two processes changing the registry at once lose no entry', { timeout: 600
   assert.equal(ids.length, 50, `entries lost: ${50 - ids.length}`);
   await assert.rejects(stat(join(dir, 'remote-devices.json.lock')), { code: 'ENOENT' }, 'the lock is released');
 });
+
+test('a session preparing a phone it leases itself is not held up by its own lease', async t => {
+  const dir = await scratch(t);
+  const target = { id: 'leased-phone', name: 'Phone', remote: join(dir, 'config.json') };
+  const mine = {}, other = {};
+  const coordinator = { leases: new Map([['leased-phone', { owner: mine, expires_at: 'soon' }]]), inputLock: { acquire: async () => () => {} } };
+  const jobs = new PairingJobs({ stateDir: join(dir, 'state'), ensureImage: async () => ({ already: false }) });
+  jobs.coordinator = coordinator;
+  const own = jobs.start({ device: target, owner: mine }).job;
+  await jobs.jobs.get(own.job).done;
+  assert.equal(jobs.get(own.job).state, 'ready');
+  const theirs = jobs.start({ device: target, owner: other }).job;
+  await jobs.jobs.get(theirs.job).done;
+  assert.equal(jobs.get(theirs.job).reason, 'device_busy', 'another session\'s lease still holds it up');
+});

@@ -877,7 +877,7 @@ export class Session {
       }
       // A job's developer-image installation holds the device's input lock (jobs.mjs mount).
       pairingJobs.coordinator ??= this.coordinator;
-      const { job, existing } = pairingJobs.start({ name: args.name, device });
+      const { job, existing } = pairingJobs.start({ name: args.name, device, owner: this });
       const lead = existing ? 'A pairing is already running on this computer; this is its job.' : 'Pairing started.';
       return structured({ job, existing }, `${lead} ${describeJob(job)} Call pairing_status with job ${JSON.stringify(job.job)} about every two seconds: it shows the PIN to type on the iPhone, then reports when the iPhone is ready.`);
     }

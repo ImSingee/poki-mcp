@@ -63,13 +63,16 @@ export class PairingJobs {
   // With `device` (a registered RemotePairing target), only prepares that phone again: a phone that
   // no longer offers displayservice needs its developer disk image, not a new pairing. That runs
   // beside a pairing of another phone, and returns the job already working on the same phone.
-  start({ name, device } = {}) {
+  // owner: the session that asked; its own lease on the device does not hold the job up.
+  start({ name, device, owner } = {}) {
     this.prune();
     const running = device ? this.preparing(device.id) : this.pairing();
     if (running) return { job: view(running), existing: true };
     const id = `pair-${randomBytes(6).toString('hex')}`;
     const job = { id, state: 'starting', host_name: name || defaultHostName(), started_at: new Date(this.now()).toISOString(), started_ms: this.now(), expires_ms: this.now() + this.limitMs, history: [] };
     if (device) Object.assign(job, { kind: 'prepare', device: { id: device.id, name: device.name } });
+    // Not part of view(): a session object stays inside the service.
+    Object.defineProperty(job, 'owner', { value: owner, enumerable: false });
     this.jobs.set(id, job);
     this.transition(job, 'starting');
     job.done = (device ? this.prepare(job, device) : this.run(job)).catch(error => this.fail(job, 'internal', { reason: 'internal_error', error: error.message, action: 'Retry pair_device. If it fails again, check the Poki MCP log.' }));
@@ -183,7 +186,7 @@ export class PairingJobs {
       if (job.state !== 'cancelled') this.fail(job, stage, { reason: 'device_busy', error, action: `Another session is using ${id}. Call pair_device with device ${JSON.stringify(id)} again once it is done.`, paired: true });
     };
     const lease = this.coordinator?.leases?.get(id);
-    if (lease) { busy(`${id} is leased by another session until ${lease.expires_at ?? 'it releases it'}.`); return; }
+    if (lease && (!job.owner || lease.owner !== job.owner)) { busy(`${id} is leased by another session until ${lease.expires_at ?? 'it releases it'}.`); return; }
     try { return (await this.coordinator?.inputLock.acquire([id], { session: `pairing job ${job.id}`, tool: 'pair_device' }, job.controller.signal)) ?? (() => {}); }
     catch (error) { busy(error.message); }
   }
