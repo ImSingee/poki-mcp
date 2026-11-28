@@ -459,6 +459,9 @@ export class DeviceContext {
     if (screenTools.has(name)) throw new Error('The screen tools are for the screen view, not for a batch or run_code.');
     if (sessionTools.has(name)) return this.session.dispatchSession(name, original);
     const schema = stepSchema(name);
+    // A tool acting on this device (a batch step or a run_code call included), not a lookup such as
+    // list_devices: it keeps a watching screen panel going and lets a panel reopen after a disconnect.
+    if (schema && this.id !== undefined) this.coordinator.activeAt.set(this.id, performance.now());
     if (!schema) throw new Error(`Unknown tool: ${name}`);
     const { device: _device, ...rest } = original;
     const args = schema.parse(name === 'start_simulator' && this.id !== undefined ? {} : rest);

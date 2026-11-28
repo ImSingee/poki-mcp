@@ -293,6 +293,8 @@ test('disconnect_device ends the phone\'s screen panels, so their subscription d
   const viewer = await screens.open(phone, { codecs: ['hevc'] });
   const session = new Session(new Coordination());
   session.inventory = async () => [phone];
+  // As the daemon wires them.
+  screens.attach({ unavailable: id => session.coordinator.unavailable.get(id), activity: id => session.coordinator.activeAt.get(id) });
   const route = await session.route('disconnect_device', { device: phone.id });
   const reply = await route.run();
   assert.ok(!reply.isError, JSON.stringify(reply));
@@ -302,6 +304,10 @@ test('disconnect_device ends the phone\'s screen panels, so their subscription d
   assert.equal((await viewer.read({ wait_ms: 0 })).reason, 'device_disconnected');
   const later = await runScreenTool(session, 'screen_read', { stream: viewer.id, wait_ms: 0 }, { screens });
   assert.equal(later.structuredContent?.reason, 'device_disconnected', JSON.stringify(later));
+  // A panel mounted again looks the devices up first: a lookup is not a tool acting on the phone, so
+  // the stream still opens only when the person asks.
+  await (await session.route('list_devices', {})).run();
+  await assert.rejects(screens.open(phone, { codecs: ['hevc'] }), error => error.reason === 'device_disconnected', 'list_devices reopened a phone disconnected on purpose');
   assert.equal(native.subscriptions[0].open, false, 'the subscription stayed, to reconnect the phone');
 });
 
