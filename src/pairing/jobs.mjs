@@ -193,6 +193,9 @@ export class PairingJobs {
       if (job.state !== 'cancelled') this.fail(job, stage, { reason: 'device_busy', error, action: `Another session is using ${id}. Call pair_device with device ${JSON.stringify(id)} again once it is done.`, paired: true });
     };
     const leasedByOther = () => {
+      // unpair_device marks the device unavailable for as long as it runs: nothing may start on it.
+      const removing = this.coordinator?.unavailable?.get(id);
+      if (removing) return removing;
       const lease = this.coordinator?.leases?.get(id);
       return lease && (!job.owner || lease.owner !== job.owner) ? `${id} is leased by another session until ${lease.expires_at ?? 'it releases it'}.` : undefined;
     };

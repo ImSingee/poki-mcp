@@ -504,6 +504,7 @@ writeFileSync(process.argv[4], 'record');
 console.log(JSON.stringify(${JSON.stringify(paired)}));
 `, { mode: 0o755 });
   for (const [label, coordinator] of [
+    ['being unpaired', { leases: new Map(), unavailable: new Map([['wireless-27', 'Wireless iPhone (wireless-27) is being unpaired.']]), inputLock: { acquire: async () => () => {} } }],
     ['input lock taken', { leases: new Map(), inputLock: { acquire: async () => { throw new Error('Device wireless-27 is busy: tap by session other'); } } }],
     ['leased', { leases: new Map([['wireless-27', { expires_at: '2026-11-28T00:00:00Z' }]]), inputLock: { acquire: async () => { throw new Error('the lock must not be tried under a lease'); } } }],
   ]) {
