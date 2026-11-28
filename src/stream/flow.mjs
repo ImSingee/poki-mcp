@@ -49,7 +49,9 @@ export class Flow {
     let discontinuity = false, recover = false;
     if (this.latestOnly) {
       const latest = track.frames.at(-1);
-      if (!latest || latest.seq <= this.sent || this.inFlight.size >= 2 || credit < 1) return { frames: [], discontinuity, recover };
+      // After a resync the latest picture is sent again even if it was sent before: its reply may
+      // be the one that was lost, and a still screen sends no other.
+      if (!latest || (latest.seq <= this.sent && !this.waitingKey) || this.inFlight.size >= 2 || credit < 1) return { frames: [], discontinuity, recover };
       // After a resync the view starts again here, whatever it received last.
       discontinuity = this.sent !== 0 && (latest.seq !== this.sent + 1 || this.waitingKey);
       this.record(latest, now);

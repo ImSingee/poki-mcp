@@ -473,3 +473,18 @@ test('cancelling one of two screens opening during a cold start leaves the other
   await assert.rejects(pending, /cancelled/);
   assert.equal(aborted, true, 'a subscription nobody waits for went on');
 });
+
+test('a resync sends the latest JPEG again when its reply was lost and nothing newer came', () => {
+  const track = new Track('jpeg', { latestOnly: true });
+  const flow = new Flow({ latestOnly: true });
+  track.push({ seq: 1, key: true, data: Buffer.alloc(10), at: 0 });
+  assert.deepEqual(flow.take(track, 0, { credit: 2 }).frames.map(f => f.seq), [1]);
+  // The reply carrying picture 1 never reached the view, and the screen is still.
+  assert.deepEqual(flow.take(track, 10, { credit: 2 }).frames, []);
+  flow.resync();
+  const again = flow.take(track, 20, { credit: 2 });
+  assert.deepEqual(again.frames.map(f => f.seq), [1], 'the only picture was never sent again');
+  assert.equal(again.discontinuity, true);
+  // Once sent again, it is not repeated.
+  assert.deepEqual(flow.take(track, 30, { credit: 2 }).frames, []);
+});
