@@ -317,3 +317,38 @@ test('a lease taken while a DDI job waits for the input lock still stops the job
   assert.equal(installed, false, 'nothing was installed under the other session\'s lease');
   assert.deepEqual(released, ['released'], 'the input lock was given back');
 });
+
+test('a pairing record moves into place only inside the registry transaction', async t => {
+  const dir = await scratch(t);
+  const { completeWirelessPairing } = await import('../src/pairing/wireless.mjs');
+  const staging = join(dir, 'staging.plist');
+  await writeFile(staging, 'record');
+  await mkdir(join(dir, 'state'), { recursive: true });
+  // Another process is in the middle of a registry change.
+  await writeFile(join(dir, 'state/remote-devices.json.lock'), JSON.stringify({ pid: 1, nonce: 'other' }));
+  const saving = completeWirelessPairing({ device: { udid: 'locked-phone', name: 'Phone' }, peer: '192.0.2.5' }, { pairing: staging, stateDir: join(dir, 'state') });
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(await readFile(staging, 'utf8'), 'record', 'the record waits with the registration');
+  await assert.rejects(stat(join(dir, 'state/remote/locked-phone/pairing.plist')), { code: 'ENOENT' });
+  await rm(join(dir, 'state/remote-devices.json.lock'));
+  const saved = await saving;
+  assert.equal(await readFile(join(dir, 'state/remote/locked-phone/pairing.plist'), 'utf8'), 'record');
+  assert.equal(saved.id, 'locked-phone');
+});
+
+test('an accepted pairing is not failed by the pairing deadline while it is being saved', { timeout: 30000 }, async t => {
+  const dir = await scratch(t);
+  const { completeWirelessPairing } = await import('../src/pairing/wireless.mjs');
+  const native = join(dir, 'pair-host');
+  await writeFile(native, `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
+writeFileSync(process.argv[4], 'record');
+console.log(JSON.stringify({ event: 'paired', device: { udid: 'late-phone', name: 'Late' }, peer: '192.0.2.6' }));
+`, { mode: 0o755 });
+  // A zero limit: the fallback deadline fires 5 s after the start, while saving takes 5.5 s.
+  const jobs = new PairingJobs({ stateDir: join(dir, 'state'), native, limitMs: 0, complete: async (...args) => { await new Promise(resolve => setTimeout(resolve, 5500)); return completeWirelessPairing(...args); }, ensureImage: async () => ({ already: true }) });
+  const { job } = jobs.start();
+  await jobs.jobs.get(job.job).done;
+  const done = jobs.get(job.job);
+  assert.equal(done.state, 'ready', JSON.stringify({ state: done.state, reason: done.reason }));
+});

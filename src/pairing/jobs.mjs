@@ -138,7 +138,8 @@ export class PairingJobs {
       helper.events.on('pin', event => this.transition(job, 'pin', { pin: String(event.pin) }));
       helper.events.on('timeout', () => { job.timed_out = true; });
       let result;
-      try { result = await helper.done; }
+      // The iPhone accepted: the pairing deadline no longer applies, however long saving it takes.
+      try { result = await helper.done; clearTimeout(job.timer); }
       catch (error) {
         if (job.state === 'cancelled') return;
         if (job.timed_out) return this.timeout(job);

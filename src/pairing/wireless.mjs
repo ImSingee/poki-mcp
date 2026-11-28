@@ -4,7 +4,7 @@
 // (src/pairing/jobs.mjs) both drive it through this module.
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { mkdir, mkdtemp, chmod, rename, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, chmod, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { hostname } from 'node:os';
 import { stateDir as defaultStateDir, pokiNative } from '../config.mjs';
@@ -76,13 +76,10 @@ export async function completeWirelessPairing(result, { pairing, host, port = de
   const address = host ?? result.peer;
   if (!validHost(address)) throw new Error('Wireless pairing finished without a usable device address. Pass the iPhone\'s .local name, LAN address, or Tailscale address as the host.');
   const directory = remoteDirectory(id, stateDir);
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await chmod(directory, 0o700);
   const saved = join(directory, 'pairing.plist');
-  await rename(pairing, saved);
-  await chmod(saved, 0o600);
   const name = result.device?.name || id;
-  await registerRemote(id, name, address, port, saved, { stateDir });
+  // The record moves into place inside the registry transaction (see registerRemote).
+  await registerRemote(id, name, address, port, saved, { stateDir, record: pairing });
   return { id, name, host: address, port, model: result.device?.model, config_path: join(directory, 'config.json') };
 }
 

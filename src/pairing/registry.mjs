@@ -78,10 +78,17 @@ async function readRegistry(stateDir) {
   }
 }
 
-export function registerRemote(id, name, host, port, pairingFile, { stateDir = defaultStateDir } = {}) {
+// record: a pairing record to move to pairingFile in the same transaction, so a removal running in
+// another process cannot delete it between the move and the registration.
+export function registerRemote(id, name, host, port, pairingFile, { stateDir = defaultStateDir, record } = {}) {
   return serialized(stateDir, async () => {
     const directory = remoteDirectory(id, stateDir);
     await mkdir(directory, { recursive: true, mode: 0o700 });
+    await chmod(directory, 0o700);
+    if (record) {
+      await rename(record, pairingFile);
+      await chmod(pairingFile, 0o600);
+    }
     const configPath = join(directory, 'config.json');
     await writeJson(configPath, { id, host, port, pairing_file: pairingFile });
     const configs = (await readRegistry(stateDir)).filter(d => d.id !== id);
