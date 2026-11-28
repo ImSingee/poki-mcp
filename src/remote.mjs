@@ -1,5 +1,6 @@
-import { spawn, execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { spawn, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+const execFileAsync = promisify(execFile);
 import { once } from 'node:events';
 import { mkdir, readFile, lstat, unlink } from 'node:fs/promises';
 import { createConnection } from 'node:net';
@@ -76,8 +77,8 @@ export async function disconnectRemote(target, { timeoutMs = 5000 } = {}) {
     // socket file. Returning earlier would let a replacement start at the same path and lose its
     // socket to the old helper's cleanup, so wait for the process to end (and end it if it lingers).
     if (pid) {
-      for (let waited = 0; !processGone(pid) && waited < 10000; waited += 50) await new Promise(resolve => setTimeout(resolve, 50));
-      if (!processGone(pid)) await stopProcess(pid);
+      for (let waited = 0; !(await processGone(pid)) && waited < 10000; waited += 50) await new Promise(resolve => setTimeout(resolve, 50));
+      if (!(await processGone(pid))) await stopProcess(pid);
     }
     helperPids.delete(path);
     await unlink(path).catch(() => {});
@@ -93,20 +94,21 @@ export async function disconnectRemote(target, { timeoutMs = 5000 } = {}) {
 // Whether a process has exited. A zombie (exited, not yet reaped: its parent is a PID 1 that does not
 // reap adopted children, such as a container started without --init) has exited too, though
 // kill(pid, 0) still succeeds for it.
-export function processGone(pid) {
+// Asynchronous, because the service polls it: a synchronous ps would stall every other session.
+export async function processGone(pid) {
   try { process.kill(pid, 0); } catch (error) { return error.code === 'ESRCH'; }
   try {
-    if (process.platform === 'linux') return /^\d+ \(.*\) Z/.test(readFileSync(`/proc/${pid}/stat`, 'utf8'));
-    return /^Z/.test(execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).trim());
+    if (process.platform === 'linux') return /^\d+ \(.*\) Z/.test(await readFile(`/proc/${pid}/stat`, 'utf8'));
+    return /^Z/.test((await execFileAsync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' })).stdout.trim());
   } catch { return false; }
 }
 
 // SIGTERM, then SIGKILL after two seconds. Resolves whether the process is gone.
 async function stopProcess(pid) {
-  const gone = () => processGone(pid);
+  const gone = processGone.bind(null, pid);
   try { process.kill(pid, 'SIGTERM'); } catch (error) { return error.code === 'ESRCH'; }
   for (let waited = 0; waited < 4000; waited += 50) {
-    if (gone()) return true;
+    if (await gone()) return true;
     if (waited === 2000) { try { process.kill(pid, 'SIGKILL'); } catch {} }
     await new Promise(resolve => setTimeout(resolve, 50));
   }

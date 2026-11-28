@@ -170,24 +170,26 @@ test('DDI failures name their reason and only the tunnel install suggests USB', 
 // disposition.
 const native = join(root, 'build/poki-native');
 const realHelper = await stat(native).then(info => info.size > 1_000_000, () => false);
-async function realPairHost(t, dir, index = 0) {
+// onEvent runs inside the line handler, so a SIGTERM sent from it reaches the helper with no delay
+// after the line that triggered it.
+async function realPairHost(t, dir, index = 0, onEvent = () => {}) {
   const output = join(dir, `pairing-${index}.plist`);
   const child = spawn(native, ['--pair-host', join(dir, 'host'), output, `poki-stop-${process.pid}-${index}`, '0'], { stdio: ['pipe', 'pipe', 'pipe'] });
   t.after(() => child.kill('SIGKILL'));
   const events = [];
-  createInterface({ input: child.stdout }).on('line', line => events.push(JSON.parse(line)));
+  createInterface({ input: child.stdout }).on('line', line => { const event = JSON.parse(line); events.push(event); onEvent(event, child); });
   const exited = once(child, 'exit');
-  const ended = async () => (await Promise.race([exited, new Promise((_, reject) => setTimeout(() => reject(new Error('did not exit')), 10000))]))[0];
+  const ended = async () => (await Promise.race([exited, new Promise((_, reject) => setTimeout(() => reject(new Error('did not exit')), 10000))]));
   return { child, events, output, ended };
 }
-test('poki-native --pair-host ends with cancelled for a SIGTERM sent as soon as it starts', { skip: !realHelper && 'build/poki-native is not built', timeout: 120000 }, async t => {
+test('poki-native --pair-host ends with cancelled for a SIGTERM sent the moment it starts', { skip: !realHelper && 'build/poki-native is not built', timeout: 180000 }, async t => {
   const dir = await scratch(t);
-  for (let index = 0; index < 10; index++) {
-    const helper = await realPairHost(t, dir, index);
-    await waitFor(() => helper.events.some(e => e.event === 'starting'));
-    helper.child.kill('SIGTERM');
-    const code = await helper.ended();
-    assert.equal(code, 1, `run ${index} died by signal instead of stopping: ${JSON.stringify(helper.events)}`);
+  // A helper that registered its handler lazily dies by the signal in about two of three runs.
+  for (let index = 0; index < 40; index++) {
+    const helper = await realPairHost(t, dir, index, (event, child) => { if (event.event === 'starting') child.kill('SIGTERM'); });
+    const [code, signal] = await helper.ended();
+    assert.equal(signal, null, `run ${index} died by ${signal} instead of stopping: ${JSON.stringify(helper.events)}`);
+    assert.equal(code, 1, JSON.stringify(helper.events));
     assert.ok(helper.events.some(e => e.event === 'cancelled'), JSON.stringify(helper.events));
     await assert.rejects(stat(helper.output), { code: 'ENOENT' });
   }
@@ -198,7 +200,7 @@ test('poki-native --pair-host stops when its standard input closes (the daemon d
   const helper = await realPairHost(t, dir);
   await waitFor(() => helper.events.some(e => e.event === 'advertising'));
   helper.child.stdin.end();
-  assert.equal(await helper.ended(), 1);
+  assert.deepEqual(await helper.ended(), [1, null]);
   assert.ok(helper.events.some(e => e.event === 'cancelled' && e.reason === 'parent_gone'), JSON.stringify(helper.events));
 });
 
@@ -249,8 +251,8 @@ test('a zombie process counts as gone', { skip: process.platform === 'win32' }, 
   try {
     await new Promise(resolve => setTimeout(resolve, 200));
     assert.doesNotThrow(() => process.kill(zombie, 0), 'kill(0) still finds the zombie');
-    assert.equal(processGone(zombie), true);
-    assert.equal(processGone(process.pid), false);
+    assert.equal(await processGone(zombie), true);
+    assert.equal(await processGone(process.pid), false);
   } finally { parent.kill('SIGKILL'); }
 });
 
@@ -351,4 +353,31 @@ console.log(JSON.stringify({ event: 'paired', device: { udid: 'late-phone', name
   await jobs.jobs.get(job.job).done;
   const done = jobs.get(job.job);
   assert.equal(done.state, 'ready', JSON.stringify({ state: done.state, reason: done.reason }));
+});
+
+test('the shared image download stops when every job waiting for it is cancelled', async t => {
+  const dir = await scratch(t);
+  const image = { build: 'cancel', baseUrl: 'https://mirror.invalid/ddi', files: [{ name: 'BuildManifest.plist', sha256: createHash('sha256').update('m').digest('hex') }] };
+  let fetchSignal, fetches = 0;
+  const fetchImpl = (url, { signal }) => { fetches++; fetchSignal = signal; return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true })); };
+  const options = { env: { HOME: join(dir, 'home') }, stateDir: join(dir, 'state'), image, fetchImpl, platform: 'linux' };
+  const [a, b] = [new AbortController(), new AbortController()];
+  const first = resolveImage({ ...options, signal: a.signal }).catch(error => error);
+  const second = resolveImage({ ...options, signal: b.signal }).catch(error => error);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(fetches, 1, 'one download for both');
+  a.abort(new Error('first job cancelled'));
+  assert.equal((await first).stage, 'image');
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(fetchSignal.aborted, false, 'still wanted by the second job');
+  b.abort(new Error('second job cancelled'));
+  assert.equal((await second).stage, 'image');
+  assert.equal(fetchSignal.aborted, true, 'nobody waits any more, so the download stopped');
+  // The next job starts a new download instead of joining the stopped one.
+  const c = new AbortController();
+  const third = resolveImage({ ...options, signal: c.signal }).catch(error => error);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(fetches, 2);
+  c.abort(new Error('done'));
+  await third;
 });

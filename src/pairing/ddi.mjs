@@ -65,6 +65,7 @@ export async function downloadImage(directory, { image = pinnedImage, fetchImpl 
 }
 
 // Downloads in progress, by directory: jobs preparing several phones at once share one download.
+// Each counts its waiters; when the last one is cancelled, the download stops too.
 const downloads = new Map();
 
 // The directory to install from, downloading the pinned image when no local copy exists.
@@ -72,18 +73,33 @@ export async function resolveImage({ env = process.env, stateDir = defaultStateD
   const candidates = candidateDirectories(env, stateDir, image, platform);
   for (const candidate of candidates) if (await hasManifest(candidate.directory)) return candidate;
   const download = candidates.at(-1);
-  if (!downloads.has(download.directory)) {
-    // Not tied to one job's signal: another job may be waiting for the same download.
-    const pending = downloadImage(download.directory, { image, fetchImpl })
+  let shared = downloads.get(download.directory);
+  if (!shared) {
+    const controller = new AbortController();
+    shared = { controller, waiters: 0 };
+    shared.promise = downloadImage(download.directory, { image, fetchImpl, signal: controller.signal })
       .catch(async error => { await rm(join(download.directory, 'BuildManifest.plist'), { force: true }); throw error; })
-      .finally(() => downloads.delete(download.directory));
-    downloads.set(download.directory, pending);
+      .finally(() => { if (downloads.get(download.directory) === shared) downloads.delete(download.directory); });
+    shared.promise.catch(() => {});
+    downloads.set(download.directory, shared);
   }
+  shared.waiters++;
+  let onAbort;
   try {
-    const pending = downloads.get(download.directory);
-    await (signal ? Promise.race([pending, new Promise((_, reject) => { signal.throwIfAborted(); signal.addEventListener('abort', () => reject(signal.reason), { once: true }); })]) : pending);
+    await (signal ? Promise.race([shared.promise, new Promise((_, reject) => {
+      onAbort = () => reject(signal.reason);
+      if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true });
+    })]) : shared.promise);
   } catch (error) {
-    throw Object.assign(new Error(error.message), { stage: 'image' });
+    throw Object.assign(new Error(error?.message ?? String(error)), { stage: 'image' });
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+    shared.waiters--;
+    // Everyone who wanted it left before it finished: stop it, and let the next job start afresh.
+    if (shared.waiters === 0 && downloads.get(download.directory) === shared) {
+      shared.controller.abort(new DOMException('Nobody waits for the developer image any more', 'AbortError'));
+      downloads.delete(download.directory);
+    }
   }
   return download;
 }

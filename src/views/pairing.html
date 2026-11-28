@@ -33,6 +33,8 @@
   p { margin: 0; }
   .muted { color: var(--text-2); }
   .card { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; background: var(--bg); display: grid; gap: 10px; }
+  .jobs { display: grid; gap: 10px; }
+  .jobs:empty { display: none; }
   .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .spacer { flex: 1; }
   button { font: inherit; font-weight: 500; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-2); color: var(--text); padding: 6px 12px; min-height: 32px; cursor: pointer; }
@@ -78,6 +80,7 @@
   <div class="row"><h1>iPhone pairing</h1><span class="spacer"></span><span class="status" id="host"></span></div>
   <div class="alert" id="error" role="alert" hidden></div>
   <section class="card" id="job" hidden></section>
+  <div class="jobs" id="prepares"></div>
   <section>
     <div class="row"><h2>Paired over Wi-Fi</h2><span class="spacer"></span><button id="pair" class="primary" hidden>Pair an iPhone</button></div>
     <ul class="devices" id="devices"><li class="empty">Loading…</li></ul>
@@ -93,7 +96,10 @@ const steps = [
   ['advertising', 'On iPhone'], ['pin', 'Enter PIN'], ['registering', 'Save'], ['mounting_ddi', 'Developer image'], ['ready', 'Ready'],
 ];
 const order = { starting: 0, advertising: 0, pin: 1, paired: 2, registering: 2, mounting_ddi: 3, ready: 4 };
-const state = { job: undefined, devices: [], others: 0, host: undefined, confirm: undefined, unpaired: undefined, loaded: false, canCall: true };
+// pairing: the pairing of a new iPhone (one per computer). prepares: developer-image jobs by device id,
+// which run beside it; each has its own card and is polled on its own, so starting one never hides a
+// pairing's PIN. dismissed: finished preparation cards the person closed.
+const state = { pairing: undefined, prepares: new Map(), dismissed: new Set(), devices: [], others: 0, host: undefined, confirm: undefined, unpaired: undefined, loaded: false, canCall: true };
 let poll, confirmTimer;
 
 const app = new App({ name: 'poki-pairing', version: '1.0.0' }, {}, { autoResize: true });
@@ -125,14 +131,23 @@ function showError(error) {
   box.textContent = error ? (error.message ?? String(error)) : '';
 }
 
+const isPrepare = job => job?.kind === 'prepare';
+// A result from an earlier call must not replace a newer state of the same job.
+const newer = (job, known) => !(known?.job === job.job && known.updated_at && job.updated_at && job.updated_at < known.updated_at);
 function adopt(job) {
   if (!job?.job) return;
-  // A result from an earlier call must not replace a newer state of the same job.
-  if (state.job?.job === job.job && state.job.updated_at && job.updated_at && job.updated_at < state.job.updated_at) return;
-  state.job = job;
+  if (isPrepare(job)) {
+    const id = job.device?.id;
+    if (!id || !newer(job, state.prepares.get(id))) return;
+    state.prepares.set(id, job);
+  } else {
+    if (!newer(job, state.pairing)) return;
+    state.pairing = job;
+  }
   render();
   schedule();
 }
+const liveJobs = () => [state.pairing, ...state.prepares.values()].filter(job => job && !job.terminal);
 
 async function refreshDevices({ adoptJob = true } = {}) {
   try {
@@ -142,14 +157,23 @@ async function refreshDevices({ adoptJob = true } = {}) {
     state.others = devices.length - state.devices.length;
     state.host = listed?.pairing?.host;
     const jobs = listed?.pairing?.jobs ?? [];
-    if (adoptJob) {
-      const current = state.job && jobs.find(job => job.job === state.job.job);
-      const active = jobs.find(job => !job.terminal);
-      if (current) state.job = current;
-      else if (active) state.job = active;
-      else if (state.job && !state.job.terminal) state.job = undefined; // expired or the service restarted
-      else if (!state.job && jobs.length) state.job = jobs.at(-1);
+    const pairings = jobs.filter(job => !isPrepare(job));
+    // The pairing that is running wins over the one this view knows, so a pairing started elsewhere
+    // shows its PIN here too; a known one the service forgot (expired, restarted) is dropped.
+    const current = state.pairing && pairings.find(job => job.job === state.pairing.job);
+    const active = pairings.find(job => !job.terminal);
+    if (active && active.job !== state.pairing?.job) state.pairing = active;
+    else if (current) state.pairing = current;
+    else if (state.pairing && !state.pairing.terminal) state.pairing = undefined;
+    else if (adoptJob && !state.pairing && pairings.length) state.pairing = pairings.at(-1);
+    // Each device's latest preparation, as the service has it.
+    const prepares = new Map();
+    for (const job of jobs.filter(isPrepare)) {
+      const known = prepares.get(job.device?.id);
+      if (!known || !job.terminal || known.terminal) prepares.set(job.device?.id, job);
     }
+    for (const [id, job] of state.prepares) if (!prepares.has(id) && !job.terminal) state.prepares.delete(id);
+    for (const [id, job] of prepares) if (id) state.prepares.set(id, job);
     state.loaded = true;
     showError();
   } catch (error) {
@@ -161,21 +185,27 @@ async function refreshDevices({ adoptJob = true } = {}) {
   schedule();
 }
 
+// One timer polls every job still running: the pairing and each preparation.
 function schedule() {
   clearTimeout(poll);
-  if (!state.job || state.job.terminal || !state.canCall || document.hidden) return;
+  if (!liveJobs().length || !state.canCall || document.hidden) return;
   poll = setTimeout(async () => {
-    try {
-      const job = await call('pairing_status', { job: state.job.job });
-      const ended = job?.terminal;
-      adopt(job);
-      showError();
-      if (ended) await refreshDevices({ adoptJob: false });
-    } catch (error) {
-      if (/No pairing job/.test(error.message)) { state.job = undefined; await refreshDevices(); return; }
-      showError(error);
-      schedule();
-    }
+    let ended = false, lost = false;
+    await Promise.all(liveJobs().map(async known => {
+      try {
+        const job = await call('pairing_status', { job: known.job });
+        if (job?.terminal) ended = true;
+        adopt(job);
+        showError();
+      } catch (error) {
+        if (!/No pairing job/.test(error.message)) { showError(error); return; }
+        lost = true;
+        if (state.pairing?.job === known.job) state.pairing = undefined;
+        else state.prepares.delete(known.device?.id);
+      }
+    }));
+    if (ended || lost) await refreshDevices({ adoptJob: !lost });
+    else schedule();
   }, 1500);
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) schedule(); });
@@ -189,7 +219,7 @@ async function act(button, work) {
 
 function renderJob() {
   const section = $('job');
-  const job = state.job;
+  const job = state.pairing;
   section.hidden = !job;
   if (!job) return;
   const index = order[job.state];
@@ -199,7 +229,10 @@ function renderJob() {
     return `<li class="${cls}"${i === index ? ' aria-current="step"' : ''}><span>${label}</span></li>`;
   }).join('')}</ol>`;
   const live = !job.terminal;
-  const retryImage = job.state === 'failed' && job.stage === 'ddi' && job.paired && job.device?.id;
+  // Once a preparation for that iPhone started after this pairing failed, its own card follows it.
+  const imageFailed = job.state === 'failed' && job.stage === 'ddi' && job.paired && job.device?.id;
+  const retried = imageFailed && state.prepares.get(job.device.id)?.started_at >= job.updated_at;
+  const retryImage = imageFailed && !retried;
   const title = { starting: 'Starting…', advertising: 'Waiting for the iPhone', pin: 'Enter this PIN on the iPhone', paired: 'Paired', registering: 'Saving the pairing', mounting_ddi: 'Preparing developer services', ready: 'Ready', failed: 'Pairing failed', cancelled: 'Pairing cancelled' }[job.state] ?? job.state;
   const dot = job.state === 'ready' ? 'ok' : job.state === 'failed' ? 'bad' : job.state === 'cancelled' ? '' : 'live';
   const pin = job.state === 'pin' && job.pin ? `<div class="pin" role="img" aria-label="PIN ${escape(job.pin.split('').join(' '))}">${job.pin.split('').map(d => `<span>${escape(d)}</span>`).join('')}</div>` : '';
@@ -210,12 +243,34 @@ function renderJob() {
     <div class="row"><span class="dot ${dot}" aria-hidden="true"></span><strong>${escape(title)}</strong><span class="spacer"></span>
       ${live ? '<button id="cancel">Cancel</button>' : retryImage ? '<button id="retry" class="primary">Retry developer image</button>' : '<button id="again">Pair again</button>'}</div>
     ${stepper}${pin}
-    <p class="instruction">${escape(retryImage ? `Try installing the developer image again over Wi-Fi. If it fails again: ${job.instruction ?? ''}` : job.instruction ?? '')}</p>${detail}${device}${note}`;
+    <p class="instruction">${escape(retried ? 'The developer image is being installed again for this iPhone; see its card below.' : retryImage ? `Try installing the developer image again over Wi-Fi. If it fails again: ${job.instruction ?? ''}` : job.instruction ?? '')}</p>${detail}${device}${note}`;
   const cancel = section.querySelector('#cancel'), again = section.querySelector('#again'), retry = section.querySelector('#retry');
   if (cancel) { cancel.hidden = !state.canCall; cancel.onclick = () => act(cancel, async () => { adopt(await call('pairing_cancel', { job: job.job })); await refreshDevices({ adoptJob: false }); }); }
   if (again) { again.hidden = !state.canCall; again.onclick = () => act(again, () => startPairing()); }
   // The iPhone is paired; only its developer image failed. Installing it again needs no new PIN.
   if (retry) { retry.hidden = !state.canCall; retry.onclick = () => act(retry, () => startPairing({ device: job.device.id })); }
+}
+
+// A card per developer-image job: its device, its progress, and what to do when it fails.
+function renderPrepares() {
+  const list = $('prepares');
+  const cards = [...state.prepares.values()].filter(job => !state.dismissed.has(job.job));
+  list.innerHTML = cards.map(job => {
+    const name = job.device?.name ?? job.device?.id;
+    const title = { starting: 'Starting…', mounting_ddi: 'Preparing developer services', ready: 'Ready', failed: 'Developer image failed', cancelled: 'Developer image cancelled' }[job.state] ?? job.state;
+    const dot = job.state === 'ready' ? 'ok' : job.state === 'failed' ? 'bad' : job.state === 'cancelled' ? '' : 'live';
+    const button = !job.terminal ? `<button data-cancel-prepare="${escape(job.job)}">Cancel</button>`
+      : job.state === 'failed' ? `<button class="primary" data-retry-prepare="${escape(job.device?.id)}">Retry developer image</button>`
+      : `<button data-dismiss="${escape(job.job)}">Done</button>`;
+    const text = job.state === 'failed' ? `Try installing it again over Wi-Fi. If it fails again: ${job.instruction ?? ''}` : job.instruction ?? '';
+    return `<section class="card" data-prepare="${escape(job.device?.id)}" aria-label="Developer image for ${escape(name)}">
+      <div class="row"><span class="dot ${dot}" aria-hidden="true"></span><strong>${escape(title)}</strong><span class="spacer"></span>${state.canCall ? button : ''}</div>
+      <p class="muted">${escape(name)} · <code>${escape(job.device?.id)}</code></p>
+      <p class="instruction">${escape(text)}</p>${job.state === 'failed' && job.error ? `<p class="note">${escape(job.error)}</p>` : ''}${job.note ? `<p class="note">${escape(job.note)}</p>` : ''}</section>`;
+  }).join('');
+  for (const button of list.querySelectorAll('[data-cancel-prepare]')) button.onclick = () => act(button, async () => { adopt(await call('pairing_cancel', { job: button.dataset.cancelPrepare })); await refreshDevices({ adoptJob: false }); });
+  for (const button of list.querySelectorAll('[data-retry-prepare]')) button.onclick = () => act(button, () => startPairing({ device: button.dataset.retryPrepare }));
+  for (const button of list.querySelectorAll('[data-dismiss]')) button.onclick = () => { state.dismissed.add(button.dataset.dismiss); render(); };
 }
 
 function deviceStatus(device) {
@@ -240,7 +295,7 @@ function renderDevices() {
         <span class="name">${escape(device.name)}</span>
         <span class="muted">${escape([device.model, device.osVersion && `iOS ${device.osVersion}`].filter(Boolean).join(' · '))}</span>
         <span class="status">${escape(status)}</span><code>${escape(device.id)}</code></div>
-        ${!confirming && device.display_service === false && !device.pairing_job ? `<button data-image="${escape(device.id)}">Install developer image</button>` : ''}
+        ${!confirming && device.display_service === false && !device.pairing_job && !(state.prepares.get(device.id) && !state.prepares.get(device.id).terminal) ? `<button data-image="${escape(device.id)}">Install developer image</button>` : ''}
         ${confirming ? `<button data-keep="${escape(device.id)}">Keep</button><button class="danger confirm" data-unpair="${escape(device.id)}">Remove pairing</button>` : `<button class="danger" data-ask="${escape(device.id)}">Unpair</button>`}</li>`;
     }).join('') + (state.unpaired ? `<li class="note">${escape(state.unpaired)}</li>` : '');
   }
@@ -266,12 +321,13 @@ function render() {
   const host = $('host');
   // The job's own state is newer than the last list_devices: this computer advertises only while a
   // job waits for the iPhone or its PIN.
-  const advertising = state.job ? ['advertising', 'pin'].includes(state.job.state) : state.host?.advertising;
+  const advertising = state.pairing ? ['advertising', 'pin'].includes(state.pairing.state) : state.host?.advertising;
   host.innerHTML = state.host ? `<span class="dot ${advertising ? 'live' : ''}" aria-hidden="true"></span>${escape(advertising ? `Advertising as ${state.host.name}` : state.host.name)}` : '';
   renderJob();
+  renderPrepares();
   renderDevices();
   const pair = $('pair');
-  pair.hidden = !state.loaded || !state.canCall || Boolean(state.job && !state.job.terminal);
+  pair.hidden = !state.loaded || !state.canCall || Boolean(state.pairing && !state.pairing.terminal);
 }
 
 // With device: install that paired iPhone's developer image again, without a new pairing.

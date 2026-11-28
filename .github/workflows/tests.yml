@@ -34,7 +34,13 @@ jobs:
       # The native bridge's own tests: pair-host cancellation and mDNS withdrawal, the developer
       # disk image ops, the helper's request handling. Same target directory as the build above.
       - name: Rust tests
-        run: cargo test --locked --release --manifest-path native/bridge/Cargo.toml --target-dir build/native-target
+        # The flags bin/build-native builds with, so this reuses that build instead of compiling
+        # every crate again.
+        run: |
+          export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$HOME=/builder --remap-path-prefix=/Volumes=/build --remap-path-prefix=$PWD=/poki"
+          export CFLAGS="${CFLAGS:-} -ffile-prefix-map=$HOME=/builder -ffile-prefix-map=/Volumes=/build"
+          export CXXFLAGS="${CXXFLAGS:-} -ffile-prefix-map=$HOME=/builder -ffile-prefix-map=/Volumes=/build"
+          cargo test --locked --release --manifest-path native/bridge/Cargo.toml --target-dir build/native-target
 
       - name: Install Poki Agent dependencies
         run: npm ci --prefix agent

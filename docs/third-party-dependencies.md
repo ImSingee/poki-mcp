@@ -319,7 +319,8 @@ cargo tree --locked --offline --edges normal,build --target aarch64-apple-darwin
 | `uuid` | 1.29.0 | Apache-2.0 OR MIT | [github.com/uuid-rs/uuid](https://github.com/uuid-rs/uuid) | native bridge |
 | `version_check` | 0.9.5 | MIT/Apache-2.0 | [github.com/SergioBenitez/version_check](https://github.com/SergioBenitez/version_check) | idevice tools, native bridge |
 | `web-time` | 1.1.0 | MIT OR Apache-2.0 | [github.com/daxpedda/web-time](https://github.com/daxpedda/web-time) | idevice tools, native bridge |
-| `webpki-roots` | 1.0.9 | CDLA-Permissive-2.0 | [github.com/rustls/webpki-roots](https://github.com/rustls/webpki-roots) | idevice tools, native bridge |
+| `webpki-roots` | 1.0.9 | CDLA-Permissive-2.0 | [github.com/rustls/webpki-roots](https://github.com/rustls/webpki-roots) | idevice tools |
+| `webpki-roots` | 1.0.12 | CDLA-Permissive-2.0 | [github.com/rustls/webpki-roots](https://github.com/rustls/webpki-roots) | native bridge |
 | `x25519-dalek` | 2.0.1 | BSD-3-Clause | [github.com/dalek-cryptography/curve25519-dalek](https://github.com/dalek-cryptography/curve25519-dalek) | idevice tools |
 | `x509-cert` | 0.2.5 | Apache-2.0 OR MIT | [github.com/RustCrypto/formats](https://github.com/RustCrypto/formats) | idevice tools |
 | `zerocopy` | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | [github.com/google/zerocopy](https://github.com/google/zerocopy) | idevice tools, native bridge |

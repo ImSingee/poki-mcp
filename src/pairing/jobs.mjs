@@ -30,7 +30,7 @@ const instructions = {
   registering: () => 'Saving the pairing on this computer.',
   mounting_ddi: () => 'Preparing developer services: installing the developer disk image over Wi-Fi. This can take a few minutes; keep the iPhone unlocked and nearby.',
   ready: job => `Paired and ready. Pass device: ${JSON.stringify(job.device?.id)} to the device tools.`,
-  cancelled: () => 'Pairing was cancelled. On the iPhone, the "Pair with" entry disappears; nothing was saved.',
+  cancelled: job => job.paired_device || job.device ? 'Pairing was cancelled.' : 'Pairing was cancelled. On the iPhone, the "Pair with" entry disappears; nothing was saved.',
 };
 
 const deviceOf = job => job.device?.id ?? job.paired_device?.udid;
@@ -98,8 +98,8 @@ export class PairingJobs {
     if (isTerminal(job.state)) return view(job);
     const child = job.child;
     const saving = ['paired', 'registering'].includes(job.state);
-    const note = job.device ? 'The iPhone was already paired and stays paired; developer-service preparation stopped. Use unpair_device to remove it.'
-      : saving ? 'The iPhone had already accepted the pairing; it is being removed from this computer again.' : undefined;
+    // A cancel after the iPhone accepted gets its note once the registration settles (cancelledNote).
+    const note = job.device ? 'The iPhone was already paired and stays paired; developer-service preparation stopped. Use unpair_device to remove it.' : undefined;
     this.transition(job, 'cancelled', note ? { note } : {});
     if (child && child.exitCode === null && child.signalCode === null) await stopChild(child);
     // The registration in flight finishes first, then run() undoes it (and corrects the note). Not cut
@@ -157,21 +157,31 @@ export class PairingJobs {
       // Replacing a registered phone's helper and configuration disturbs whatever other sessions are
       // doing with it: a lease refuses it, and the device's input lock is held from here through the
       // developer image, so a call in progress finishes first.
-      let held;
+      let held, claimed;
       if (previous) {
         held = await this.lockDevice(job, previous.id, 'registering');
         if (!held) return;
-        await this.disconnect(previous).catch(() => {});
+        // While its helper and configuration are replaced, no session may reach the phone: a call
+        // meanwhile would start a helper from the old configuration, whose socket the old helper's
+        // shutdown then removes, leaving that helper running with nothing able to reach it.
+        claimed = `${previous.id} is being paired again by pairing job ${job.id}. Retry once pairing_status reports it past registering.`;
+        this.coordinator?.unavailable?.set(previous.id, claimed);
       }
       let device;
-      try { device = await this.complete(result, { pairing: staging.pairing, stateDir: this.stateDir }); }
-      catch (error) { held?.(); return this.fail(job, 'registering', { reason: 'registration_failed', error: error.message, action: 'Pass the iPhone\'s .local name or LAN address: run node bin/prepare-remote.mjs --wireless HOST on this computer.' }); }
-      if (job.state === 'cancelled') {
-        held?.();
-        if (previous) job.note = 'The iPhone had already accepted the pairing. It was registered on this computer before this job, so it stays registered with the new pairing. Use unpair_device to remove it.';
-        else { await unregisterRemote(device.id, { stateDir: this.stateDir }).catch(() => {}); job.note = 'The iPhone had already accepted the pairing; it was removed from this computer again.'; }
-        this.inventoryChanged(device.id);
-        return;
+      try {
+        if (previous) await this.disconnect(previous).catch(() => {});
+        try { device = await this.complete(result, { pairing: staging.pairing, stateDir: this.stateDir }); }
+        catch (error) { held?.(); return this.fail(job, 'registering', { reason: 'registration_failed', error: error.message, action: 'Pass the iPhone\'s .local name or LAN address: run node bin/prepare-remote.mjs --wireless HOST on this computer.' }); }
+        job.saved_new = true;
+        if (job.state === 'cancelled') {
+          held?.();
+          // A phone registered before this job keeps the pairing it now has; a new one is removed again.
+          if (!previous) { await unregisterRemote(device.id, { stateDir: this.stateDir }).catch(() => {}); job.saved_new = false; job.rolled_back = true; }
+          this.inventoryChanged(device.id);
+          return;
+        }
+      } finally {
+        if (claimed && this.coordinator?.unavailable?.get(previous.id) === claimed) this.coordinator.unavailable.delete(previous.id);
       }
       job.device = { id: device.id, name: device.name, host: device.host, model: device.model };
       this.inventoryChanged(device.id);
@@ -181,7 +191,16 @@ export class PairingJobs {
     } finally {
       clearTimeout(job.timer);
       await discardStaging(staging.directory).catch(() => {});
+      if (job.state === 'cancelled' && job.paired_device) await this.cancelledNote(job);
     }
+  }
+  // What a cancel after the iPhone accepted left on this computer, from the registry itself.
+  async cancelledNote(job) {
+    const id = job.paired_device.udid;
+    const registered = (await registeredTargets({ stateDir: this.stateDir }).catch(() => [])).some(d => d.id === id);
+    job.note = !registered
+      ? `The iPhone had already accepted the pairing; ${job.rolled_back ? 'it was removed from this computer again' : 'nothing of it was saved on this computer'}.`
+      : `The iPhone had already accepted the pairing. ${id} stays registered on this computer with its ${job.saved_new ? 'new' : 'earlier'} pairing; use unpair_device to remove it.`;
   }
   async prepare(job, target) {
     job.controller = new AbortController();
@@ -271,7 +290,7 @@ export function describe(job) {
   switch (job.state) {
     case 'pin': return `PIN: ${job.pin}. Type it on the iPhone in Settings › Privacy & Security › Developer Mode. Job ${job.job}.`;
     case 'failed': return `Pairing failed${where}: ${job.error ?? job.reason}. ${job.action ?? ''} Job ${job.job}.`.replace(/\s+/g, ' ').trim();
-    default: return `${job.instruction} Job ${job.job}, state ${job.state}${where}.`;
+    default: return `${job.instruction} ${job.note ? `${job.note} ` : ''}Job ${job.job}, state ${job.state}${where}.`;
   }
 }
 

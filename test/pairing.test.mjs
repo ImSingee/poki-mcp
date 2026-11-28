@@ -335,7 +335,10 @@ test('calls to an iPhone whose DDI is being installed fail at once and say why',
   assert.match(read.content[0].text, /getting its developer disk image from pairing job/);
   assert.ok(performance.now() - started < 3000, 'it did not wait for the busy helper');
   const startedList = performance.now();
-  const listed = data(await call('list_devices')).devices.find(d => d.id === 'busy-phone');
+  // Bounded: a list_devices that asks the busy helper would otherwise only show as a test timeout.
+  const listing = await Promise.race([call('list_devices'), new Promise(resolve => setTimeout(() => resolve('timeout'), 5000))]);
+  assert.notEqual(listing, 'timeout', 'list_devices waited for the helper that is installing the image');
+  const listed = data(listing).devices.find(d => d.id === 'busy-phone');
   assert.equal(listed.pairing_job, job);
   assert.match(listed.readiness, /being prepared by pairing job/);
   assert.ok(performance.now() - startedList < 3000, 'list_devices did not ask the busy helper');
@@ -601,4 +604,69 @@ console.log(JSON.stringify(${JSON.stringify(paired)}));
   setTimeout(finishRegistration, 100);
   await Promise.all([cancelling, unpairing]);
   assert.deepEqual(JSON.parse(await readFile(join(stateDir, 'remote-devices.json'), 'utf8')), [], 'the pairing was not registered again');
+});
+
+test('while a registered iPhone is paired again, other calls are refused and no stray helper is left behind', { timeout: 60000 }, async t => {
+  // The old helper takes 1.5 s to shut down, the window in which another call used to start a helper
+  // whose socket the old helper's cleanup then deleted.
+  const { f, data, call, until, release } = await pairingFixture(t, { remote: { exitDelayMs: 1500 } });
+  const first = data(await call('pair_device')).job.job;
+  await release('accept');
+  await until(first, j => j.terminal);
+  const other = await f.connect();
+  const second = data(await call('pair_device')).job.job;
+  await until(second, j => j.state === 'pin');
+  await release('accept');
+  await until(second, j => j.state === 'registering');
+  const read = await call('take_screenshot', { device: 'wireless-27' }, other);
+  assert.equal(read.isError, true, 'the phone is out of reach while its pairing is replaced');
+  assert.match(read.content[0].text, /being paired again/);
+  assert.equal((await until(second, j => j.terminal)).state, 'ready');
+  await new Promise(resolve => setTimeout(resolve, 500));
+  const alive = (await f.events()).filter(e => e.helper === '--remote-server').map(e => e.pid).filter(pid => { try { process.kill(pid, 0); return true; } catch { return false; } });
+  assert.equal(alive.length, 1, `helpers still running: ${alive.join(', ')}`);
+});
+
+test('a cancelled re-pairing that could not take the device says the phone keeps its earlier pairing', { timeout: 30000 }, async t => {
+  const { PairingJobs, describe } = await import('../src/pairing/jobs.mjs');
+  const { registerRemote } = await import('../src/pairing/registry.mjs');
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const dir = await mkdtemp(join(tmpdir(), 'poki-cancel-note-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const stateDir = join(dir, 'state');
+  await registerRemote('wireless-27', 'Wireless iPhone', '192.0.2.27', 49152, join(dir, 'old.plist'), { stateDir });
+  const native = join(dir, 'pair-host');
+  await writeFile(native, `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
+writeFileSync(process.argv[4], 'record');
+console.log(JSON.stringify(${JSON.stringify(paired)}));
+`, { mode: 0o755 });
+  let waiting;
+  // Another session's input holds the phone: the job waits for the lock until it is cancelled.
+  const inputLock = { acquire: (keys, holder, signal) => new Promise((_, reject) => { waiting = true; signal.addEventListener('abort', () => reject(signal.reason), { once: true }); }) };
+  const jobs = new PairingJobs({ stateDir, native, ensureImage: async () => ({ already: true }) });
+  jobs.coordinator = { leases: new Map(), inputLock };
+  const { job } = jobs.start();
+  while (!waiting) await new Promise(resolve => setTimeout(resolve, 10));
+  const cancelled = await jobs.cancel(job.job);
+  assert.equal(cancelled.state, 'cancelled');
+  assert.match(cancelled.note, /stays registered on this computer with its earlier pairing/);
+  assert.doesNotMatch(cancelled.instruction, /nothing was saved/);
+  assert.match(describe(cancelled), /earlier pairing/, 'the text for clients without MCP Apps carries the note');
+  assert.deepEqual(JSON.parse(await readFile(join(stateDir, 'remote-devices.json'), 'utf8')).map(d => d.id), ['wireless-27']);
+});
+
+test('the service\'s pairing jobs wait for the device\'s input lock that a running script holds', { timeout: 60000 }, async t => {
+  const { f, data, call, until } = await pairingFixture(t, { registered: ['scripted-phone'], env: { POKI_INPUT_LOCK_WAIT_MS: '500' } });
+  const other = await f.connect();
+  // run_code holds its devices' input lock for the whole script.
+  const script = call('run_code', { devices: ['scripted-phone'], code: "await tools.wait({ device: 'scripted-phone', seconds: 3 }); return 1;" }, other);
+  await new Promise(resolve => setTimeout(resolve, 700));
+  const { job } = data(await call('pair_device', { device: 'scripted-phone' })).job;
+  const failed = await until(job, j => j.terminal);
+  assert.equal(failed.reason, 'device_busy', JSON.stringify(failed));
+  assert.equal((await f.events()).filter(e => e.remote === 'install_ddi').length, 0, 'nothing was installed under the script');
+  const finished = await script;
+  assert.ok(!finished.isError, JSON.stringify(finished));
 });

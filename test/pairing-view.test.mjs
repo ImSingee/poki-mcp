@@ -49,12 +49,25 @@ function backend() {
       { id: 'usb-1', name: 'Cable iPhone', kind: 'physical', connection: 'USB' },
     ],
     job: undefined,
+    // Developer-image jobs by device id; each is its own job beside the pairing.
+    prepares: new Map(),
   };
+  const prepareView = id => {
+    const p = state.prepares.get(id);
+    const terminal = ['ready', 'failed', 'cancelled'].includes(p.state);
+    const device = state.devices.find(d => d.id === id) ?? { id, name: id === 'wireless-2' ? 'New iPhone' : id };
+    return { job: `prep-${id}`, kind: 'prepare', state: p.state, host_name: 'Poki Lab', terminal, device: { id, name: device.name }, started_at: p.started_at, updated_at: new Date().toISOString(),
+      ...(p.state === 'failed' ? { stage: 'ddi', reason: 'ddi_tunnel_install_failed', error: 'cryptexd refused', action: 'Connect the iPhone with a USB cable once.', paired: true } : {}),
+      instruction: { mounting_ddi: 'Preparing developer services.', ready: 'Paired and ready.', failed: 'Connect the iPhone with a USB cable once.', cancelled: 'Pairing was cancelled.' }[p.state] };
+  };
+  // Like the service, a job's updated_at moves only when its state changes.
+  let stamped;
+  const stampFor = st => { if (stamped?.state !== st) stamped = { state: st, at: new Date().toISOString() }; return stamped.at; };
   const jobView = () => {
     const s = state.jobState;
     const terminal = ['ready', 'failed', 'cancelled'].includes(s);
     return {
-      job: 'pair-1', kind: 'pair', state: s, host_name: 'Poki Lab', terminal, updated_at: new Date().toISOString(),
+      job: 'pair-1', kind: 'pair', state: s, host_name: 'Poki Lab', terminal, updated_at: stampFor(s),
       ...(s === 'pin' ? { pin: '482916' } : {}),
       ...(['mounting_ddi', 'ready', 'failed'].includes(s) ? { device: { id: 'wireless-2', name: 'New iPhone', host: '192.0.2.2', model: 'iPhone17,1' } } : {}),
       ...(s === 'failed' ? { stage: 'ddi', reason: 'ddi_tunnel_install_failed', error: 'cryptexd refused', action: 'Connect the iPhone with a USB cable once.', paired: true } : {}),
@@ -64,14 +77,20 @@ function backend() {
   const ok = value => ({ content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value });
   const handle = async (name, args) => {
     calls.push({ name, args, at: Date.now() });
-    if (name === 'list_devices') return ok({ devices: [...state.devices, ...(state.jobState === 'ready' && state.job ? [{ id: 'wireless-2', name: 'New iPhone', connection: 'RemotePairing', readiness: 'remote services connected', display_service: true }] : [])], pairing: { host: { name: 'Poki Lab', advertising: Boolean(state.job) && ['advertising', 'pin'].includes(state.jobState) }, jobs: state.job ? [jobView()] : [] } });
-    if (name === 'pair_device') { state.job = true; state.jobState = args.device ? 'mounting_ddi' : 'advertising'; return ok({ job: jobView(), existing: false }); }
+    if (name === 'list_devices') {
+      for (const [id, p] of state.prepares) { const device = state.devices.find(d => d.id === id); if (device) device.display_service = p.state === 'ready' ? true : device.display_service; }
+      return ok({ devices: [...state.devices, ...(['ready', 'failed'].includes(state.jobState) && state.job ? [{ id: 'wireless-2', name: 'New iPhone', connection: 'RemotePairing', readiness: 'remote services connected', display_service: state.prepares.get('wireless-2')?.state === 'ready' || state.jobState === 'ready' }] : [])], pairing: { host: { name: 'Poki Lab', advertising: Boolean(state.job) && ['advertising', 'pin'].includes(state.jobState) }, jobs: [...(state.job ? [jobView()] : []), ...[...state.prepares.keys()].map(prepareView)] } });
+    }
+    if (name === 'pair_device' && args.device) { state.prepares.set(args.device, { state: 'mounting_ddi', started_at: new Date().toISOString() }); return ok({ job: prepareView(args.device), existing: false }); }
+    if (name === 'pair_device') { state.job = true; state.jobState = 'advertising'; return ok({ job: jobView(), existing: false }); }
+    if (name === 'pairing_status' && args.job?.startsWith('prep-')) return ok(prepareView(args.job.slice(5)));
     if (name === 'pairing_status') return state.job ? ok(jobView()) : { isError: true, content: [{ type: 'text', text: 'No pairing job "pair-1".' }] };
+    if (name === 'pairing_cancel' && args.job?.startsWith('prep-')) { state.prepares.get(args.job.slice(5)).state = 'cancelled'; return ok(prepareView(args.job.slice(5))); }
     if (name === 'pairing_cancel') { state.jobState = 'cancelled'; return ok(jobView()); }
     if (name === 'unpair_device') { state.devices = state.devices.filter(d => d.id !== args.device); return ok({ unpaired: true, device: { id: args.device, name: 'Lab iPhone' }, phone_cleanup: 'Remove this computer on the iPhone too.' }); }
     return { isError: true, content: [{ type: 'text', text: `unexpected ${name}` }] };
   };
-  return { calls, state, handle, jobView, count: name => calls.filter(c => c.name === name).length };
+  return { calls, state, handle, jobView, count: name => calls.filter(c => c.name === name).length, polled: job => calls.filter(c => c.name === 'pairing_status' && c.args.job === job).length };
 }
 
 // One browser for the file: closing a headless Chromium can take seconds on some hosts.
@@ -209,11 +228,39 @@ test('a failed developer image offers a retry that needs no new PIN, and a phone
   // The USB advice is the fallback after a retry, not an alternative shown beside it.
   await view.getByText('Try installing the developer image again over Wi-Fi. If it fails again: Connect the iPhone with a USB cable once.').waitFor();
   await view.getByRole('button', { name: 'Retry developer image' }).click();
-  await view.getByText('Preparing developer services').first().waitFor();
+  const retry = view.locator('[data-prepare="wireless-2"]');
+  await retry.getByText('Preparing developer services', { exact: true }).waitFor();
   assert.deepEqual(server.calls.find(c => c.name === 'pair_device').args, { device: 'wireless-2' });
-  server.state.jobState = 'ready';
+  await view.getByText('The developer image is being installed again for this iPhone; see its card below.').waitFor();
+  server.state.prepares.get('wireless-2').state = 'ready';
+  await retry.getByText('Ready', { exact: true }).waitFor();
   await view.getByRole('button', { name: 'Pair again' }).waitFor();
   await view.getByRole('button', { name: 'Install developer image' }).click();
   await until(() => server.calls.filter(c => c.name === 'pair_device').length === 2);
   assert.deepEqual(server.calls.filter(c => c.name === 'pair_device')[1].args, { device: 'wireless-1' });
+});
+
+test('preparing another phone keeps a running pairing and its PIN on screen, and both are followed', { skip, timeout: 60000 }, async t => {
+  const { view, server, mount } = await open(t);
+  server.state.devices[0].display_service = false;
+  server.state.job = true;
+  server.state.jobState = 'pin';
+  await mount({ content: [], structuredContent: { job: server.jobView(), existing: false } });
+  const pin = view.getByRole('img', { name: 'PIN 4 8 2 9 1 6' });
+  await pin.waitFor();
+  await view.getByRole('button', { name: 'Install developer image' }).click();
+  const prepare = view.locator('[data-prepare="wireless-1"]');
+  await prepare.getByText('Preparing developer services', { exact: true }).waitFor();
+  assert.equal(await pin.isVisible(), true, 'the PIN stays while the other phone is prepared');
+  const [pairingPolls, preparePolls] = [server.polled('pair-1'), server.polled('prep-wireless-1')];
+  await until(() => server.polled('pair-1') >= pairingPolls + 2 && server.polled('prep-wireless-1') >= preparePolls + 2);
+  server.state.prepares.get('wireless-1').state = 'ready';
+  await prepare.getByText('Ready', { exact: true }).waitFor();
+  assert.equal(await pin.isVisible(), true);
+  server.state.jobState = 'mounting_ddi';
+  await view.locator('#job').getByText('Preparing developer services', { exact: true }).waitFor();
+  server.state.jobState = 'ready';
+  await view.locator('#job').getByText('Ready', { exact: true }).waitFor();
+  await prepare.getByRole('button', { name: 'Done' }).click();
+  assert.equal(await prepare.count(), 0, 'a finished preparation card can be closed');
 });
